@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-30
 depends-on: [01]
 built-on: cc0c09ea9127
@@ -68,3 +68,18 @@ the tests themselves (fakes and recorded fixtures), not by the workflow.
 
 The YAML parses, contains no secret reference, and its gate steps match the guideline's commands;
 the local gate is green.
+
+## Review findings
+
+- security (🔵) — `actions/checkout` kept `persist-credentials: true` — `.github/workflows/ci.yml:16`. Fixed: `persist-credentials: false`. Verified: pyyaml 6.0.3 parses the file (`yaml-ok`).
+- ci-hygiene (🔵) — no branch filter, `concurrency` group or `timeout-minutes` — `.github/workflows/ci.yml:3`. Not applied (YAGNI).
+- unguarded (🔵) — nothing catches SHA pins reverting to tags or going stale — `.github/workflows/ci.yml:16,19`. Held by review.
+
+## Probe results
+
+- Latest releases and their commits — `gh api repos/<r>/releases/latest` then `gh api repos/<r>/commits/<tag>` — `actions/checkout v7.0.1 3d3c42e5aac5ba805825da76410c181273ba90b1`, `astral-sh/setup-uv v10.3.3 68559e99cc807c1eb7e9238fd43a15bba460eec2`.
+- setup-uv inputs `version` and `enable-cache` exist at the pinned SHA — `gh api 'repos/astral-sh/setup-uv/contents/action.yml?ref=68559e99…'` — both listed.
+
+## Deviations
+
+- 2026-10-30 — added `persist-credentials: false` to the checkout step (review fix).
