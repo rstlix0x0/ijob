@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.deepeval/
+
+# Secrets and local data
+.env
+*.db
+/data/
+
+# OS
+.DS_Store

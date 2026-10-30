@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-30
 spec: skipped
 milestone: ijob-v1/01

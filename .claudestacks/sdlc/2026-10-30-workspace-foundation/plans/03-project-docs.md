@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-30
 built-on: cc0c09ea9127
 ---
@@ -20,7 +20,7 @@ so Task 1 can run first, before the session scratchpad disappears.
 **Tech Stack:** Markdown, CSV.
 
 Source of the research files (copy byte-for-byte; this path is session-temporary):
-`/private/tmp/claude-501/-Users-hiraq-Projects-rstlix0x0-ijob/5f0a49ff-503b-4c75-8cf8-2a0883190512/scratchpad/research/`
+`<session scratchpad>/research/`
 containing `global_boards.md`, `asia_and_requested.md`, `ats_endpoints.md`, `companies.csv`
 (header plus 235 rows).
 
@@ -130,3 +130,15 @@ Planned features are marked as planned; nothing unbuilt is described in the pres
 
 All four research copies match their sources, the LICENSE is the Apache-2.0 text, and the README and
 CLAUDE.md heading checks pass.
+
+## Probe results
+
+- Research copies identical to the scratchpad sources — Task 1 `cmp` loop — exit 0 (`T1-ok`).
+- LICENSE fetched from `https://www.apache.org/licenses/LICENSE-2.0.txt` — Task 2 grep pair — `T2-ok`, 202 lines.
+- README headings and no "claudestacks" — Task 3 check — `T3-ok`.
+- CLAUDE.md headings and the sync command — Task 4 check — `T4-ok`.
+- No email address or personal handle in `docs/research/` — `grep -rnoE '<email regex>'` and a grep for the owner's handles — no match.
+
+## Deviations
+
+- 2026-10-30 — tasks ran on the main thread with no coder or reviewer spawn (documentation only, no code); the four proofs above are the verification.

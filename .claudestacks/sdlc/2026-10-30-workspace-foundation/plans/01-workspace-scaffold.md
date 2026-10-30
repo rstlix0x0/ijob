@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-30
 built-on: cc0c09ea9127
 ---
@@ -151,3 +151,26 @@ Ruff prints no configuration warning on stderr. `.venv/bin/python -c "import ijo
 
 From a clean checkout: the five gate commands exit `0` and pytest reports 9 passed; `git status`
 after the gate shows no untracked cache or `.venv` files.
+
+## Review findings
+
+- test-coverage (🟡) — `test_package_imports` passed with a member not installed, because `--doctest-modules` imports `src/` during collection — `packages/ijob-*/tests/ijob_*_tests/test_package.py`. Fixed: each test also asserts `importlib.metadata.version("ijob-<m>") == "0.1.0"`. Verified: `uv run --locked pytest -q` → `9 passed in 0.03s`.
+- personal-data (❓) — `authors` from `uv init` carried an email that ships in wheel METADATA — `packages/ijob-*/pyproject.toml:6-8`. Fixed: name only, `{ name = "rstlix0x0" }`.
+- docstring-accuracy (🔵) — member READMEs described unbuilt behaviour in the present tense — `packages/ijob-*/README.md`. Fixed: marked as planned.
+- supply-chain (🔵) — no `[tool.uv] exclude-newer` cooldown — `pyproject.toml`. Deferred: the current pins are inside a 7-day window.
+- unguarded (🔵) — removing a non-adapted baseline key keeps the gate green — `pyproject.toml`. Held by review, as the guideline states.
+- drift (🔵) — manifests keep `readme` and `authors` from `uv init` beyond the listed fields. Kept; harmless.
+- amendment (🔵) — Task 1's multi-path `git check-ignore -q` proof is invalid; see Deviations.
+
+## Probe results
+
+- Root tables equal the baseline except the three workspace adaptations — reviewer tomllib flatten diff — exactly 3 differences (`testpaths`, per-file-ignores key, `[tool.uv.workspace]`).
+- Gate on a clean copy (no `.venv`, no caches) — reviewer — sync exit 0, `17 files already formatted`, `All checks passed!`, `Success: no issues found in 12 source files`, `9 passed` on CPython 3.14.10.
+- Built wheels ship `py.typed`, and `ijob_ai`'s wheel ships `programs/README.md` — reviewer `uv build` — present.
+- Red before green — `uv run --locked pytest -q` before docstrings and `programs/` — `5 failed, 4 passed`.
+
+## Deviations
+
+- 2026-10-30 — defect of the plan: Task 1's proof `! git check-ignore -q uv.lock .python-version .env.example packages/ijob-core/tests/data/x` fails with `fatal: --quiet is only valid with a single pathname`. It was run once per path instead; none is ignored.
+- 2026-10-30 — tasks were implemented on the main thread rather than through task-briefer/coder spawns (small scaffolding tasks); one independent reviewer ran over plans 01–02 together.
+- 2026-10-30 — `test_package_imports` gained the installed-metadata assertion (review fix); the test count stays 9.
