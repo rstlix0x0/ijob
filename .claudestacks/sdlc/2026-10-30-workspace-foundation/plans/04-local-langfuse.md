@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-30
 depends-on: [01]
 built-on: cc0c09ea9127
@@ -99,3 +99,17 @@ A header comment says: copy to `.env`, never commit `.env`, ijob runs without th
 
 The stack starts and answers on `127.0.0.1:3000`, every published port is localhost-only, and
 `.env.example` documents every variable with no real values while `.env` stays ignored.
+
+## Probe results
+
+- `docker compose -f compose.yaml config --quiet` — exit 0.
+- `docker compose -f compose.yaml config | grep -E 'published|host_ip'` — all 8 published ports (3000, 3030, 5432, 6379, 8123, 9000, 9090, 9091) carry `host_ip: 127.0.0.1`.
+- `diff <upstream v4.72.0> compose.yaml` — only the 2-line header and the two port lines differ.
+- `docker compose up -d`, then `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000` — `200` (user run, confirmed by `curl http://127.0.0.1:3000/api/public/health` → `{"status":"OK","version":"4.72.0"}`).
+- `curl -g 'http://[::1]:3000'` — refused (IPv4-only binding); the UI loaded only at `http://127.0.0.1:3000` with `NEXTAUTH_URL=http://127.0.0.1:3000`.
+- Task 2: `.env` ignored, `.env.example` not ignored; no `sk-or-|pk-lf-|sk-lf-`; endpoint line count `1`.
+
+## Deviations
+
+- 2026-10-30 — first `up -d` failed (`container ijob-clickhouse-1 is unhealthy`): ClickHouse overran its 10×5 s health window on a 4 GB Docker VM. The user then ran the stack by hand; the 200 above is from that run.
+- 2026-10-31 — `.env.example` gained `NEXTAUTH_URL=http://127.0.0.1:3000` (defect of the plan: binding to `127.0.0.1` leaves `localhost` → `::1` unreachable, and upstream's default `NEXTAUTH_URL` is `http://localhost:3000`), plus comments that `POSTGRES_PASSWORD` needs a matching `DATABASE_URL` and `MINIO_ROOT_PASSWORD` matching `LANGFUSE_S3_*_SECRET_ACCESS_KEY` values.
