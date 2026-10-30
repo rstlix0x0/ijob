@@ -1,0 +1,15 @@
+[project]
+name = "ijob-core"
+version = "0.1.0"
+description = "ijob domain model, store and pipeline."
+readme = "README.md"
+authors = [
+    { name = "rstlix0x0" }
+]
+requires-python = ">=3.14"
+license = "Apache-2.0"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"
