@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-31
 depends-on: [01]
 built-on: aafd5e32e8cd
@@ -224,3 +224,30 @@ list of recorded waits:
 - No test opens a socket: every client in the tests is built with an `httpx.MockTransport`.
 - `python3 -I -c "import sys; print('polite_http' in sys.stdlib_module_names, 'robots' in sys.stdlib_module_names, 'errors' in sys.stdlib_module_names)"`
   prints `False False False`.
+
+## Review findings
+
+- errors / isolation — `httpx.DecodingError` (a `RequestError`, not a `TransportError`) escaped `_send` as a non-`SourcesError`, so one bad `Content-Encoding` would crash `collect` — `polite_http.py:192` (fixed and verified: `except httpx.RequestError`; `test_decoding_error_becomes_fetch_error` red before the fix with `DecodingError`, green after)
+- strict-quality — `# noqa: S107` without a reason comment — `robots.py:49` (fixed: reason added)
+- politeness — redirect hops inside one `_send` (robots.txt path only, at most 6 requests) are not paced per hop — `polite_http.py:191` (accepted limit, not fixed; the plan pinned this httpx loop shape)
+- docstring — `FetchError` said "before any status came back" though it also covers >5 redirects — `errors.py:58` (fixed)
+- test-mandate — non-ASCII digit `Retry-After`, `-0000` HTTP-date and empty error text unguarded — `polite_http.py:151,157,193` (fixed: `²` case added to the unparseable parametrisation, `test_retry_after_http_date_without_zone_is_utc`, `test_empty_error_text_falls_back_to_class_name`)
+- modularity — robots and pacing derive host keys differently; default port not normalised (`https://a.test` vs `:443` → two robots fetches) — `robots.py:83`, `polite_http.py:182` (nit, not fixed)
+- strong-types — `RobotFileParser | bool` cache entry; `min_interval` unvalidated — `robots.py:37`, `polite_http.py:63` (nit, not fixed)
+- idioms — `setdefault(key, asyncio.Lock())` builds a throwaway lock per call — `polite_http.py:183`, `robots.py:84` (nit, not fixed)
+- test-mandate — the 500 KiB test guards "at most", not RFC 9309's "at least" — `test_robots.py:138` (nit, not fixed)
+- spec hygiene — spec §5 heading and §9 still say `ijob_sources.http` / `test_http.py`; the rename, the `now` injectable and the `RequestError` mapping are recorded here only.
+- Reviewer gate re-run before fixes: all five exit 0, `109 passed`.
+
+## Probe results
+
+- Module names — `python3 -I -c "import sys; print('polite_http' in sys.stdlib_module_names, 'robots' in sys.stdlib_module_names, 'errors' in sys.stdlib_module_names)"` → `False False False`.
+- Every wait list the plan pins matched on first run: `[0.8]`, `[]`, `[1.0]`, `[1.0, 2.0]`, `[1.0, 5.0]`, `[1.0, 1.0]`, `[1.0, 0.0, 1.0]`, `[1.0, 2.0, 2.0]`, `[1.0]`.
+- Reviewer probe, against spec §5.1's mapping: a bad gzip body raised `httpx.DecodingError`; `isinstance(e, SourcesError)` → `False`.
+- Final gate after the fix round — `ruff format --check` → `59 files already formatted`; `ruff check --no-fix` → `All checks passed!`; `mypy --strict .` → `Success: no issues found in 26 source files`; `pytest -q` → `113 passed in 0.24s`.
+
+## Deviations
+
+- 2026-10-31 — spec §5.1 maps only `httpx.TransportError` to `FetchError`; built: every `httpx.RequestError` (covers `TransportError`, `TooManyRedirects`, `DecodingError`) becomes `FetchError`, so no httpx request failure leaves the client as a non-`SourcesError`. An omission of the spec's, not a disproven claim; `design` may fold it into §5.1.
+- 2026-10-31 — spec-silent choices: a robots.txt bare 3xx or a status outside 2xx/4xx → disallow all; robots origin key lowercased with userinfo stripped; `FetchError.reason` falls back to the exception class name; `Retry-After` seconds read only as ASCII digits; a zone-less HTTP-date read as UTC.
+- 2026-10-31 — all four tasks built by one coder spawn (the tasks are sequential and share files); the fix round ran inline; per-task commits not made, commits are the user's act (CLAUDE.md).
