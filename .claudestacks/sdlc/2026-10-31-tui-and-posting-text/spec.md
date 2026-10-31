@@ -186,19 +186,25 @@ CREATE TABLE cv (
 
 ## 5. Service layer (`ijob_app.service`)
 
-A `Service` built from an open `Store`, the client factory (`_ClientFactory`, `cli.py:77`), an HTTP
-cache and a clock. The store and cache are opened, and every service method runs, on the thread that
+A `Service` built from an open `Store`, the database path, the client factory (`_ClientFactory`,
+`cli.py:77`), an HTTP cache and a clock. `open_service(db, client_factory, *, now, environ)` opens the
+seeded store at `db or default_db_path(environ)` and the cache at `default_cache_path(environ)`, as
+`_seeded_store` and `_open_cache` do (`cli.py:186-225`); taking `environ` lets tests keep every path
+under a temporary directory, as the CLI tests' `_env` does (`test_cli.py:105-111`). A cache that
+cannot be opened raises `CacheUnavailableError`, which the CLI maps to today's message and exit 1
+(`cli.py:216-222`). The store and cache are opened, and every service method runs, on the thread that
 runs the event loop: `asyncio.run` in the CLI, Textual's loop in the TUI (§7). `Store.open` uses a
 default `sqlite3.connect` (`store.py:270`), which binds the connection to its thread.
 
 | Method | Does |
 |---|---|
-| `async refresh(refs) -> RefreshReport` | the pipeline of `cli.py:696-703`: choose sources, split by interval, build, collect, record. `RefreshReport` holds `due`, `kept`, `fetched`, `failures`, `refused`, `stale`, so the CLI keeps today's `kept <ref>: …` lines (`cli.py:510-514`), problem and stale reports (`cli.py:576-603`) and exit 1 rule (`cli.py:709-710`). An unknown or removed named source raises `UnknownSourceError(InvalidValueError)` naming it (today `cli.py:480-487`) |
-| `open_postings(spec, refs) -> list[Posting]` | `store.open_postings` + `keep` (`cli.py:704-707`) |
+| `async refresh(refs) -> RefreshReport` | the pipeline of `cli.py:696-703`: choose sources, split by interval at one clock read (`cli.py:698`), build, collect, record at a second read taken after fetching (`cli.py:701`). `RefreshReport` holds `due`, `kept`, `fetched` (`_record`'s refs), `rejected` (each fetched source's `SourceBatch.rejected` above zero, `collect.py:45`), `failures`, `refused` (`_build_sources`'s refusals, `cli.py:520-522`) and `stale`, so the CLI keeps today's `kept <ref>: …` lines (`cli.py:510-514`), problem lines including `<ref>: skipped N invalid jobs` (`cli.py:576-591`), stale lines (`cli.py:593-603`) and exit 1 rule (`cli.py:709-710`). An unknown or removed named source raises `UnknownSourceError(InvalidValueError)` naming it (today `cli.py:480-487`) |
+| `open_postings(spec, refs) -> list[Posting]` | `store.open_postings` + `keep` (`cli.py:704-707`); a named ref that is unknown or removed raises `UnknownSourceError`, the same check as `refresh` |
+| `labels(ids) -> dict[PostingId, Label]` | `store.labels(ids)`, with no description step and no request; the TUI's label column reads it |
 | `async detail(posting_id) -> PostingDetail` | posting, its sources, label and description. When the description is `None`, calls `details.describe` on each sighting in id order and stores the first text found; a `SourcesError` is kept as `unavailable_reason`, nothing is stored, and the next call tries again |
 | `async label(posting_id, vote, note)` / `clear_label(posting_id)` | through the store with `at=now()`; `label` also runs the description step of `detail` |
 | `store_cv(path) -> StoredCv` | checks the file (§8), copies it to `cv.pdf` in the directory of the database in use, writes the row |
-| sources operations | the existing `sources` command bodies, moved |
+| sources operations | the existing `sources` command bodies, moved: `sources()`, `remove_source(ref)`, and async `add_source(ref, company)` and `add_url(url, company)`, each of which fetches once to verify the new source before storing it, as `sources add` and `add-url` do today (`_verify`, `cli.py:238-253`, called at `cli.py:350`) |
 
 ## 6. Command line (`ijob_app.cli`)
 
@@ -233,15 +239,24 @@ Textual 8.2.8 is the latest release on PyPI (`$SCRATCH/probes/pypi_textual.json`
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Filters** cover every existing search option: `source` (comma-separated `kind:key`, read by
-  `parse_source_ref`), `country`, `remote`, `since`, `company`, `min salary` as `Input`s, and
-  `require salary` as a `Checkbox` (`widgets/_checkbox.py:8`). They start from the config file's
-  values, apply as they change, and are read by the functions the CLI uses (`ijob_app/config.py`:
-  `parse_since`, `parse_min_salary`, `parse_remote`, `parse_country_flag`).
+- **Filters** cover every existing search option: comma-separated `source` (`kind:key`, read by
+  `parse_source_ref`), `country`, `remote` and `company`, single-value `since` and `min salary`
+  `Input`s, and `require salary` as a `Checkbox` (`widgets/_checkbox.py:8`). They are read by the
+  functions the CLI uses (`ijob_app/config.py`: `parse_since`, `parse_min_salary`, `parse_remote`,
+  `parse_country_flag`), through the CLI's flag reader moved to `ijob_app.config` as `FilterFlags` and
+  `read_filters` (today `_FilterFlags`, `_read_filters`, `cli.py:403-460`). The inputs start filled
+  with the config file's values, rendered back to text by `flags_from_spec`; as they change,
+  `spec_from_flags` sets every flag-able field from the inputs, so an emptied input removes that
+  filter. An invalid value marks its input with the `-invalid` class Textual's `Input` styles
+  (`widgets/_input.py:222-226`).
 - **Results** open on stored open postings, with no fetch; the first column shows the label.
 - **Detail** shows the fields of `ijob show`. A missing description is fetched in an async worker.
-- **Refresh** (`r`) runs `Service.refresh` in an async worker (`@work`, `_work_decorator.py:74`) on
-  the app's loop, then reloads the list; failures appear as notifications (`App.notify`,
+- **Workers**: every awaiting service call runs in an async `@work` worker (`_work_decorator.py:74`)
+  on the app's loop, in its own group — `refresh`, `detail`, `label`, `sources` — exclusive within that
+  group only. `exclusive` cancels all workers in the same group (`_work_decorator.py:82-84,95`;
+  `worker_manager.py:75-76` `cancel_group`), so a shared group would let moving the cursor cancel a
+  running refresh.
+- **Refresh** (`r`) runs `Service.refresh` in a `refresh` worker, then reloads the list; failures appear as notifications (`App.notify`,
   `app.py:4621`). Textual refuses a non-async worker unless it is a thread worker
   (`_work_decorator.py:110-115`); async workers keep the store on the loop's thread. Probe
   (`$SCRATCH/probes/test_worker_probe.py`, run under the project's pytest configuration with
@@ -251,14 +266,18 @@ Textual 8.2.8 is the latest release on PyPI (`$SCRATCH/probes/pypi_textual.json`
   `app.workers.wait_for_complete()` (`worker_manager.py:172`) `row_count == 1` → `2 passed in 0.72s`
   together with the widget probe of §9.
 - **Links**: the detail `Markdown` is built with `open_links=False` (`widgets/_markdown.py:1035,1045`)
-  and handles `Markdown.LinkClicked` (`:1107`), opening only `http(s)` targets.
+  and handles `Markdown.LinkClicked` (`:1107`), opening only `http(s)` targets with `App.open_url`
+  (`app.py:4790`).
 - **Sources** (`s`): a screen listing sources, with add (`kind:key` and company), add URL (URL and
   company) and remove, as `ijob sources add/add-url/remove` take them (`cli.py:337-398`).
 - **CV** (`c`): a screen with a path `Input` (`~` expanded) and the current CV's details. Textual has
   no file-open dialog: `grep -rln "class .*FileOpen\|class .*FilePicker\|class .*FileDialog"` over the
   wheel finds nothing, while the same search method finds `class DirectoryTree`
   (`widgets/_directory_tree.py:33`).
-- **Note** (`n`): a `ModalScreen` (`screen.py:2158`) with an `Input`.
+- **Note** (`n`): a `ModalScreen` (`screen.py:2158`) with an `Input`, saved with the posting's
+  current vote. On a posting with no label it opens nothing and asks for a vote first, so a note never
+  creates a vote the user did not give.
+- **Labels in the list** come from `Service.labels(ids)` (§5), so listing never fetches.
 - Widgets used: `DataTable` (`widgets/_data_table.py:268`), `Markdown` (`widgets/_markdown.py:962`),
   `Input` (`widgets/_input.py:71`), `Checkbox`, `ModalScreen`.
 
@@ -292,7 +311,7 @@ Tests and CI never touch the network or an LLM.
 | store | migration 2 → 3 on a version-2 database; COALESCE keeps a stored description; label set, replace, clear; `labels(ids)`; CV row |
 | service | `MockTransport` and a temporary database, as `test_cli.py:96,131-133`; the lazy path fills a pre-migration row from `raw` |
 | CLI | `typer.testing.CliRunner` (`test_cli.py:25,133`): search id column, show, label, cv set/show, unknown source |
-| TUI | `App.run_test()` with Pilot inside `asyncio.run`. Widget probe (`$SCRATCH/probes/test_textual_probe.py`): `DataTable` + `Markdown`, `pilot.press("down")`, `row_count == 1`; with the §7 worker probe under the project's pytest configuration → `2 passed in 0.72s` |
+| TUI | tests mirror the modules under `ijob_app_tests/tui/` (guideline `test-mandate.md`); `App.run_test()` with Pilot inside `asyncio.run`. Widget probe (`$SCRATCH/probes/test_textual_probe.py`): `DataTable` + `Markdown`, `pilot.press("down")`, `row_count == 1`; with the §7 worker probe under the project's pytest configuration → `2 passed in 0.72s` |
 | CV | a tiny made-up PDF; no personal data |
 
 `$SCRATCH` is `/private/tmp/claude-501/-Users-hiraq-Projects-rstlix0x0-ijob/414123fb-5882-46e9-9bbe-ce9eef8996d3/scratchpad`.
