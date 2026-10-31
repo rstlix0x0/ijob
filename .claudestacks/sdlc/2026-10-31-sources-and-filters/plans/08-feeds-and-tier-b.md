@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-31
 depends-on: [01, 04]
 built-on: aeb01064881c
@@ -323,3 +323,47 @@ passes and the gate is green. Commit `feat(sources): collect hn who is hiring`.
 - The five-command gate is green across the workspace.
 - `uv run --locked pytest packages/ijob-sources` passes, the C1 tests included.
 - `grep -rn "meili\|__NUXT_DATA__" packages/ijob-sources/src` prints nothing.
+
+## Review findings
+
+One `claudestacks:reviewer` pass (2026-10-31), report `.airsstack/.../20261031-130611-d66e/22-reviewer-08.md`.
+Verdict: COMPLIANT-WITH-AMENDMENTS. Blocking set: B1–B3, all fixed in one fix round.
+
+| Id | Finding | Disposition |
+|---|---|---|
+| B1 🔴 | RSS detail-page GETs followed an item link on any host | fixed: https and the feed URL's hostname only; else rejected with no request (7 host cases tested) |
+| B2 🔴 | a NaN/Infinity salary bound raised `decimal.InvalidOperation` out of `read_job_posting`, crashing the run | fixed: `InvalidValueError` |
+| B3 🔴 | an unknown declared XML encoding raised `LookupError` (rss, japandev) | fixed: `ParseError` |
+| 🟡 | JapanDev `known` matched the slug while `external_id` was the identifier | fixed: the URL slug is the id everywhere |
+| 🟡 | HN `int()` on an over-long objectID raised `ValueError` | fixed: at most 18 digits, else skipped/rejected |
+| ❓ | LetsGetRusty carried a private copy of the ld+json collector | fixed: public `jsonld.ld_json_blocks`; `job_postings` built on it, unchanged |
+| 🔵 (from plan 06 review) | `collect.py` adapter-contract docstring stale | fixed |
+| 🟡 | HN `hitsPerPage=1000` never checks `nbPages` | kept; a thread above 1000 top-level comments is truncated |
+| ❓ | a LetsGetRusty page after page 1 without an ItemList fails the fetch | kept; same rule as YC |
+| 🔵 | duplicated private helpers across adapters | deferred: cross-plan follow-up |
+
+Fix round re-verification (scoped): 14 files formatted, ruff passed, mypy clean on 14 files, pytest on
+the seven plan-08 test files 295 passed; the `meili|__NUXT_DATA__` grep prints nothing.
+
+## Probe results
+
+- Whole-workspace gate after plans 06–08 were coded: 141 files formatted, ruff passed, mypy 97 files
+  clean, 1238 passed; the plan's grep prints nothing.
+- Entity bomb: on Python 3.14 the C `XMLParser` exposes no `.parser`, so no expat entity handler can be
+  installed (coder probe). `parse_rss` refuses a body containing `<!ENTITY` or NUL before parsing; the
+  sitemap parser relies on expat's amplification limit, which raises and maps to `ParseError` (tested
+  with a real bomb body).
+
+## Deviations
+
+- 2026-10-31, spec §6.1 rss row vs plan Task 3/§6.2: country, remote and salaries of detail-page feeds
+  are read from the detail page's JobPosting, as the plan says; the §6.1 row says they stay default.
+- 2026-10-31, plan Task 3: detail fetches are pinned to the feed's host (review B1). A UTF-16 feed is
+  refused by the `<!ENTITY` byte check.
+- 2026-10-31, plan Task 7: HN tags are stripped before entities are unescaped (an escaped `&lt;3` must
+  not be read as a tag); `parse_comments(body, story_id, key)` takes the key a draft needs.
+- 2026-10-31, plan Task 4: `parse_yc_page` returns `list[object]`; malformed elements are rejected per job.
+- 2026-10-31, plan Task 6: `parse_sitemap` also requires https, host `japan-dev.com`, no query or
+  fragment; the JapanDev id is always the URL slug.
+- 2026-10-31, plan Task 2: `JobPostingFields` fields are optional (`None` when absent); a present but
+  unusable field raises `InvalidValueError`; `remote` counts only `@type == "Country"` requirements.

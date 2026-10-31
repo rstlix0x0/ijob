@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-31
 depends-on: [01, 04]
 built-on: aeb01064881c
@@ -283,3 +283,45 @@ passes and the gate is green. Commit `feat(sources): collect kalibrr`.
 
 - The five-command gate is green across the workspace.
 - `uv run --locked pytest packages/ijob-sources` passes.
+
+## Review findings
+
+One `claudestacks:reviewer` pass (2026-10-31), report `.airsstack/.../20261031-130611-d66e/20-reviewer-07.md`.
+Verdict: COMPLIANT-WITH-AMENDMENTS, blocking set empty. The reviewer ran the seven parsers over the
+13 full saved bodies: 1,169 drafts, 1 correct rejection (a 4dayweek job with no `company`).
+
+| Id | Finding | Disposition |
+|---|---|---|
+| K1 | Kalibrr counted a repeated rejected id again (Task 7 says neither draft nor rejection) | fixed; `KalibrrPage.rejected_ids`, tests |
+| C1 | An unusable salary (bad currency, inverted, non-finite) rejected the whole job | fixed: salary dropped, job kept (spec §5.1), Himalayas, Jobicy, Kalibrr |
+| R1 | RemoteOK skipped element [0] blindly | fixed: skipped only when it carries `legal` |
+| T1 | 4dayweek, MCF, Kalibrr lacked a `collect()` round trip | fixed |
+| J1, F1, K2 | docstrings not true of the code | fixed |
+| P1 | period lookup via `str(None)` | fixed |
+| H1 / S2 | one non-country restriction gives `REGION` (spec §6.1 says one entry → `COUNTRY`) | kept; see Deviations |
+| N1 / S3 | off-host `next` link raises `ParseError` (host pinning, no spec basis) | kept; see Deviations |
+| D1 / D2 | page dataclasses and private helpers duplicated across adapters | deferred: cross-plan follow-up (12 modules) |
+| S4 | `parse_*` return a page dataclass, not `SourceBatch` | noted; spec names no signature |
+| S5 | per-task commits not made | per CLAUDE.md, commit only when the user asks |
+
+Fix round re-verification (scoped): 13 files formatted, ruff passed, mypy clean on 13 files,
+pytest on the seven plan-07 test files 280 passed.
+
+## Probe results
+
+- Plan-07 scoped gate before review: 14 files formatted, ruff passed, mypy 14 files clean, 263 passed.
+- Whole-workspace gate after plans 06–08 were coded: 141 files formatted, ruff passed, mypy 97 files
+  clean, 1238 passed.
+- `parse_country` (changed this run, see plan 06 Deviations): Jobicy `"Canada,  USA"` → `US` through
+  the name rule; 4dayweek uses full country names; no plan-07 expectation changed.
+
+## Deviations
+
+- 2026-10-31, plan: parser signatures. `parse_*(body, key)` returns a per-board page dataclass holding
+  the `SourceBatch` and the paging value (RemoteOK returns `SourceBatch`), so each body is parsed once.
+- 2026-10-31, spec §6.1 (Himalayas row): a single `locationRestrictions` entry that names no country
+  (e.g. "Europe") gives `REGION` with country `None`; the spec only covers one country → `COUNTRY`.
+  Spec text to be amended by `design`.
+- 2026-10-31, plan Tasks 4 and 6: Arbeitnow `links.next` and MCF `_links.next.href` must stay on the
+  board's own API host, else `ParseError`, so a hostile body cannot steer the client elsewhere.
+- 2026-10-31, spec §5.1: a salary that cannot be built drops the salary and keeps the job (review C1).

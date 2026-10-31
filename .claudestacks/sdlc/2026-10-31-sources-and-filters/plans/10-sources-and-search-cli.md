@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-31
 depends-on: [02, 03, 05, 09]
 built-on: aeb01064881c
@@ -244,3 +244,46 @@ green. Commit `feat(app): search every source in the sources table`.
   2. An immediate second run is served by 304s for Greenhouse.
   3. `uv run --locked ijob sources list --db /tmp/ijob-c2.db` shows `last_fetched_at` on the two
      sources.
+
+## Review findings
+
+One `claudestacks:reviewer` pass (2026-10-31), report `.airsstack/.../20261031-130611-d66e/34-reviewer-10.md`.
+Verdict: COMPLIANT-WITH-AMENDMENTS, blocking set empty. The reviewer recomputed `seeds.csv`: the 150
+hiring rows equal the research rows with `verified_status` 200 (75 greenhouse, 55 ashby, 11 lever,
+7 workable, 2 gem, same order), plus the 18 board rows; 168 unique refs.
+
+| Id | Finding | Disposition |
+|---|---|---|
+| C4 🟡 | the top risk (one `seen_at`) had no regression guard: the test clock was constant | fixed: ticking clock; splitting the stamp fails 15 tests |
+| C3 🟡 | nothing tested that the production client passes `HOST_INTERVALS` (Workable 3 s) | fixed: dropping it fails the new test |
+| C6 🟡 / S1 ❓ | `sources add` on an existing ref with another company printed "added" but kept the old company | fixed: exit 2 `<ref> is already a source for <company>` before any request; the same company revives a removed row |
+| C9 🟡 | an unusable cache path raised an uncaught `NotADirectoryError` after seeding the store | fixed: cache opened first; `error: cannot open the HTTP cache …`, exit 1 |
+| C7, C11 🟡/🔵 | lists in frozen types | fixed: tuples |
+| C1, C2, C5, C8, C12 🔵 | docstrings, `Final` exit codes, blank `--company` in search | fixed |
+| C10, C13 🔵 | `cli.py` size (one module); loose request bound in one test | kept |
+| S2–S7 🔵 | additions and drifts | recorded below |
+
+Fix round re-verification: whole-workspace gate green (see Probe results).
+
+## Probe results
+
+- Final whole-workspace gate after every fix round (orchestrator run): sync ok, 149 files formatted,
+  ruff passed, mypy clean on 105 source files, **1500 passed**.
+- `uv run --locked ijob search --help` lists `--source`, `--country`, `--remote`, `--since`, `--company`,
+  `--min-salary`, `--require-salary/--no-require-salary`, `--db`, `--config` and no `--greenhouse`;
+  `uv run --locked ijob sources --help` lists `list`, `add`, `remove`, `add-url`.
+- Plan 08's proof grep `grep -rn "meili\|__NUXT_DATA__" packages/ijob-sources/src` now matches
+  `data/seeds.csv:129: lever,meili,Meilisearch`, a company's Lever board token from
+  `docs/research/companies.csv:172`, not a Meilisearch API call. Over `*.py` it prints nothing.
+- Manual acceptance against the live sources is the user's step and has not been run.
+
+## Deviations
+
+- 2026-10-31, plan Task 3: stale notices cover only the sources chosen for the run; `--country`,
+  `--remote`, `--company` are repeatable; `--require-salary` is tri-state; a row the registry refuses
+  prints `failed <ref>: <reason>` and counts as failed.
+- 2026-10-31, plan Task 2: a blank `--company` exits 2 on add/add-url; `add` on an existing ref with a
+  different company exits 2 (review C6); errors read `error: <message>` like C1's.
+- 2026-10-31, plan Task 1: `load_seeds` also checks the header, column count and blank companies.
+- 2026-10-31, plan Task 3: README "Adding a source" gained five steps (an identity-check step added);
+  the filters test uses a `\bdata\b` exclusion instead of "dropping sales".

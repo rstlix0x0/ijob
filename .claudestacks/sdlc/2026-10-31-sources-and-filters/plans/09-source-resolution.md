@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-31
 depends-on: [02, 06, 07, 08]
 built-on: aeb01064881c
@@ -182,3 +182,45 @@ passes and the gate is green. Commit `feat(sources): resolve manual urls`.
 
 - The five-command gate is green across the workspace.
 - `uv run --locked pytest packages/ijob-sources` passes.
+
+## Review findings
+
+One `claudestacks:reviewer` pass (2026-10-31), report `.airsstack/.../20261031-130611-d66e/30-reviewer-09.md`.
+Verdict: NON-COMPLIANT. Blocking set: B1–B3, all fixed in one fix round.
+
+| Id | Finding | Disposition |
+|---|---|---|
+| B1 🔴 | a pasted page whose single JobPosting was rejected skipped the identity check (spec §6.5): an "Other Corp" page added with `--company Ramp` resolved | fixed: identity runs on the stated hiringOrganization name before drafting; the repro now raises `IdentityMismatchError` |
+| B2 🔴 | `detect.py` subclassed `PoliteClient` (`_ReplayClient`) to reuse a fetched body | fixed: deleted |
+| B3 🔴 | no pure feed parser (spec §6.1) | fixed: `manual.parse_feed`; `FeedUrl.fetch` and detect step 3 use it |
+| 🟡 | `feed:<h>` raw dropped item extras (§6.1) via a drifted copy of rss code | fixed: public `rss.item_raw` / `rss.item_link` shared |
+| 🟡 | the "several postings" test never reached that branch | fixed: page with two top-level JobPosting blocks |
+| 🟡 | registry tests did not prove company/`known` wiring | fixed; mutating the wiring fails 6 tests |
+| ❓ | an RSS feed with no items resolved | fixed: refused, "no jobs; cannot verify the company" (§6.4) |
+| 🔵 | host match case-sensitive; Greenhouse `embed` matched; mutable `HOST_INTERVALS`; verify docstring | fixed |
+| 🔵 | `_FakeTime` copied in three test files | kept |
+
+Fix round re-verification (scoped): ruff format/check clean on 8 files, mypy clean on 9 files (incl.
+`ijob_app/cli.py`), pytest on test_{errors,manual,registry,detect,rss}.py 226 passed.
+
+## Probe results
+
+- Exhaustiveness (Task 2 risk): removing the `HN` branch from a scratch copy of `registry.py` makes
+  `mypy --strict` fail: `Argument 1 to "assert_never" has incompatible type "Literal[SourceKind.HN]"`.
+- `fixtures/letsgetrusty/page1.html` yields exactly one JobPosting from `job_postings` (the featured one),
+  so the listing-page proof uses an inline page with two top-level JobPosting blocks.
+- Reviewer's whole-workspace gate before the fix round: 149 files formatted, mypy 105 files clean,
+  1425 passed.
+
+## Deviations
+
+- 2026-10-31, plan Task 1: a single posting that is unusable (bad field, no title) is a rejected job
+  (`drafts=[]`, `rejected=1`), not a `ParseError`; its stated company is still identity-checked; a
+  posting with no company raises `IdentityMismatchError`.
+- 2026-10-31, plan Task 1: the job page's draft company is the page's hiringOrganization name.
+- 2026-10-31, plan Task 3: step 2 relies on `parse_jobposting_page`'s `ParseError` for zero or several
+  postings and parses the body once; a token that fails `parse_source_key` raises `UnsupportedUrlError`;
+  the Workable `j`/`api` and Greenhouse `embed` tokens fall through to step 2; host match ignores case.
+- 2026-10-31, spec §6.4: an empty feed is refused at add-url time; `verify_new_source` refuses a batch
+  with no drafts (only rejected jobs included).
+- 2026-10-31, plan Task 2: `HOST_INTERVALS` is a read-only `Mapping`.

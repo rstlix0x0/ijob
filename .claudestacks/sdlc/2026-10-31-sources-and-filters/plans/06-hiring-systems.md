@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-31
 depends-on: [01, 02, 04]
 built-on: aeb01064881c
@@ -289,3 +289,44 @@ passes and the gate is green. Commit `feat(sources): collect workable accounts`.
 - `uv run --locked pytest packages/ijob-sources` passes, the C1 tests included.
 - `grep -rn "salaryRange\|isRemote" packages/ijob-sources/src` prints nothing. Neither field is used
   (spec §2.1).
+
+## Review findings
+
+One `claudestacks:reviewer` pass (2026-10-31), report `.airsstack/.../20261031-130611-d66e/21-reviewer-06.md`.
+Verdict: NON-COMPLIANT (spec §5.2 text). Blocking set: identity substring match, spec §5.2.
+
+| Id | Finding | Disposition |
+|---|---|---|
+| 🔴 identity.py:28 | names matched as raw substrings: `Scale` passed a Tailscale board, `Ramp` passed Trampoline, `OpenAI` passed `AI` | fixed: whole-token runs; near-miss tests seen failing first |
+| 🔴 spec §5.2 | `countries.py` accepts an alpha-2 code only as the whole text; spec §5.2 still says either part | recorded below as a spec defect; spec text goes to `design` |
+| 🟡 | the identity `count` meant listed items in Lever/Workable but valid drafts in Greenhouse/Gem/Ashby | fixed: `count` = jobs listed; texts and names from every listed item; identity runs after parsing everywhere (Lever reordered) |
+| 🟡 | an unreadable role hint, and some Lever/Workable optional fields, rejected the job | fixed: every field beyond id, title, url and company is optional; unreadable → `None`, job kept |
+| 🟡 | Ashby fixture had an invented `1 MONTH` salary and a removed compensation | fixed: regenerated from `ashby_ramp.body`, descriptions trimmed only; real `1 MONTH` intern job used |
+| fix-round find | Gem `location_type` and Ashby `workplaceType` used `in frozenset` on unhashable JSON (TypeError escaped) | fixed: text check first, tested |
+| 🔵 | `collect.py:15` contract line stale | fixed in plan 08's fix round |
+| 🔵 | salary bound 0 → `None`; role hint = first non-empty name | kept (spec §5.1 positive bound; recorded) |
+| 🔵 | private helpers duplicated across adapters | deferred: cross-plan follow-up |
+
+Fix round re-verification (scoped): 13 files formatted, ruff passed, mypy clean on 13 files, pytest
+(with doctests) 337 passed.
+
+## Probe results
+
+- Against the spec (§5.2), before Task 2: `parse_country("San Francisco, CA")` returned `CA` (Canada),
+  `"Atlanta, GA"` → `GA`, `"Wilmington, DE"` → `DE`. New test `test_last_comma_part_is_not_a_code`
+  failed 3/3 before the change and passes after; `packages/ijob-core` + `packages/ijob-app` 322 passed.
+- Plan-06 scoped gate before review: 14 files formatted, ruff passed, mypy 14 files clean, 302 passed.
+- Whole-workspace gate after plans 06–08 were coded: 141 files formatted, mypy 97 files clean, 1238 passed.
+
+## Deviations
+
+- 2026-10-31, **spec §5.2 (spec defect)**: an alpha-2 code after the last `", "` was read as a country,
+  so US "City, ST" locations became other countries. Built instead: an alpha-2 code matches only as the
+  whole text; after the last comma only names and aliases match (`countries.py`, doctest and tests).
+  Cost: `"Berlin, DE"` gives `None` (keep-when-in-doubt). `disproves` was not written, so as not to
+  freeze plans 07–10 mid-run; the spec text is corrected by `design` after this chain's run.
+- 2026-10-31, plan: `parse_gem/ashby/lever/workable(body, key, company)` take the company a draft needs.
+- 2026-10-31, spec §5.1/§6.1: every field beyond id, title, url and company is optional; an unreadable
+  value is dropped and the job kept.
+- 2026-10-31, spec §6.4: `count` is the number of jobs the board listed; identity texts come from every
+  listed job, rejected ones included.
