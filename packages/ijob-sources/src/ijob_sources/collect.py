@@ -10,7 +10,10 @@ The adapter contract:
 * Catch `InvalidValueError` per job, log it at `WARNING` with the job's id and
   the reason, count it in `SourceBatch.rejected`, and keep going.
 * Raise `ParseError` for a response body that cannot be read at all.
-* Let no other exception leave `fetch` except a `SourcesError` from the client.
+* List in `SourceBatch.still_listed` the known jobs the source still lists but
+  the adapter did not re-fetch; a source that fetches every job leaves it empty.
+* Let no other exception leave `fetch` except a `SourcesError`: one from the
+  client, or one the adapter raises itself, such as `IdentityMismatchError`.
 
 `collect` is the one place a source failure is isolated: it catches
 `SourcesError` and nothing wider, so an adapter bug still crashes the run.
@@ -21,7 +24,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
-from ijob_core.model import SightingDraft, SourceRef
+from ijob_core.model import ExternalId, SightingDraft, SourceRef
 
 from ijob_sources.errors import SourcesError
 from ijob_sources.polite_http import PoliteClient
@@ -34,10 +37,13 @@ class SourceBatch:
     Attributes:
         drafts: The valid drafts.
         rejected: How many jobs the adapter dropped because they were unusable.
+        still_listed: The ids of known jobs the source still lists but the
+            adapter did not re-fetch, so they carry no draft.
     """
 
     drafts: list[SightingDraft]
     rejected: int
+    still_listed: tuple[ExternalId, ...] = ()
 
 
 class Source(Protocol):
@@ -58,7 +64,8 @@ class Source(Protocol):
             The valid drafts and the count of rejected jobs.
 
         Raises:
-            SourcesError: The client failed, or the response could not be read.
+            SourcesError: The client failed, the response could not be read, or
+                the adapter refused the source.
         """
         ...
 

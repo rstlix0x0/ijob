@@ -1,0 +1,35 @@
+{
+  "hits": [
+    {
+      "_tags": ["story", "author_poster0", "story_900000003"],
+      "author": "poster0",
+      "created_at": "2026-10-01T15:00:04Z",
+      "created_at_i": 1790866804,
+      "objectID": "900000003",
+      "story_id": 900000003,
+      "title": "Ask HN: Who wants to be hired? (October 2026)"
+    },
+    {
+      "_tags": ["story", "author_poster0", "story_900000002"],
+      "author": "poster0",
+      "created_at": "2026-10-01T15:00:03Z",
+      "created_at_i": 1790866803,
+      "objectID": "900000002",
+      "story_id": 900000002,
+      "title": "Ask HN: Who is hiring? (October 2026)"
+    },
+    {
+      "_tags": ["story", "author_poster0", "story_900000001"],
+      "author": "poster0",
+      "created_at": "2026-09-01T15:00:02Z",
+      "created_at_i": 1788274802,
+      "objectID": "900000001",
+      "story_id": 900000001,
+      "title": "Ask HN: Who is hiring? (September 2026)"
+    }
+  ],
+  "hitsPerPage": 20,
+  "nbHits": 3,
+  "nbPages": 1,
+  "page": 0
+}

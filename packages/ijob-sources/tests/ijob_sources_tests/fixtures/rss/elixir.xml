@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Elixir Jobs</title>
+    <description>Find your next Elixir job.</description>
+    <link>https://elixirjobs.net/</link>
+    
+      <item>
+        <title><![CDATA[Full-stack Engineer (Elixir, LiveView, React)]]></title>
+        <description><![CDATA[
+          <font color="#aaa">
+            <font color="#aaa">
+              Job place: Onsite
+            </font><br />
+            <font color="#aaa">
+              Job type: Full time
+            </font><br />
+            <font color="#aaa">
+              Job location: Helsinki, Finland
+            </font>
+          </font>
+          Trimmed description.
+        ]]></description>
+        <pubDate>15 Oct 2026 14:21:22 +0000</pubDate>
+        <link><![CDATA[https://elixirjobs.net/offers/treat-health-full-stack-engineer-elixir-liveview-react-35604f82]]></link>
+        <guid><![CDATA[https://elixirjobs.net/offers/treat-health-full-stack-engineer-elixir-liveview-react-35604f82]]></guid>
+      </item>
+      <item>
+        <title><![CDATA[Elixir Software Engineer ]]></title>
+        <description><![CDATA[
+          <font color="#aaa">
+            <font color="#aaa">
+              Job place: Remote
+            </font><br />
+            <font color="#aaa">
+              Job type: Full time
+            </font><br />
+            <font color="#aaa">
+              Job location: Remote 
+            </font>
+          </font>
+          Trimmed description.
+        ]]></description>
+        <pubDate>14 Sep 2026 21:47:44 +0000</pubDate>
+        <link><![CDATA[https://elixirjobs.net/offers/driftrock-elixir-software-engineer-289bae36]]></link>
+        <guid><![CDATA[https://elixirjobs.net/offers/driftrock-elixir-software-engineer-289bae36]]></guid>
+      </item>
+    
+  </channel>
+</rss>

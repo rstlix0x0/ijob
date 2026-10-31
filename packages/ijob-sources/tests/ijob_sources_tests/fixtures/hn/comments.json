@@ -1,0 +1,63 @@
+{
+  "hits": [
+    {
+      "_tags": ["comment", "author_poster1", "story_900000002"],
+      "author": "poster1",
+      "comment_text": "Acme Robotics | Senior Backend Engineer | Berlin | REMOTE<p>We build warehouse robots. Apply at https:&#x2F;&#x2F;acme.example.test&#x2F;careers",
+      "created_at": "2026-10-02T09:15:00Z",
+      "created_at_i": 1790932500,
+      "objectID": "900000101",
+      "parent_id": 900000002,
+      "story_id": 900000002,
+      "story_title": "Ask HN: Who is hiring? (October 2026)"
+    },
+    {
+      "_tags": ["comment", "author_poster2", "story_900000002"],
+      "author": "poster2",
+      "comment_text": "Interesting, is this role open to candidates in other time zones?",
+      "created_at": "2026-10-02T10:00:00Z",
+      "created_at_i": 1790935200,
+      "objectID": "900000102",
+      "parent_id": 900000101,
+      "story_id": 900000002,
+      "story_title": "Ask HN: Who is hiring? (October 2026)"
+    },
+    {
+      "_tags": ["comment", "author_poster3", "story_900000002"],
+      "author": "poster3",
+      "comment_text": "<a href=\"https:&#x2F;&#x2F;globex.example.test\" rel=\"nofollow\">Globex Labs</a> | Platform Engineer | Tokyo &#x2F; Osaka<p>Hybrid, visa support offered.",
+      "created_at": "2026-10-03T08:30:00Z",
+      "created_at_i": 1791016200,
+      "objectID": "900000103",
+      "parent_id": 900000002,
+      "story_id": 900000002,
+      "story_title": "Ask HN: Who is hiring? (October 2026)"
+    },
+    {
+      "_tags": ["comment", "author_poster4", "story_900000002"],
+      "author": "poster4",
+      "comment_text": "Initech | Staff Engineer<p>On-site only, see the posting on our site.",
+      "created_at": "2026-10-04T12:00:00Z",
+      "created_at_i": 1791115200,
+      "objectID": "900000104",
+      "parent_id": 900000002,
+      "story_id": 900000002,
+      "story_title": "Ask HN: Who is hiring? (October 2026)"
+    },
+    {
+      "_tags": ["comment", "author_poster5", "story_900000002"],
+      "author": "poster5",
+      "comment_text": "Umbrella Works is hiring across the board, write to us for details.<p>Many roles.",
+      "created_at": "2026-10-05T07:45:00Z",
+      "created_at_i": 1791186300,
+      "objectID": "900000105",
+      "parent_id": 900000002,
+      "story_id": 900000002,
+      "story_title": "Ask HN: Who is hiring? (October 2026)"
+    }
+  ],
+  "hitsPerPage": 1000,
+  "nbHits": 5,
+  "nbPages": 1,
+  "page": 0
+}

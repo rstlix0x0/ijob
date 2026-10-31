@@ -47,6 +47,10 @@ def test_collect_returns_each_source_batch() -> None:
     assert result.failures == []
 
 
+def test_batch_still_listed_defaults_empty() -> None:
+    assert SourceBatch(drafts=[], rejected=0).still_listed == ()
+
+
 def test_failing_source_does_not_cancel_others() -> None:
     error = SourceNotFoundError("https://boards.example.test/x")
     good = SourceBatch(drafts=[], rejected=0)

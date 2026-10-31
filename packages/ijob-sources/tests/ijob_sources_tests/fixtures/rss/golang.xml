@@ -1,0 +1,31 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+
+<channel>
+<atom:link href="https://www.golangprojects.com/rss.xml" rel="self" type="application/rss+xml" />
+  <title>Golangprojects.com</title>
+  <link>https://www.golangprojects.com</link>
+  <description>#golang #jobs only. The goal being to bring companies and developers together that like #go</description>
+<image>
+  <url>https://www.golangprojects.com/img/golangprojects_gopher.png</url>
+  <title>Golangprojects.com</title>
+  <link>https://www.golangprojects.com</link>
+</image>  <item>
+<guid>https://www.golangprojects.com/golang-go-job-gkd-Remote-Senior-Software-Engineer-London-Sotheby-s-remotework.html</guid>
+<title>Senior Software Engineer @ Sotheby’s</title>
+    <link>https://www.golangprojects.com/golang-go-job-gkd-Remote-Senior-Software-Engineer-London-Sotheby-s-remotework.html</link>
+    <description>Remote - Trimmed description.</description>
+    
+</item>   <item>
+<guid>https://www.golangprojects.com/golang-go-job-gka-Remote-Europe-Senior-Backend-Engineer-Rain-remotework.html</guid>
+<title>Senior Backend Engineer @ Rain</title>
+    <link>https://www.golangprojects.com/golang-go-job-gka-Remote-Europe-Senior-Backend-Engineer-Rain-remotework.html</link>
+    <description>Remote - Trimmed description.</description>
+    
+</item>   <item>
+<guid>https://www.golangprojects.com/golang-go-job-gkb-Remote-Sr-Software-Engineer-Prenosis-remotework.html</guid>
+<title>Sr. Software Engineer @ Prenosis</title>
+    <link>https://www.golangprojects.com/golang-go-job-gkb-Remote-Sr-Software-Engineer-Prenosis-remotework.html</link>
+    <description>Remote - Trimmed description.</description>
+    
+</item>   </channel></rss>      
