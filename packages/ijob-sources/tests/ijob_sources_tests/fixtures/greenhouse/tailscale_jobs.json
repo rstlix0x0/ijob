@@ -1,0 +1,129 @@
+{
+  "jobs": [
+    {
+      "absolute_url": "https://job-boards.greenhouse.io/tailscale/jobs/4721252005",
+      "data_compliance": [
+        {
+          "type": "gdpr",
+          "requires_consent": false,
+          "requires_processing_consent": false,
+          "requires_retention_consent": false,
+          "retention_period": null,
+          "demographic_data_consent_applies": false
+        }
+      ],
+      "internal_job_id": 4448078005,
+      "location": {
+        "name": "Remote (Canada)"
+      },
+      "metadata": [
+        {
+          "id": 4536497005,
+          "name": "Employment Type",
+          "value": "Full-time",
+          "value_type": "single_select"
+        }
+      ],
+      "id": 4721252005,
+      "updated_at": "2026-09-29T20:38:27-04:00",
+      "requisition_id": "375",
+      "title": "Analytics Engineer, Data",
+      "company_name": "Tailscale",
+      "first_published": "2026-08-04T14:21:41-04:00",
+      "language": "en",
+      "application_deadline": null,
+      "content": "&lt;p&gt;Trimmed job description.&lt;/p&gt;",
+      "departments": [
+        {
+          "id": 4130234005,
+          "name": "Data",
+          "child_ids": [],
+          "parent_id": null
+        }
+      ],
+      "offices": [
+        {
+          "id": 4008467005,
+          "name": "Remote (Canada)",
+          "location": "Canada",
+          "child_ids": [],
+          "parent_id": null
+        },
+        {
+          "id": 4008466005,
+          "name": "Remote (United States) ",
+          "location": "United States",
+          "child_ids": [],
+          "parent_id": null
+        }
+      ],
+      "ai_disclaimer": null,
+      "include_ai_disclaimer": null,
+      "ai_opt_out_request_url": null
+    },
+    {
+      "absolute_url": "https://job-boards.greenhouse.io/tailscale/jobs/4721289005",
+      "data_compliance": [
+        {
+          "type": "gdpr",
+          "requires_consent": false,
+          "requires_processing_consent": false,
+          "requires_retention_consent": false,
+          "retention_period": null,
+          "demographic_data_consent_applies": false
+        }
+      ],
+      "internal_job_id": 4448078005,
+      "location": {
+        "name": "Remote (United States)"
+      },
+      "metadata": [
+        {
+          "id": 4536497005,
+          "name": "Employment Type",
+          "value": "Full-time",
+          "value_type": "single_select"
+        }
+      ],
+      "id": 4721289005,
+      "updated_at": "2026-09-29T20:38:27-04:00",
+      "requisition_id": "375",
+      "title": "Analytics Engineer, Data",
+      "company_name": "Tailscale",
+      "first_published": "2026-08-04T14:21:42-04:00",
+      "language": "en",
+      "application_deadline": null,
+      "content": "&lt;p&gt;Trimmed job description.&lt;/p&gt;",
+      "departments": [
+        {
+          "id": 4130234005,
+          "name": "Data",
+          "child_ids": [],
+          "parent_id": null
+        }
+      ],
+      "offices": [
+        {
+          "id": 4008467005,
+          "name": "Remote (Canada)",
+          "location": "Canada",
+          "child_ids": [],
+          "parent_id": null
+        },
+        {
+          "id": 4008466005,
+          "name": "Remote (United States) ",
+          "location": "United States",
+          "child_ids": [],
+          "parent_id": null
+        }
+      ],
+      "ai_disclaimer": null,
+      "include_ai_disclaimer": null,
+      "ai_opt_out_request_url": null
+    }
+  ],
+  "meta": {
+    "total": 2
+  }
+}

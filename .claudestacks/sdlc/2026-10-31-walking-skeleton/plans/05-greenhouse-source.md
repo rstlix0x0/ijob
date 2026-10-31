@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-31
 depends-on: [02, 04]
 built-on: aafd5e32e8cd
@@ -185,3 +185,27 @@ README no longer says "planned", and the gate is green. Commit
 - `uv run --locked pytest packages/ijob-sources` passes; the five-command gate is green.
 - `grep -rn "boards-api.greenhouse.io" packages/ijob-sources/tests` shows only `MockTransport` routes
   and fixture data, never a real client.
+
+## Review findings
+
+- spec §6.1 contract — `raw=json.dumps(job)` could raise `RecursionError` for a job `json.loads` decoded but cannot re-encode (reviewer reproduced it with ~57k nested `[`), escaping `fetch` and crashing `collect` — `greenhouse.py:132` (fixed and verified: `_raw` turns it into a per-job `InvalidValueError`; `test_job_that_cannot_be_re_encoded_is_rejected` red before, green after)
+- test-mandate — `RecursionError` at decode unguarded — `greenhouse.py:81` (fixed: `test_deeply_nested_body_raises_parse_error`, asserts the cause)
+- downstream fitness — a lone surrogate (`"\ud800"`) in id, title, company, url or location passed `parse_jobs` and would make `Store.record` raise `UnicodeEncodeError`, losing every source in plan 06's single `record` — `greenhouse.py:146-157` (fixed and verified: `_encodable` rejects it; `test_text_that_is_not_utf8_encodable_is_rejected` ×5 red before, green after)
+- security — a board's string `id` reached the log raw (`"a\nFAKE LOG"` forged a line) — `greenhouse.py:97-110` (fixed and verified: label uses `repr`; `test_job_id_is_logged_without_control_characters` red before, green after)
+- modularity — `_job_label` duplicated `_external_id`'s id rule (fixed: one `_raw_id` helper)
+- docstring — float id reported as "not text or a number" (fixed: "not text or an integer"); bad `location.name` reported as field `name` (fixed: `location.name`)
+- test-mandate — null-as-absent and the logged reason unguarded (fixed: `test_null_fields_are_treated_as_absent`; rejection test asserts `invalid` in the message)
+- modularity — duplicate refs are fetched twice and `batches[ref]` keeps the last; failure order is completion order — `collect.py:111` (not fixed here; plan 06 dedupes keys before building boards)
+- `json` NaN/Infinity round-trip into `raw`; empty `location.name` kept as `""` (nits, not fixed)
+- Reviewer gate re-run before fixes: all five exit 0, `145 passed`; adversarial bodies (empty, non-UTF-8, top-level list, `jobs` string/null, >4300-digit ints, 100k-deep nesting, null jobs, bad dates) all ended as `ParseError` or per-job rejection.
+
+## Probe results
+
+- Fixture — copied from the design recording before any other work (`.airsstack/gh_tailscale_jobs.recording.json`, 694,940 bytes, `meta` `{'total': 52}`), trimmed to the first two jobs, `content` shortened, `meta.total` 2 (3,452 bytes); first job read back as `4721252005`, `'Analytics Engineer, Data'`, `'Tailscale'`, `{'name': 'Remote (Canada)'}`, `https://job-boards.greenhouse.io/tailscale/jobs/4721252005`, `2026-08-04T14:21:41-04:00`.
+- Final gate after the fix round — `ruff check --no-fix` → `All checks passed!`; `mypy --strict .` → `Success: no issues found in 30 source files`; `pytest -q` → `154 passed in 0.21s`.
+
+## Deviations
+
+- 2026-10-31 — spec §6.2 says `None` "when absent"; built: JSON `null` counts as absent for `company_name`, `location`, `location.name` and `first_published` (tested).
+- 2026-10-31 — rejections beyond the plan's list, under its "same rule applied to the other fields": non-text title, url, company_name, location.name or first_published; list, bool or float id; text not encodable as UTF-8; a job too deeply nested to re-encode.
+- 2026-10-31 — all four tasks built by one coder spawn; the fix round ran inline; per-task commits not made, commits are the user's act (CLAUDE.md).
