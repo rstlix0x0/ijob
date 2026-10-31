@@ -412,13 +412,22 @@ _SEARCH_OPTIONS = (
 )
 
 
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text: str) -> str:
+    """Drop the colour codes help output carries when a CI terminal is detected."""
+    return _ANSI_ESCAPE.sub("", text)
+
+
 def test_production_app_shows_help() -> None:
     result = CliRunner().invoke(app, ["search", "--help"])
 
     assert result.exit_code == 0
+    text = _plain(result.stdout)
     for option in _SEARCH_OPTIONS:
-        assert option in result.stdout
-    assert "--greenhouse" not in result.stdout
+        assert option in text
+    assert "--greenhouse" not in text
 
 
 def test_help_lists_the_options() -> None:
@@ -427,9 +436,10 @@ def test_help_lists_the_options() -> None:
     result = CliRunner().invoke(app, ["search", "--help"])
 
     assert result.exit_code == 0
+    text = _plain(result.stdout)
     for option in _SEARCH_OPTIONS:
-        assert option in result.stdout
-    assert "--greenhouse" not in result.stdout
+        assert option in text
+    assert "--greenhouse" not in text
 
 
 _JAZZHR_PAGE = (_FIXTURE.parents[1] / "jsonld" / "jazzhr.html").read_bytes()

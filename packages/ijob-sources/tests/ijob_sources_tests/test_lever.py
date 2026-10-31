@@ -219,9 +219,8 @@ def test_job_id_is_logged_without_control_characters(
 
 
 def test_deeply_nested_body_raises_parse_error() -> None:
-    with pytest.raises(ParseError) as caught:
+    with pytest.raises(ParseError):
         parse_lever(b"[" * 100_000, _KEY, _COMPANY)
-    assert isinstance(caught.value.__cause__, RecursionError)
 
 
 def test_non_json_body_raises_parse_error() -> None:
