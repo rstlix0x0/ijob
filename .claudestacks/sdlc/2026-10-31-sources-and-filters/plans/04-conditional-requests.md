@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-31
 built-on: aeb01064881c
 ---
@@ -127,3 +127,24 @@ passes and the gate is green. Commit `feat(sources): cache validated responses i
 
 - The five-command gate is green across the workspace.
 - `uv run --locked pytest packages/ijob-sources` passes, the C1 tests included.
+
+## Review findings
+
+Reviewer verdict: blocking none. Gate re-run by the reviewer: sync ok, format 82 files ok, ruff check passed, mypy --strict 38 files ok, pytest 260 passed; `uv run --locked pytest packages/ijob-sources` → 120 passed.
+
+- errors (risk, deferred) — cache errors (`sqlite3.Error` from a locked, full or read-only cache) leave `get` unmapped and are not a `SourcesError`, so `collect` lets them abort the run, although spec §3.1 treats the cache as disposable — `polite_http.py:172` — documented in `get`'s Raises; behaviour unchanged. Degrade-or-crash is a design decision for the user (joins the open C1 question on raw `sqlite3.Error`).
+- correctness (risk, no action) — the replayed 200 carries no headers, so `.text` decoding by Content-Type differs from the first fetch (probe: `text/xml; charset=iso-8859-1` body gave 'café' live, 'caf�' replayed) — `polite_http.py:195` — follows plan Task 1; adapters in plans 06–08 must read `.content`.
+- docstring-discipline — docstring claimed both validators are always sent — `polite_http.py:160` — fixed ("whichever it holds, on every attempt").
+- test-mandate — no test for `conditional=True` on a cacheless client — fixed: `test_conditional_without_cache_is_unconditional` (guard test, passed on first run).
+- test-mandate — no test that validators are resent on retry — fixed: `test_validators_resent_on_retry` (guard test, passed on first run).
+- strong-types / test-mandate — `.astimezone(UTC)` in `http_cache._to_text` unguarded; naive `now()` unchecked — guard added: `test_used_at_normalised_to_utc` (mutation check: removing `.astimezone(UTC)` makes it fail); no naive check added.
+- Verified after the fix round: `uv run --locked pytest packages/ijob-sources -q` → `127 passed in 0.18s`.
+
+## Probe results
+
+- polite_http structure Task 1 assumes — `grep -nE "def |class |SourceNotFoundError|HttpStatusError" polite_http.py` → `PoliteClient` L49, `get` L104, `SourceNotFoundError` raise L140, `HttpStatusError` raise L141, `_retry_wait` L143, `_send` L165 (as planned).
+
+## Deviations
+
+- 2026-10-31 — `PoliteClient.__init__` carries `# noqa: PLR0913` with a reason (six parameters; the plan mandates the `cache` keyword). Reviewer accepted.
+- 2026-10-31 — extra test `test_304_without_cache_entry_raises_http_status_error` (pins the plan's "304 without entry raises" sentence); Task 2's eviction test split into `test_old_rows_evicted_on_open` and `test_recent_rows_kept_on_open`, since a lookup at t+29 refreshes `used_at` and would mask the t+31 case.

@@ -179,3 +179,36 @@ def test_concurrent_cold_calls_fetch_once() -> None:
 
     assert asyncio.run(both()) == [True, True]
     assert len(send.urls) == 1
+
+
+def test_crawl_delay_read() -> None:
+    policy = _policy(_serving("User-agent: *\nAllow: /\nCrawl-delay: 1"))
+    _allowed(policy, _ORIGIN + "/jobs")
+    delay = policy.crawl_delay(_ORIGIN + "/jobs")
+    assert delay == 1.0
+    assert isinstance(delay, float)
+
+
+def test_crawl_delay_absent() -> None:
+    policy = _policy(_serving("User-agent: *\nAllow: /"))
+    _allowed(policy, _ORIGIN + "/jobs")
+    assert policy.crawl_delay(_ORIGIN + "/jobs") is None
+
+
+def test_crawl_delay_unknown_origin() -> None:
+    send = _serving("User-agent: *\nCrawl-delay: 1")
+    policy = _policy(send)
+    assert policy.crawl_delay(_ORIGIN + "/jobs") is None
+    assert send.urls == []
+
+
+def test_crawl_delay_blanket_rules() -> None:
+    policy = _policy(_serving("", status=404))
+    _allowed(policy, _ORIGIN + "/jobs")
+    assert policy.crawl_delay(_ORIGIN + "/jobs") is None
+
+
+def test_crawl_delay_fraction_counts_as_no_delay() -> None:
+    policy = _policy(_serving("User-agent: *\nAllow: /\nCrawl-delay: 1.5"))
+    _allowed(policy, _ORIGIN + "/jobs")
+    assert policy.crawl_delay(_ORIGIN + "/jobs") is None

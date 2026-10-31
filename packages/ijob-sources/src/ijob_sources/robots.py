@@ -2,7 +2,8 @@
 
 `RobotsPolicy` answers whether a URL may be fetched. It reaches the network only
 through the `send` callable it is given, so it never depends on the HTTP client
-that uses it. Each origin's robots.txt is fetched once and cached; an entry is
+that uses it. It also reports the `Crawl-delay` a cached robots.txt sets for the
+crawler. Each origin's robots.txt is fetched once and cached; an entry is
 refetched after 24 hours, except one built from a 429 answer, which holds for
 the policy's life.
 """
@@ -11,7 +12,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Final
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 from urllib.robotparser import RobotFileParser
 
 import httpx
@@ -21,6 +22,11 @@ from ijob_sources.errors import FetchError
 _PARSE_LIMIT_BYTES: Final = 500 * 1024
 _CACHE_LIFETIME_SECONDS: Final = 24 * 60 * 60.0
 _ROBOTS_PATH: Final = "/robots.txt"
+
+
+def _origin(parts: SplitResult) -> str:
+    """Return the lowercase `scheme://host[:port]` cache key of a split URL."""
+    return f"{parts.scheme}://{parts.netloc.rpartition('@')[2].lower()}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +86,7 @@ class RobotsPolicy:
         parts = urlsplit(url)
         if parts.path == _ROBOTS_PATH:
             return True
-        origin = f"{parts.scheme}://{parts.netloc.rpartition('@')[2].lower()}"
+        origin = _origin(parts)
         entry = self._entries.get(origin)
         if entry is None or self._expired(entry):
             async with self._locks.setdefault(origin, asyncio.Lock()):
@@ -91,6 +97,29 @@ class RobotsPolicy:
         if isinstance(entry.rules, bool):
             return entry.rules
         return entry.rules.can_fetch(self._token, url)
+
+    def crawl_delay(self, url: str) -> float | None:
+        """Report the `Crawl-delay` robots.txt sets for this crawler.
+
+        This reads the cache only and never sends a request, so it is safe to
+        call while the origin's robots.txt is itself being fetched. A delay
+        read from an entry past its lifetime is still returned until
+        `allowed` refetches it.
+
+        Args:
+            url: An absolute URL on the origin of interest.
+
+        Returns:
+            The delay in seconds, or `None` when the origin has no cached
+            entry, the entry holds only a fixed allow or deny answer, or the
+            file sets no delay the standard-library parser can read. A value
+            it cannot read, such as a fraction like `1.5`, counts as no delay.
+        """
+        entry = self._entries.get(_origin(urlsplit(url)))
+        if entry is None or isinstance(entry.rules, bool):
+            return None
+        delay = entry.rules.crawl_delay(self._token)
+        return None if delay is None else float(delay)
 
     def _expired(self, entry: _Entry) -> bool:
         """Report whether an entry is old enough to refetch."""

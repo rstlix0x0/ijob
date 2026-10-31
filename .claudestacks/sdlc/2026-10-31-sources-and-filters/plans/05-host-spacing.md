@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-31
 depends-on: [04]
 built-on: aeb01064881c
@@ -103,3 +103,25 @@ gate is green. Commit `feat(sources): space requests by the strictest host inter
 
 - The five-command gate is green across the workspace.
 - `uv run --locked pytest packages/ijob-sources` passes, the C1 tests included.
+
+## Review findings
+
+Reviewer verdict: blocking none. Plan proof `uv run --locked pytest packages/ijob-sources` → 131 passed (before the fix round).
+
+- strong-types — `host_intervals` keys were not normalised, so a mixed-case key was silently ignored — `polite_http.py:139` — fixed: keys lower-cased in `__init__`; `test_host_override_key_is_case_insensitive` failed first (1.0 != 3.0), then passed.
+- test-mandate — "strictest wins" was tested in one direction only — fixed: `test_crawl_delay_above_override_wins`, `test_override_below_min_interval_does_not_lower_it` (guard tests, passed first run).
+- docstring-discipline — stdlib ignores a fractional `Crawl-delay` ("1.5" → None), so "None when the file sets no delay" was untrue — `robots.py:100-120` — fixed: docstring says an unreadable value counts as no delay; `test_crawl_delay_fraction_counts_as_no_delay` pins it.
+- docstring-discipline — robots module docstring did not mention Crawl-delay — fixed.
+- risk (deferred to the user) — `Crawl-delay` is unbounded ("86400" sleeps a day per request) while Retry-After is capped at 60 s — `polite_http.py:296-300` — not capped: honouring the site's requested delay is the politeness rule.
+- citation nits (not fixed; outside code) — spec §3.3 cites `robots.py:112-113`, which moved (cite `RobotsPolicy._fetch`); plan 05 Task 2 cites `polite_http.py:183`, now ~L292 (cite `PoliteClient._send`).
+- Verified after the fix round: `uv run --locked pytest packages/ijob-sources -q` → `135 passed in 0.34s`.
+
+## Probe results
+
+- stdlib Crawl-delay type — `RobotFileParser().parse(['User-agent: *','Allow: /','Crawl-delay: 1']); crawl_delay('ijob')` → `1` (int, not 1.0); without the line → `None`. Against the plan's implied float: the coder converts with `float(...)`, and `test_crawl_delay_read` asserts a float.
+- robots.py structure Task 1 assumes — `_Entry` L27, `RobotsPolicy` L42, `_entries` L64, `allowed` L67, `_fetch` L102 (as planned).
+
+## Deviations
+
+- 2026-10-31 — with `Crawl-delay: 2`, the first board request after the robots fetch also waits 2.0 s, because the robots request counts as the previous request to the host (tests assert `[2.0, 2.0]`). Reviewer confirmed this matches spec §3.2.
+- 2026-10-31 — `robots.py` gained a module-level `_origin()` helper shared by `allowed` and `crawl_delay`, so the cache key cannot drift.
