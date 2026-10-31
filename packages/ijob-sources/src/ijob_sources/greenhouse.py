@@ -2,15 +2,20 @@
 
 `GreenhouseBoard` fetches one board through the `PoliteClient` and hands the
 body to `parse_jobs`, which turns it into a `SourceBatch`. `parse_jobs` is pure
-and never lets anything but a `ParseError` escape. A job that cannot be read is
-logged at `WARNING` and counted in `SourceBatch.rejected`.
+and never lets anything but a `ParseError` escape. A job whose id, title,
+address or company name cannot be read is logged at `WARNING` and counted in
+`SourceBatch.rejected`. Every other field a job carries (location, publication
+date, pay, country and role hint) is optional: one that cannot be read is left
+out and the job is kept.
 """
 
 import json
 import logging
 from datetime import datetime
-from typing import Any
+from decimal import Decimal
+from typing import Any, NamedTuple
 
+from ijob_core.countries import CountryCode, parse_country
 from ijob_core.errors import InvalidValueError
 from ijob_core.model import (
     ExternalId,
@@ -19,25 +24,44 @@ from ijob_core.model import (
     SourceKind,
     SourceRef,
 )
+from ijob_core.money import Money
 
 from ijob_sources.collect import SourceBatch
 from ijob_sources.errors import ParseError
+from ijob_sources.identity import check_identity
 from ijob_sources.polite_http import PoliteClient
 
 _LOGGER = logging.getLogger(__name__)
-_BOARD_URL = "https://boards-api.greenhouse.io/v1/boards/{key}/jobs?content=true"
+_BOARD_URL = (
+    "https://boards-api.greenhouse.io/v1/boards/{key}/jobs"
+    "?content=true&pay_transparency=true"
+)
+_CENTS_PER_UNIT = Decimal(100)
+
+
+class _Listing(NamedTuple):
+    """A parsed board with the strings the identity check reads."""
+
+    batch: SourceBatch
+    listed: int
+    names: list[str]
+    texts: list[str]
 
 
 class GreenhouseBoard:
     """One Greenhouse job board, read through the Greenhouse boards API."""
 
-    def __init__(self, key: SourceKey) -> None:
+    def __init__(self, key: SourceKey, *, company: str | None = None) -> None:
         """Name the board to read.
 
         Args:
             key: The board's token, as it appears in its Greenhouse URL.
+            company: The company the board is registered for. When given,
+                `fetch` checks that the board names it; when `None`, it does
+                not check.
         """
         self._key = key
+        self._company = company
 
     @property
     def ref(self) -> SourceRef:
@@ -45,7 +69,7 @@ class GreenhouseBoard:
         return SourceRef(SourceKind.GREENHOUSE, self._key)
 
     async def fetch(self, client: PoliteClient) -> SourceBatch:
-        """Fetch the board's jobs in one request.
+        """Fetch the board's jobs in one conditional request.
 
         Args:
             client: The client the request goes through.
@@ -56,10 +80,21 @@ class GreenhouseBoard:
         Raises:
             SourceNotFoundError: Greenhouse has no board with this key.
             ParseError: The response is not a board listing.
+            IdentityMismatchError: The board was registered for a company and
+                names a different one.
             SourcesError: The client could not complete the request.
         """
-        response = await client.get(_BOARD_URL.format(key=self._key))
-        return parse_jobs(response.content, self._key)
+        response = await client.get(_BOARD_URL.format(key=self._key), conditional=True)
+        listing = _read(response.content, self._key)
+        if self._company is not None:
+            check_identity(
+                self.ref,
+                self._company,
+                names=listing.names,
+                texts=listing.texts,
+                count=listing.listed,
+            )
+        return listing.batch
 
 
 def parse_jobs(body: bytes, key: SourceKey) -> SourceBatch:
@@ -76,6 +111,15 @@ def parse_jobs(body: bytes, key: SourceKey) -> SourceBatch:
     Raises:
         ParseError: The body is not JSON, or holds no `jobs` list.
     """
+    return _read(body, key).batch
+
+
+def _read(body: bytes, key: SourceKey) -> _Listing:
+    """Read the jobs out of a board response, keeping the identity strings.
+
+    Raises:
+        ParseError: The body is not JSON, or holds no `jobs` list.
+    """
     try:
         payload = json.loads(body)
     except (ValueError, RecursionError) as error:
@@ -87,8 +131,12 @@ def parse_jobs(body: bytes, key: SourceKey) -> SourceBatch:
         raise ParseError(reason)
 
     drafts: list[SightingDraft] = []
+    names: list[str] = []
+    texts: list[str] = []
     rejected = 0
     for index, job in enumerate(jobs):
+        names.append(_string(job, "company_name"))
+        texts.append(_string(job, "content"))
         try:
             drafts.append(_to_draft(job, key))
         except InvalidValueError as error:
@@ -99,7 +147,15 @@ def parse_jobs(body: bytes, key: SourceKey) -> SourceBatch:
                 key,
                 error,
             )
-    return SourceBatch(drafts=drafts, rejected=rejected)
+    return _Listing(
+        SourceBatch(drafts=drafts, rejected=rejected), len(jobs), names, texts
+    )
+
+
+def _string(job: object, name: str) -> str:
+    """Return a field of a job object that is text, or an empty string."""
+    value = job.get(name) if isinstance(job, dict) else None
+    return value if isinstance(value, str) else ""
 
 
 def _job_label(job: object, index: int) -> str:
@@ -132,6 +188,9 @@ def _to_draft(job: object, key: SourceKey) -> SightingDraft:
         url=_required_text(job, "absolute_url"),
         posted_at=_posted_at(job),
         raw=_raw(job),
+        salaries=_salaries(job),
+        country=_country(job),
+        role_hint=_role_hint(job),
     )
 
 
@@ -171,16 +230,26 @@ def _required_text(job: dict[str, Any], name: str) -> str:
     return _encodable(name, value)
 
 
-def _optional_text(
-    job: dict[str, Any], name: str, *, label: str | None = None
-) -> str | None:
+def _optional_text(job: dict[str, Any], name: str) -> str | None:
     """Return a field that may be absent or null, but is text when present."""
     value = job.get(name)
     if value is None:
         return None
     if not isinstance(value, str):
-        raise InvalidValueError(label or name, "is not text")
-    return _encodable(label or name, value)
+        raise InvalidValueError(name, "is not text")
+    return _encodable(name, value)
+
+
+def _readable_text(obj: dict[str, Any], name: str) -> str | None:
+    """Return a field that is text storable as UTF-8, else `None`."""
+    value = obj.get(name)
+    if not isinstance(value, str):
+        return None
+    try:
+        value.encode()
+    except UnicodeEncodeError:
+        return None
+    return value
 
 
 def _encodable(name: str, value: str) -> str:
@@ -197,25 +266,75 @@ def _encodable(name: str, value: str) -> str:
 
 
 def _location(job: dict[str, Any]) -> str | None:
-    """Return `location.name`, or `None` when the job names no location."""
+    """Return `location.name`, or `None` when it is absent or unreadable."""
     location = job.get("location")
-    if location is None:
-        return None
-    if not isinstance(location, dict):
-        raise InvalidValueError("location", "is not an object")
-    return _optional_text(location, "name", label="location.name")
+    return _readable_text(location, "name") if isinstance(location, dict) else None
 
 
 def _posted_at(job: dict[str, Any]) -> datetime | None:
-    """Return `first_published` as a datetime, or `None` when it is absent."""
+    """Return `first_published` as an aware datetime, else `None`."""
     value = job.get("first_published")
-    if value is None:
-        return None
     if not isinstance(value, str):
-        raise InvalidValueError("first_published", "is not text")
+        return None
     try:
-        return datetime.fromisoformat(value)
-    except ValueError as error:
-        raise InvalidValueError(
-            "first_published", f"{value!r} is not a date"
-        ) from error
+        posted = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return posted if posted.utcoffset() is not None else None
+
+
+def _salaries(job: dict[str, Any]) -> tuple[Money, ...]:
+    """Return one `Money` per usable `pay_input_ranges` item.
+
+    A range without a currency or a positive bound, or one that `Money`
+    refuses, is left out.
+    """
+    ranges = job.get("pay_input_ranges")
+    if not isinstance(ranges, list):
+        return ()
+    salaries: list[Money] = []
+    for pay_range in ranges:
+        if not isinstance(pay_range, dict):
+            continue
+        low = _cents(pay_range.get("min_cents"))
+        high = _cents(pay_range.get("max_cents"))
+        currency = pay_range.get("currency_type")
+        if not isinstance(currency, str) or (low is None and high is None):
+            continue
+        try:
+            salaries.append(Money(low, high, currency, None))
+        except InvalidValueError:
+            continue
+    return tuple(salaries)
+
+
+def _cents(value: object) -> Decimal | None:
+    """Return a positive whole number of cents as units, else `None`."""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return Decimal(value) / _CENTS_PER_UNIT
+    return None
+
+
+def _country(job: dict[str, Any]) -> CountryCode | None:
+    """Return the country of the first office whose location names one."""
+    offices = job.get("offices")
+    if not isinstance(offices, list):
+        return None
+    for office in offices:
+        location = office.get("location") if isinstance(office, dict) else None
+        if isinstance(location, str) and (code := parse_country(location)):
+            return code
+    return None
+
+
+def _role_hint(job: dict[str, Any]) -> str | None:
+    """Return the name of the first department that has a readable one."""
+    departments = job.get("departments")
+    if not isinstance(departments, list):
+        return None
+    for department in departments:
+        if isinstance(department, dict) and (
+            name := _readable_text(department, "name")
+        ):
+            return name
+    return None

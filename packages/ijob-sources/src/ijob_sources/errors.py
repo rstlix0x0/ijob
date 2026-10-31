@@ -1,5 +1,7 @@
 """Exceptions raised by ijob_sources."""
 
+from ijob_core.model import SourceRef
+
 
 class SourcesError(Exception):
     """Root of every exception ijob_sources raises."""
@@ -88,4 +90,44 @@ class ParseError(SourcesError):
             reason: What could not be read, and why.
         """
         super().__init__(f"could not parse response: {reason}")
+        self.reason = reason
+
+
+class IdentityMismatchError(SourcesError):
+    """A board does not belong to the company it was registered for.
+
+    Attributes:
+        ref: The source whose board failed the check.
+        reason: Why the board was refused.
+    """
+
+    def __init__(self, ref: SourceRef, reason: str) -> None:
+        """Build the error from the refused source and the reason.
+
+        Args:
+            ref: The source whose board failed the check.
+            reason: Why the board was refused.
+        """
+        super().__init__(f"{ref}: {reason}")
+        self.ref = ref
+        self.reason = reason
+
+
+class UnsupportedUrlError(SourcesError):
+    """A URL, or a source named by one, cannot be used as a job source.
+
+    Attributes:
+        url: The URL, or the text standing in for it, that was refused.
+        reason: Why it was refused.
+    """
+
+    def __init__(self, url: str, reason: str) -> None:
+        """Build the error from the refused URL and the reason.
+
+        Args:
+            url: The URL, or the text standing in for it, that was refused.
+            reason: Why it was refused.
+        """
+        super().__init__(f"cannot use {url}: {reason}")
+        self.url = url
         self.reason = reason

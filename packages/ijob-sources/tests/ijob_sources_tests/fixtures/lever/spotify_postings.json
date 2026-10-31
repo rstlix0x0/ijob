@@ -1,0 +1,47 @@
+[
+  {
+    "id": "2a55d6c9-c564-443a-be3e-a3851db5a93b",
+    "text": "Account Executive - Commercial, Spotify Technology",
+    "categories": {
+      "department": "Operations and Business Support",
+      "location": "New York, NY",
+      "team": "Platform"
+    },
+    "createdAt": 1792767640768,
+    "descriptionPlain": "Spotify Technology is our business-to-business software team, helping organizations improve how they build and deliver software. Our products, including ...",
+    "country": "US",
+    "workplaceType": "hybrid",
+    "hostedUrl": "https://jobs.lever.co/spotify/2a55d6c9-c564-443a-be3e-a3851db5a93b",
+    "applyUrl": "https://jobs.lever.co/spotify/2a55d6c9-c564-443a-be3e-a3851db5a93b/apply"
+  },
+  {
+    "id": "cf13d272-92ac-407d-89bf-7f20d20f7961",
+    "text": "Account Executive - Enterprise, Spotify Technology",
+    "categories": {
+      "department": "Operations and Business Support",
+      "location": "New York, NY",
+      "team": "Platform"
+    },
+    "createdAt": 1792767393133,
+    "descriptionPlain": "Spotify Technology is our business-to-business software team, helping organizations improve how they build and deliver software. Our products, including ...",
+    "country": "US",
+    "workplaceType": "hybrid",
+    "hostedUrl": "https://jobs.lever.co/spotify/cf13d272-92ac-407d-89bf-7f20d20f7961",
+    "applyUrl": "https://jobs.lever.co/spotify/cf13d272-92ac-407d-89bf-7f20d20f7961/apply"
+  },
+  {
+    "id": "f7eb82ce-b57e-4dc0-b84a-7f7ec05bf66e",
+    "text": "Agency Development Lead - France",
+    "categories": {
+      "department": "Advertising",
+      "location": "Paris",
+      "team": "Automation and Agency Teams"
+    },
+    "createdAt": 1792149183220,
+    "descriptionPlain": "Sell what you love. For us and millions of users across the globe, that’s Spotify. Join the Sales team and you’ll build the relationships that help grow our ...",
+    "country": "FR",
+    "workplaceType": "onsite",
+    "hostedUrl": "https://jobs.lever.co/spotify/f7eb82ce-b57e-4dc0-b84a-7f7ec05bf66e",
+    "applyUrl": "https://jobs.lever.co/spotify/f7eb82ce-b57e-4dc0-b84a-7f7ec05bf66e/apply"
+  }
+]
