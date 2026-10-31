@@ -1,0 +1,116 @@
+[
+  {
+    "absolute_url": "https://jobs.gem.com/retool/4003629005",
+    "content": "<div><strong>ABOUT RETOOL</strong></div><div>Trimmed.</div>",
+    "content_plain": "ABOUT RETOOL\nNearly every company runs on custom software.",
+    "created_at": "2022-03-09T23:08:26.000Z",
+    "departments": [
+      {
+        "child_ids": [],
+        "id": "4001703005",
+        "name": "Engineering",
+        "parent_id": null
+      }
+    ],
+    "employment_type": "full_time",
+    "first_published_at": "2022-03-25T18:46:39.000Z",
+    "id": "4003629005",
+    "internal_job_id": "4004000005",
+    "location": {
+      "name": "San Francisco, United States"
+    },
+    "location_type": "hybrid",
+    "offices": [
+      {
+        "child_ids": [],
+        "child_office_external_ids": [],
+        "id": "4000713005",
+        "location": {
+          "name": "San Francisco, United States"
+        },
+        "name": "San Francisco",
+        "parent_id": null,
+        "parent_office_external_id": null
+      }
+    ],
+    "requisition_id": "16",
+    "title": "Software Engineer",
+    "updated_at": "2026-10-14T20:22:07.841Z"
+  },
+  {
+    "absolute_url": "https://jobs.gem.com/retool/am9icG9zdDphWFh5HzIpYojPadyl6SzX",
+    "content": "<div><strong>ABOUT RETOOL</strong></div><div>Trimmed.</div>",
+    "content_plain": "ABOUT RETOOL\nNearly every company runs on custom software.",
+    "created_at": "2026-10-27T16:31:21.783Z",
+    "departments": [
+      {
+        "child_ids": [],
+        "id": "4001718005",
+        "name": "Legal",
+        "parent_id": null
+      }
+    ],
+    "employment_type": "full_time",
+    "first_published_at": "2026-10-27T16:40:23.041Z",
+    "id": "am9icG9zdDphWFh5HzIpYojPadyl6SzX",
+    "internal_job_id": "am9iOvQgj3pFvA-s-FMWKbH7MPM",
+    "location": {
+      "name": "United States - Remote"
+    },
+    "location_type": "remote",
+    "offices": [
+      {
+        "child_ids": [],
+        "child_office_external_ids": [],
+        "id": "4000715005",
+        "location": {
+          "name": "United States - Remote"
+        },
+        "name": "Remote, US",
+        "parent_id": null,
+        "parent_office_external_id": null
+      }
+    ],
+    "requisition_id": "LEG - 0000",
+    "title": "Head of Legal",
+    "updated_at": "2026-10-27T17:22:31.648Z"
+  },
+  {
+    "absolute_url": "https://jobs.gem.com/retool/4618972005",
+    "content": "<div><strong>ABOUT RETOOL</strong></div><div>Trimmed.</div>",
+    "content_plain": "ABOUT RETOOL\nNearly every company runs on custom software.",
+    "created_at": "2025-10-13T20:46:10.000Z",
+    "departments": [
+      {
+        "child_ids": [],
+        "id": "4001703005",
+        "name": "Engineering",
+        "parent_id": null
+      }
+    ],
+    "employment_type": "full_time",
+    "first_published_at": "2026-01-05T19:36:12.633Z",
+    "id": "4618972005",
+    "internal_job_id": "4399394005",
+    "location": {
+      "name": "San Francisco, United States"
+    },
+    "location_type": "in_office",
+    "offices": [
+      {
+        "child_ids": [],
+        "child_office_external_ids": [],
+        "id": "4000713005",
+        "location": {
+          "name": "San Francisco, United States"
+        },
+        "name": "San Francisco",
+        "parent_id": null,
+        "parent_office_external_id": null
+      }
+    ],
+    "requisition_id": "528",
+    "title": "Software Engineer, Cloud Platform",
+    "updated_at": "2026-06-30T21:31:58.332Z"
+  }
+]

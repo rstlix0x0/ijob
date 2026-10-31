@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:media="http://search.yahoo.com/mrss">
+  <channel>
+    <title>We Work Remotely: Back-End Programming Jobs</title>
+    <link>https://weworkremotely.com/categories/remote-back-end-programming-jobs.rss</link>
+    <description>We Work Remotely: Back-End Programming Jobs</description>
+    <language>en-US</language>
+    <ttl>60</ttl>
+    <item>
+      <media:content url="https://wwr-pro.s3.amazonaws.com/logos/0171/6655/logo.gif" type="image/png"/>
+      <title>Bitovi: Backend / Platform Developer Consultant (Temporal &amp; Kubernetes)</title>
+      <region>Anywhere in the World</region>
+      <country></country>
+      <state>Illinois</state>
+      <skills>Kubernetes and Kafka</skills>
+      <category>Back-End Programming</category>
+      <type>Full-Time</type>
+      <description>&lt;p&gt;Trimmed description.&lt;/p&gt;</description>
+      <pubDate>Thu, 29 Oct 2026 22:31:03 +0000</pubDate>
+      <expires_at>Sat, 28 Nov 2026 22:31:03 +0000</expires_at>
+      <guid>https://weworkremotely.com/remote-jobs/bitovi-backend-platform-developer-consultant-temporal-kubernetes</guid>
+      <link>https://weworkremotely.com/remote-jobs/bitovi-backend-platform-developer-consultant-temporal-kubernetes</link>
+    </item>
+    <item>
+      <title>Legion: Senior Integration Engineer</title>
+      <region>Anywhere in the World</region>
+      <country>🇲🇽 Mexico</country>
+      <state></state>
+      <skills></skills>
+      <category>Back-End Programming</category>
+      <type>Full-Time</type>
+      <description>&lt;p&gt;Trimmed description.&lt;/p&gt;</description>
+      <pubDate>Thu, 29 Oct 2026 07:30:52 +0000</pubDate>
+      <expires_at>Sat, 28 Nov 2026 07:30:52 +0000</expires_at>
+      <guid>https://weworkremotely.com/remote-jobs/legion-senior-integration-engineer</guid>
+      <link>https://weworkremotely.com/remote-jobs/legion-senior-integration-engineer</link>
+    </item>
+    <item>
+      <media:content url="https://wwr-pro.s3.amazonaws.com/logos/0171/6624/logo.gif" type="image/png"/>
+      <title>DuckDuckGo: Senior Backend Engineer</title>
+      <region>Anywhere in the World</region>
+      <country></country>
+      <state>Pennsylvania</state>
+      <skills></skills>
+      <category>Back-End Programming</category>
+      <type>Full-Time</type>
+      <description>&lt;p&gt;Trimmed description.&lt;/p&gt;</description>
+      <pubDate>Wed, 21 Oct 2026 13:46:32 +0000</pubDate>
+      <expires_at>Fri, 20 Nov 2026 13:46:32 +0000</expires_at>
+      <guid>https://weworkremotely.com/remote-jobs/duckduckgo-senior-backend-engineer</guid>
+      <link>https://weworkremotely.com/remote-jobs/duckduckgo-senior-backend-engineer</link>
+    </item>
+  </channel>
+</rss>

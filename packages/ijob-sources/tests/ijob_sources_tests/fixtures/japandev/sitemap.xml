@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<url>
+  <loc>https://japan-dev.com/</loc>
+  <priority>0.8</priority>
+</url>
+<url>
+  <loc>https://japan-dev.com/jobs</loc>
+  <priority>0.8</priority>
+</url>
+<url>
+  <loc>https://japan-dev.com/companies</loc>
+  <priority>0.8</priority>
+</url>
+<url>
+  <loc>https://japan-dev.com/jobs-in-japan-for-english-speakers</loc>
+  <priority>0.8</priority>
+</url>
+<url>
+  <loc>https://japan-dev.com/blog/cover-letter-jp?lang=jp</loc>
+  <priority>0.8</priority>
+</url>
+<url>
+  <loc>https://japan-dev.com/jobs/abbeal/abbeal-ai-engineer-maj4uw</loc>
+  <priority>0.8</priority>
+</url>
+<url>
+  <loc>https://japan-dev.com/jobs/alpaca/alpaca-senior-software-engineer---new-markets-japan-jlpt-n1-fluent-swq1og</loc>
+  <priority>0.8</priority>
+</url>
+<url>
+  <loc>https://japan-dev.com/jobs/abbeal/abbeal-avionics-engineer--specification--vv-flight-controls-do-178c--aichi-r4n1gq</loc>
+  <priority>0.8</priority>
+</url>
+</urlset>

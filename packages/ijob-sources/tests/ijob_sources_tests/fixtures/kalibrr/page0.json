@@ -1,0 +1,74 @@
+{
+  "count": 20,
+  "jobs": [
+    {
+      "id": 274683,
+      "name": "Software Engineer",
+      "slug": "software-engineer-2",
+      "company_name": "VLink Inc",
+      "activation_date": "2026-10-22T02:39:31.176944+00:00",
+      "base_salary": 10000000,
+      "maximum_salary": 11000000,
+      "salary_currency": "IDR",
+      "salary_interval": "month",
+      "salary_shown": true,
+      "company": {
+        "code": "vlink-inc",
+        "name": "VLink Inc"
+      },
+      "google_location": {
+        "address_components": {
+          "city": "Central Jakarta",
+          "region": "DKI Jakarta",
+          "country": "Indonesia"
+        }
+      }
+    },
+    {
+      "id": 275079,
+      "name": "DevOps Engineer",
+      "slug": "devops-engineer",
+      "company_name": "PT Metrodata Electronics, Tbk",
+      "activation_date": "2026-10-30T09:35:11.918690+00:00",
+      "base_salary": null,
+      "maximum_salary": 15000000,
+      "salary_currency": "IDR",
+      "salary_interval": "month",
+      "salary_shown": false,
+      "company": {
+        "code": "metrodata",
+        "name": "PT Metrodata Electronics, Tbk"
+      },
+      "google_location": {
+        "address_components": {
+          "city": "West Jakarta",
+          "region": "DKI Jakarta",
+          "country": "Indonesia"
+        }
+      }
+    },
+    {
+      "id": 269177,
+      "name": "DevOps Engineer",
+      "slug": "devops-engineer",
+      "company_name": "GTech Group",
+      "activation_date": "2026-10-14T08:50:24.449056+00:00",
+      "base_salary": null,
+      "maximum_salary": null,
+      "salary_currency": null,
+      "salary_interval": null,
+      "salary_shown": true,
+      "company": {
+        "code": "pt-gtech-digital-asia",
+        "name": "GTech Group"
+      },
+      "google_location": {
+        "address_components": {
+          "city": "Tangerang",
+          "region": "Banten",
+          "country": "Indonesia"
+        }
+      }
+    }
+  ]
+}

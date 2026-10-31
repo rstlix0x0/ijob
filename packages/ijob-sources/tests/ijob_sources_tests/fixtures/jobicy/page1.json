@@ -1,0 +1,81 @@
+{
+  "apiVersion": "2.2.19",
+  "documentationUrl": "https://jobi.cy/apidocs",
+  "friendlyNotice": "Thanks for using Jobicy API! Please ensure Jobicy is clearly credited with a direct link to the source, and all application buttons redirect to the original job URL provided in this feed. That’s all! You might be building something amazing, we wish you the best of luck!",
+  "lastUpdate": "2026-10-30T18:07:40+00:00",
+  "statusCode": 200,
+  "success": true,
+  "jobCount": 3,
+  "nextCursor": "AgAAAABq5Vz0AAAAAGri_xkAAAAAAAJoW00zVhQkI8JYfGeOL2bNeSwvpjGOV7-iA1vhuPyR3yEvJ7NhnF1MyvZiTSuCWg7wbUlo4ypxRf5n49WbZWDTSq8",
+  "hasMore": true,
+  "jobs": [
+    {
+      "id": 158129,
+      "url": "https://jobicy.com/jobs/158129-senior-fullstack-engineer-be-leaning",
+      "jobSlug": "158129-senior-fullstack-engineer-be-leaning",
+      "jobTitle": "Senior Fullstack Engineer (BE-leaning)",
+      "companyName": "TeamSnap",
+      "companyLogo": "https://jobicy.com/data/server-nyc0409/galaxy/mercury/2021/01/WRILS-210112010303-582315.png",
+      "jobIndustry": [
+        "Software Engineering"
+      ],
+      "jobType": [
+        "Full-Time"
+      ],
+      "jobGeo": "USA",
+      "jobLevel": "Senior",
+      "jobExcerpt": "About Us At TeamSnap, we believe when the world connects thr",
+      "jobDescription": "<p><strong> About Us</strong></p>\n<p>At <a href=\"https://job",
+      "pubDate": "2026-10-30T18:07:40+00:00",
+      "salaryMin": 150000,
+      "salaryCurrency": "USD",
+      "salaryPeriod": "yearly"
+    },
+    {
+      "id": 158069,
+      "url": "https://jobicy.com/jobs/158069-senior-software-engineer-platform-4",
+      "jobSlug": "158069-senior-software-engineer-platform-4",
+      "jobTitle": "Senior Software Engineer, Platform",
+      "companyName": "Juniper Square",
+      "companyLogo": "https://jobicy.com/data/server-nyc0409/galaxy/mercury/2022/01/90c359a8bed816e81ea39fa33a8314f3.png",
+      "jobIndustry": [
+        "Software Engineering"
+      ],
+      "jobType": [
+        "Full-Time"
+      ],
+      "jobGeo": "Canada,  USA",
+      "jobLevel": "Senior",
+      "jobExcerpt": "About Juniper Square Private markets are one of the largest,",
+      "jobDescription": "<h3><strong>About <a href=\"https://jobicy.com/company/junipe",
+      "pubDate": "2026-10-30T17:37:02+00:00",
+      "salaryMin": 175000,
+      "salaryMax": 220000,
+      "salaryCurrency": "USD",
+      "salaryPeriod": "yearly"
+    },
+    {
+      "id": 158032,
+      "url": "https://jobicy.com/jobs/158032-kasten-engineering-intern-summer-2027",
+      "jobSlug": "158032-kasten-engineering-intern-summer-2027",
+      "jobTitle": "Kasten Engineering Intern - Summer 2027",
+      "companyName": "Veeam Software",
+      "companyLogo": "https://jobicy.com/data/server-nyc0409/galaxy/mercury/2025/06/f7716b71-221.jpg",
+      "jobIndustry": [
+        "Software Engineering"
+      ],
+      "jobType": [
+        "Internship"
+      ],
+      "jobGeo": "USA",
+      "jobLevel": "Entry-Level, Junior",
+      "jobExcerpt": "Veeam is the Data and AI Trust Company, specializing in help",
+      "jobDescription": "<p>Veeam is the Data and AI Trust Company, specializing in h",
+      "pubDate": "2026-10-30T16:27:03+00:00",
+      "salaryMin": 40,
+      "salaryMax": 50,
+      "salaryCurrency": "USD",
+      "salaryPeriod": "hourly"
+    }
+  ]
+}

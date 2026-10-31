@@ -16,3 +16,8 @@ def test_package_ships_typing_marker() -> None:
 
 def test_reference_programs_location_exists() -> None:
     assert (importlib.resources.files("ijob_ai") / "programs").is_dir()
+
+
+def test_package_requires_python_floor() -> None:
+    requires = importlib.metadata.metadata("ijob-ai")["Requires-Python"]
+    assert requires == ">=3.14.10"

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:media="http://search.yahoo.com/mrss">
+  <channel>
+    <title>We Work Remotely: Remote jobs in design, programming, marketing and more</title>
+    <link>https://weworkremotely.com/categories/remote-programming-jobs.rss</link>
+    <description>We Work Remotely: Remote jobs in design, programming, marketing and more</description>
+    <language>en-US</language>
+    <ttl>60</ttl>
+    <item>
+      <title>Toptal: Apigee Engineer for Global Consumer Food Company</title>
+      <region>Anywhere in the World</region>
+      <category>Full-Stack Programming</category>
+      <description>&lt;p&gt;Trimmed description.&lt;/p&gt;</description>
+      <pubDate>Mon, 12 Oct 2026 16:28:34 +0000</pubDate>
+      <guid>https://weworkremotely.com/remote-jobs/toptal-apigee-engineer-for-global-consumer-food-company</guid>
+      <link>https://weworkremotely.com/remote-jobs/toptal-apigee-engineer-for-global-consumer-food-company</link>
+    </item>
+    <item>
+      <title>Toptal: Salesforce Developers with AI-Assisted Coding Experience</title>
+      <region>North America Only</region>
+      <category>Full-Stack Programming</category>
+      <description>&lt;p&gt;Trimmed description.&lt;/p&gt;</description>
+      <pubDate>Mon, 12 Oct 2026 16:21:23 +0000</pubDate>
+      <guid>https://weworkremotely.com/remote-jobs/toptal-salesforce-developers-with-ai-assisted-coding-experience</guid>
+      <link>https://weworkremotely.com/remote-jobs/toptal-salesforce-developers-with-ai-assisted-coding-experience</link>
+    </item>
+    <item>
+      <media:content url="https://wwr-pro.s3.amazonaws.com/logos/0161/6774/logo.gif" type="image/png"/>
+      <title>Yooli: FULL TIME: Software Engineer Position - React and Rest</title>
+      <region>Anywhere in the World</region>
+      <category>Full-Stack Programming</category>
+      <description>&lt;p&gt;Trimmed description.&lt;/p&gt;</description>
+      <pubDate>Wed, 05 Aug 2026 05:52:46 +0000</pubDate>
+      <guid>https://weworkremotely.com/remote-jobs/yooli-full-time-software-engineer-position-react-and-rest-1</guid>
+      <link>https://weworkremotely.com/remote-jobs/yooli-full-time-software-engineer-position-react-and-rest-1</link>
+    </item>
+  </channel>
+</rss>

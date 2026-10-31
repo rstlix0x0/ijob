@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"
+	xmlns:content="http://purl.org/rss/1.0/modules/content/"
+	xmlns:wfw="http://wellformedweb.org/CommentAPI/"
+	xmlns:dc="http://purl.org/dc/elements/1.1/"
+	xmlns:atom="http://www.w3.org/2005/Atom"
+	xmlns:sy="http://purl.org/rss/1.0/modules/syndication/"
+	xmlns:slash="http://purl.org/rss/1.0/modules/slash/"
+	>
+
+<channel>
+	<title>Jobs in IT &amp; Software Development | Berlin Startup Jobs</title>
+	<atom:link href="https://berlinstartupjobs.com/engineering/feed/" rel="self" type="application/rss+xml" />
+	<link>https://berlinstartupjobs.com/engineering/</link>
+	<description></description>
+	<lastBuildDate>Mon, 26 Oct 2026 13:57:24 +0000</lastBuildDate>
+	<language>en-US</language>
+	<sy:updatePeriod>
+	hourly	</sy:updatePeriod>
+	<sy:updateFrequency>
+	1	</sy:updateFrequency>
+	
+
+<image>
+	<url>https://berlinstartupjobs.com/wp-content/uploads/Favicon-32x32.png</url>
+	<title>Jobs in IT &amp; Software Development | Berlin Startup Jobs</title>
+	<link>https://berlinstartupjobs.com/engineering/</link>
+	<width>32</width>
+	<height>32</height>
+</image> 
+<site xmlns="com-wordpress:feed-additions:1">83677010</site>	<item>
+		<title>Senior React Native Developer (f/m/d) // SuperNext GmbH</title>
+		<link>https://berlinstartupjobs.com/engineering/senior-react-native-developer-f-m-d-supernext-gmbh/</link>
+		<pubDate>Mon, 26 Oct 2026 13:57:19 +0000</pubDate>
+				<category><![CDATA[IT / Software Development]]></category>
+		<category><![CDATA[Android]]></category>
+		<category><![CDATA[iOS]]></category>
+		<category><![CDATA[Mobile]]></category>
+		<category><![CDATA[React Native]]></category>
+		<category><![CDATA[TypeScript]]></category>
+		<category><![CDATA[Video]]></category>
+		<guid isPermaLink="false">https://berlinstartupjobs.com/?p=453321</guid>
+
+					<description><![CDATA[<p>Trimmed description.</p>]]></description>
+		
+		
+		
+		<post-id xmlns="com-wordpress:feed-additions:1">453321</post-id>	</item>
+		<item>
+		<title>Founding Principal Engineer (m/f/d) // Ferto AI</title>
+		<link>https://berlinstartupjobs.com/engineering/founding-principal-engineer-m-f-d-ferto-ai/</link>
+		<pubDate>Thu, 22 Oct 2026 15:57:47 +0000</pubDate>
+				<category><![CDATA[IT / Software Development]]></category>
+		<category><![CDATA[Backend]]></category>
+		<category><![CDATA[infrastructure as code]]></category>
+		<category><![CDATA[PostgreSQL]]></category>
+		<category><![CDATA[Python]]></category>
+		<category><![CDATA[Security]]></category>
+		<guid isPermaLink="false">https://berlinstartupjobs.com/?p=453297</guid>
+
+					<description><![CDATA[<p>Trimmed description.</p>]]></description>
+		
+		
+		
+		<post-id xmlns="com-wordpress:feed-additions:1">453297</post-id>	</item>
+		<item>
+		<title>Founding iOS Engineer (m/f/d) // Ferto AI</title>
+		<link>https://berlinstartupjobs.com/engineering/founding-ios-engineer-m-f-d-ferto-ai/</link>
+		<pubDate>Thu, 22 Oct 2026 15:57:16 +0000</pubDate>
+				<category><![CDATA[IT / Software Development]]></category>
+		<category><![CDATA[AVFoundation]]></category>
+		<category><![CDATA[CoreML]]></category>
+		<category><![CDATA[iOS]]></category>
+		<category><![CDATA[Swift]]></category>
+		<category><![CDATA[SwiftUI]]></category>
+		<guid isPermaLink="false">https://berlinstartupjobs.com/?p=453296</guid>
+
+					<description><![CDATA[<p>Trimmed description.</p>]]></description>
+		
+		
+		
+		<post-id xmlns="com-wordpress:feed-additions:1">453296</post-id>	</item>
+	</channel>
+</rss>

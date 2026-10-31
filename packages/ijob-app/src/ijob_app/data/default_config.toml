@@ -1,0 +1,6 @@
+# The filters ijob applies when the user's config does not set them. Patterns are
+# TOML literal strings (single quotes) so each backslash reaches the regex as written.
+
+[filters.role]
+include = ['\bengineer', '\bdeveloper', 'エンジニア', '開発']
+exclude = ['\bsales\b', '\brecruit', '\bmarketing\b', '\baccount executive\b']
