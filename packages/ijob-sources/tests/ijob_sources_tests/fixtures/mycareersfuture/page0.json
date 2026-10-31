@@ -1,0 +1,62 @@
+{
+  "results": [
+    {
+      "uuid": "16a7e73fa1a15e424bdbbbec535bf744",
+      "title": "Junior/Senior Software Engineer",
+      "postedCompany": {
+        "uen": "200409964K",
+        "name": "SCIENTEC CONSULTING PTE. LTD."
+      },
+      "address": {
+        "postalCode": "098633",
+        "isOverseas": false,
+        "overseasCountry": null
+      },
+      "salary": {
+        "maximum": 10500,
+        "minimum": 6000,
+        "type": {
+          "id": 4,
+          "salaryType": "Monthly"
+        }
+      },
+      "metadata": {
+        "jobPostId": "MCF-2026-1933691",
+        "newPostingDate": "2026-10-31",
+        "jobDetailsUrl": "https://www.mycareersfuture.gov.sg/job/information-technology/juniorsenior-software-engineer-scientec-consulting-16a7e73fa1a15e424bdbbbec535bf744"
+      }
+    },
+    {
+      "uuid": "d226d8cb0cc01cbc984bc45816262c19",
+      "title": "5 days Software Engineer up to $6500 (Woodlands)",
+      "postedCompany": {
+        "uen": "202417132K",
+        "name": "TALENT RECRUITMENT PTE. LTD."
+      },
+      "address": {
+        "postalCode": "079903",
+        "isOverseas": false,
+        "overseasCountry": null
+      },
+      "salary": {
+        "maximum": 6500,
+        "minimum": 3500,
+        "type": {
+          "id": 4,
+          "salaryType": "Monthly"
+        }
+      },
+      "metadata": {
+        "jobPostId": "MCF-2026-1929442",
+        "newPostingDate": "2026-10-30",
+        "jobDetailsUrl": "https://www.mycareersfuture.gov.sg/job/information-technology/5-days-software-engineer-6500-talent-recruitment-d226d8cb0cc01cbc984bc45816262c19"
+      }
+    }
+  ],
+  "total": 4,
+  "_links": {
+    "next": {
+      "href": "https://api.mycareersfuture.gov.sg/v2/jobs?limit=100&page=1&search=software%20engineer&sortBy=new_posting_date&salary=0"
+    }
+  }
+}

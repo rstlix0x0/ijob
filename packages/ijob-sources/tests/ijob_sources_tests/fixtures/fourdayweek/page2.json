@@ -1,0 +1,68 @@
+{
+  "data": [
+    {
+      "id": "01a1835d-a670-7cf2-b7f4-e4e6691a4c00",
+      "slug": "specialist-systems-engineer-at-l3harris-technologies-498d793b",
+      "title": "Specialist, Systems Engineer",
+      "url": "https://4dayweek.io/job/specialist-systems-engineer-at-l3harris-technologies-498d793b",
+      "category": "engineering",
+      "role": "Systems Engineer",
+      "level": "mid",
+      "work_arrangement": "hybrid",
+      "posted_at": "2026-10-28T16:35:15Z",
+      "description": "L3Harris is dedicated to recruiting and developing high-performing talent who ar",
+      "locations": [
+        {
+          "city": "Orange",
+          "country": "United States",
+          "continent": "North America",
+          "latitude": 33.78779,
+          "longitude": -117.85311,
+          "work_arrangement": "hybrid",
+          "is_primary": true
+        }
+      ],
+      "company": {
+        "id": "019e0e1b-13ff-7e98-b5b9-1c2753102005",
+        "slug": "l3harris",
+        "name": "L3Harris Technologies",
+        "url": "https://4dayweek.io/company/l3harris",
+        "website": "https://www.l3harris.com"
+      }
+    },
+    {
+      "id": "01a1835d-a661-7c0c-8134-296e03f9348d",
+      "slug": "sr-specialist-quality-engineer-at-l3harris-technologies-5c8334a0",
+      "title": "Sr. Specialist, Quality Engineer",
+      "url": "https://4dayweek.io/job/sr-specialist-quality-engineer-at-l3harris-technologies-5c8334a0",
+      "category": "engineering",
+      "role": "Quality Engineer",
+      "level": "senior",
+      "work_arrangement": "onsite",
+      "posted_at": "2026-10-28T16:35:15Z",
+      "description": "L3Harris is dedicated to recruiting and developing high-performing talent who ar",
+      "locations": [
+        {
+          "city": "Canoga Park",
+          "country": "United States",
+          "continent": "North America",
+          "latitude": 34.20112,
+          "longitude": -118.59814,
+          "work_arrangement": "onsite",
+          "is_primary": true
+        }
+      ],
+      "company": {
+        "id": "019e0e1b-13ff-7e98-b5b9-1c2753102005",
+        "slug": "l3harris",
+        "name": "L3Harris Technologies",
+        "url": "https://4dayweek.io/company/l3harris",
+        "website": "https://www.l3harris.com"
+      }
+    }
+  ],
+  "page": 2,
+  "limit": 100,
+  "total": 5,
+  "has_more": false
+}

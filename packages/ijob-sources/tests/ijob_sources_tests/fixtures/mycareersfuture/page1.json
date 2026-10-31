@@ -1,0 +1,62 @@
+{
+  "results": [
+    {
+      "uuid": "13dfc43d3dca14dd0965e3214c565f64",
+      "title": "Senior Software Engineer, Cloud GPU - Singapore",
+      "postedCompany": {
+        "uen": "200817984R",
+        "name": "GOOGLE ASIA PACIFIC PTE. LTD."
+      },
+      "address": {
+        "postalCode": "117371",
+        "isOverseas": false,
+        "overseasCountry": null
+      },
+      "salary": {
+        "maximum": 23000,
+        "minimum": 11500,
+        "type": {
+          "id": 4,
+          "salaryType": "Monthly"
+        }
+      },
+      "metadata": {
+        "jobPostId": "MCF-2026-1928982",
+        "newPostingDate": "2026-10-30",
+        "jobDetailsUrl": "https://www.mycareersfuture.gov.sg/job/information-technology/senior-software-engineer-cloud-gpu-singapore-google-asia-pacific-13dfc43d3dca14dd0965e3214c565f64"
+      }
+    },
+    {
+      "uuid": "6d59f96ec84f2f8830f26cb1e686c053",
+      "title": "Senior Software Engineer (Java & ReactJS)",
+      "postedCompany": {
+        "uen": "202400659M",
+        "name": "THE EDGE CONTRACTING SERVICES PTE. LTD."
+      },
+      "address": {
+        "postalCode": "048623",
+        "isOverseas": false,
+        "overseasCountry": null
+      },
+      "salary": {
+        "maximum": 7800,
+        "minimum": 5500,
+        "type": {
+          "id": 4,
+          "salaryType": "Monthly"
+        }
+      },
+      "metadata": {
+        "jobPostId": "MCF-2026-1930990",
+        "newPostingDate": "2026-10-30",
+        "jobDetailsUrl": "https://www.mycareersfuture.gov.sg/job/information-technology/senior-software-engineer-edge-contracting-services-6d59f96ec84f2f8830f26cb1e686c053"
+      }
+    }
+  ],
+  "total": 4,
+  "_links": {
+    "prev": {
+      "href": "https://api.mycareersfuture.gov.sg/v2/jobs?limit=100&search=software%20engineer&sortBy=new_posting_date&salary=0"
+    }
+  }
+}

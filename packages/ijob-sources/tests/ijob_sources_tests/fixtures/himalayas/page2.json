@@ -1,0 +1,117 @@
+{
+  "comments": "21/08/2026: Cursor pagination is now available and is the preferred way to page through the feed. Pass the nextCursor value from each response back as ?cursor=. It is faster than offset and will never return the same job twice. The offset parameter is deprecated and will be removed in a future release. 13/03/2026: The API has been updated to include the companySlug field in the response.",
+  "updatedAt": 1793412544,
+  "offset": 0,
+  "limit": 20,
+  "totalCount": 129698,
+  "nextCursor": null,
+  "jobs": [
+    {
+      "title": "Werkstudent/in Wirtschaftsinformatik – Remote (m/w/d)",
+      "excerpt": "Wir sind eine schnell wachsende Marketing-Agentur aus Frankf",
+      "companyName": "Roman Mayer GmbH",
+      "companySlug": "roman-mayer-gmbh",
+      "companyLogo": "",
+      "employmentType": "Intern",
+      "minSalary": 20,
+      "maxSalary": 20,
+      "salaryPeriod": "hourly",
+      "seniority": [
+        "Entry-level"
+      ],
+      "currency": "EUR",
+      "locationRestrictions": [
+        "Germany"
+      ],
+      "timezoneRestrictions": [
+        1
+      ],
+      "categories": [
+        "IT-Management-Intern",
+        "Business-Informatics-Student",
+        "IT-Project-Assistant",
+        "IT-Support-Specialist"
+      ],
+      "parentCategories": [
+        "Operations"
+      ],
+      "description": "<p><strong>Wir sind eine schnell wachsende Marketing-Agentur",
+      "pubDate": 1793413481,
+      "expiryDate": 1798597480,
+      "applicationLink": "https://himalayas.app/companies/roman-mayer-gmbh/jobs/werkstudent-in-wirtschaftsinformatik-remote-m-w-d?utm_source=api",
+      "guid": "https://himalayas.app/companies/roman-mayer-gmbh/jobs/werkstudent-in-wirtschaftsinformatik-remote-m-w-d"
+    },
+    {
+      "title": "Service Charge Accountant",
+      "excerpt": "Service Charge AccountantJob descriptionRole PurposeThe Serv",
+      "companyName": "The Faculty",
+      "companySlug": "thefaculty-global",
+      "companyLogo": "",
+      "employmentType": "Full Time",
+      "minSalary": 40000,
+      "maxSalary": 40000,
+      "salaryPeriod": "monthly",
+      "seniority": [
+        "Mid-level"
+      ],
+      "currency": "ZAR",
+      "locationRestrictions": [
+        "South Africa"
+      ],
+      "timezoneRestrictions": [
+        2
+      ],
+      "categories": [
+        "Service-Charge-Accountant",
+        "Accountant",
+        "Property-Management-Accountant",
+        "Financial-Accountant",
+        "Client-Accountant"
+      ],
+      "parentCategories": [
+        "Finance"
+      ],
+      "description": "<div class=\"description\">\n<h3><strong>Service Charge Account",
+      "pubDate": 1793412822,
+      "expiryDate": 1798596821,
+      "applicationLink": "https://himalayas.app/companies/thefaculty-global/jobs/service-charge-accountant?utm_source=api",
+      "guid": "https://himalayas.app/companies/thefaculty-global/jobs/service-charge-accountant"
+    },
+    {
+      "title": "Customer Success Manager",
+      "excerpt": "Location: UK, remote, with regular overlap with US East Coas",
+      "companyName": "Biorelate Limited",
+      "companySlug": "biorelate-limited",
+      "companyLogo": "",
+      "employmentType": "Full Time",
+      "minSalary": null,
+      "maxSalary": null,
+      "salaryPeriod": "annual",
+      "seniority": [
+        "Mid-level"
+      ],
+      "currency": "USD",
+      "locationRestrictions": [
+        "United Kingdom"
+      ],
+      "timezoneRestrictions": [
+        0
+      ],
+      "categories": [
+        "Customer-Success-Manager",
+        "Customer-Success-Engineer",
+        "Technical-Account-Manager",
+        "Customer-Success-Specialist"
+      ],
+      "parentCategories": [
+        "Customer Service",
+        "Sales"
+      ],
+      "description": "<div>\n<strong>Location:</strong> UK, remote, with regular ov",
+      "pubDate": 1793412930,
+      "expiryDate": 1798596929,
+      "applicationLink": "https://himalayas.app/companies/biorelate-limited/jobs/customer-success-manager?utm_source=api",
+      "guid": "https://himalayas.app/companies/biorelate-limited/jobs/customer-success-manager"
+    }
+  ]
+}

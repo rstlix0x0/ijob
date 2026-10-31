@@ -1,0 +1,121 @@
+{
+  "data": [
+    {
+      "id": "01a1854c-150f-7088-9e45-cb50abfd5080",
+      "slug": "senior-director-ai-software-engineering-at-experian-deac1eaf",
+      "title": "Senior Director, AI Software Engineering",
+      "url": "https://4dayweek.io/job/senior-director-ai-software-engineering-at-experian-deac1eaf",
+      "category": "engineering",
+      "role": "AI Software Engineering",
+      "level": "executive",
+      "work_arrangement": "hybrid",
+      "salary_min": 20851500,
+      "salary_max": 37532700,
+      "salary_currency": "USD",
+      "salary_period": "year",
+      "posted_at": "2026-10-29T01:35:18Z",
+      "description": "#### Company Description\n\nExperian is a global data and technology company, powe",
+      "locations": [
+        {
+          "city": "Costa Mesa",
+          "country": "United States",
+          "continent": "North America",
+          "latitude": 33.64113,
+          "longitude": -117.91867,
+          "work_arrangement": "hybrid",
+          "is_primary": true
+        },
+        {
+          "city": "San Jose",
+          "country": "United States",
+          "continent": "North America",
+          "latitude": 37.33939,
+          "longitude": -121.89496,
+          "work_arrangement": "hybrid"
+        }
+      ],
+      "company": {
+        "id": "019e839d-ffc9-7533-bcf6-f0c9e5cd5047",
+        "slug": "experian",
+        "name": "Experian",
+        "url": "https://4dayweek.io/company/experian",
+        "website": "https://www.experian.com"
+      }
+    },
+    {
+      "id": "01a1854b-ec30-793e-9300-f0479faaf929",
+      "slug": "senior-field-engineer-data-center-design-and-engineering-at-anthropic-f9d42e5b",
+      "title": "Senior Field Engineer, Data Center Design and Engineering",
+      "url": "https://4dayweek.io/job/senior-field-engineer-data-center-design-and-engineering-at-anthropic-f9d42e5b",
+      "category": "engineering",
+      "role": "Field Engineer",
+      "level": "senior",
+      "work_arrangement": "remote",
+      "salary_min": 32000000,
+      "salary_max": 40500000,
+      "salary_currency": "USD",
+      "salary_period": "year",
+      "posted_at": "2026-10-29T01:35:08Z",
+      "description": "### **About Anthropic**\n\nAnthropic\u2019s mission is to create reliable, interpretabl",
+      "locations": [
+        {
+          "country": "United States",
+          "continent": "North America",
+          "latitude": 39.83,
+          "longitude": -98.58,
+          "work_arrangement": "remote",
+          "is_primary": true
+        }
+      ],
+      "company": {
+        "id": "019e74ae-12b6-7d11-b880-17e88eb0f305",
+        "slug": "anthropic",
+        "name": "Anthropic",
+        "url": "https://4dayweek.io/company/anthropic",
+        "website": "https://www.anthropic.com"
+      }
+    },
+    {
+      "id": "01a18546-f308-7933-b4e6-e83b32bb4691",
+      "slug": "engineering-manager-integrations-at-lattice-49afca90",
+      "title": "Engineering Manager, Integrations",
+      "url": "https://4dayweek.io/job/engineering-manager-integrations-at-lattice-49afca90",
+      "category": "engineering",
+      "role": "Engineering Manager",
+      "level": "senior",
+      "work_arrangement": "remote",
+      "salary_min": 14625000,
+      "salary_max": 19500000,
+      "salary_currency": "CAD",
+      "salary_period": "year",
+      "posted_at": "2026-10-29T01:29:42Z",
+      "description": "**Location Requirement:**\n\nThis role is open to candidates located in British Co",
+      "locations": [
+        {
+          "state": "British Columbia",
+          "country": "Canada",
+          "continent": "North America",
+          "work_arrangement": "remote",
+          "is_primary": true
+        },
+        {
+          "state": "Ontario",
+          "country": "Canada",
+          "continent": "North America",
+          "work_arrangement": "remote"
+        }
+      ],
+      "company": {
+        "id": "019d86c3-e20b-70b9-a1ac-fdacf88cbbc3",
+        "slug": "lattice",
+        "name": "Lattice",
+        "url": "https://4dayweek.io/company/lattice",
+        "website": "https://lattice.com"
+      }
+    }
+  ],
+  "page": 1,
+  "limit": 100,
+  "total": 5,
+  "has_more": true
+}

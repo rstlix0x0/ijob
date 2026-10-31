@@ -1,0 +1,56 @@
+{
+  "data": [
+    {
+      "slug": "working-student-ai-engineer-llms-rag-ai-agents-berlin-364158",
+      "company_name": "AgentixLake GmbH",
+      "title": "Working Student AI Engineer – LLMs, RAG & AI Agents",
+      "description": "<h2><strong>IMPORTANT Application note</strong></h2><p>Pleas",
+      "remote": true,
+      "url": "https://www.arbeitnow.com/jobs/companies/agentixlake-gmbh/working-student-ai-engineer-llms-rag-ai-agents-berlin-364158",
+      "tags": [
+        "Remote",
+        "Software Development"
+      ],
+      "job_types": [
+        "Working student",
+        "working student",
+        "no experience required / student"
+      ],
+      "location": "Berlin",
+      "created_at": 1793379643
+    },
+    {
+      "slug": "online-offline-marketing-manager-koblenz-449467",
+      "company_name": "FitnessKing GmbH",
+      "title": "Online & Offline Marketing Manager (m/w/d)",
+      "description": "<p>Mit zahlreichen Studios deutschlandweit zählt FitnessKing",
+      "remote": false,
+      "url": "https://www.arbeitnow.com/jobs/companies/fitnessking-gmbh/online-offline-marketing-manager-koblenz-449467",
+      "tags": [
+        "Marketing Manager"
+      ],
+      "job_types": [
+        "Unbefristeter arbeitsvertrag",
+        "berufserfahren"
+      ],
+      "location": "Koblenz",
+      "created_at": 1793395044
+    }
+  ],
+  "links": {
+    "first": "https://www.arbeitnow.com/api/job-board-api?page=1",
+    "last": null,
+    "prev": "https://www.arbeitnow.com/api/job-board-api?page=1",
+    "next": null
+  },
+  "meta": {
+    "current_page": 2,
+    "current_page_url": "https://www.arbeitnow.com/api/job-board-api?page=2",
+    "from": 101,
+    "path": "https://www.arbeitnow.com/api/job-board-api",
+    "per_page": 300,
+    "to": 300,
+    "terms": "This is a free public API for jobs, please do not abuse. I would appreciate linking back to the site. By using the API, you agree to the terms of service present on Arbeitnow.com",
+    "info": "Jobs are updated every hour and order by the `created_at` timestamp. Use `?page=` to paginate. Read more information here: https://www.arbeitnow.com/blog/job-board-api"
+  }
+}

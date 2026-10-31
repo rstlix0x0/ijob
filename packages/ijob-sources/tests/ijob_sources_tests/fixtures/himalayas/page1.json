@@ -1,0 +1,153 @@
+{
+  "comments": "21/08/2026: Cursor pagination is now available and is the preferred way to page through the feed. Pass the nextCursor value from each response back as ?cursor=. It is faster than offset and will never return the same job twice. The offset parameter is deprecated and will be removed in a future release. 13/03/2026: The API has been updated to include the companySlug field in the response.",
+  "updatedAt": 1793413500,
+  "offset": 0,
+  "limit": 20,
+  "totalCount": 129698,
+  "nextCursor": "MjAyNi0xMC0zMVQwMjoxMDo1MS40NzgyMzJafDI0ODkzNjk",
+  "jobs": [
+    {
+      "title": "AI Developer (Python/ Django)",
+      "excerpt": "About the RoleWe are seeking a skilled Python / Django Devel",
+      "companyName": "Dijital Team Pty Ltd",
+      "companySlug": "dijital-team-pty-ltd",
+      "companyLogo": "https://cdn-images.himalayas.app/pmv3pkddtfsmkk9hckyhdiaj78m4",
+      "employmentType": "Full Time",
+      "minSalary": null,
+      "maxSalary": null,
+      "salaryPeriod": "annual",
+      "seniority": [
+        "Mid-level"
+      ],
+      "currency": null,
+      "locationRestrictions": [
+        "Sri Lanka"
+      ],
+      "timezoneRestrictions": [
+        5.5
+      ],
+      "categories": [
+        "AI-Developer",
+        "Python-Developer",
+        "Django-Developer",
+        "Full-Stack-Developer",
+        "Backend-Engineer"
+      ],
+      "parentCategories": [
+        "Developer"
+      ],
+      "description": "<div><div><div><div><div><div><div><div><div><div><div><div>",
+      "pubDate": 1793413500,
+      "expiryDate": 1798597499,
+      "applicationLink": "https://himalayas.app/companies/dijital-team-pty-ltd/jobs/ai-developer-python-django?utm_source=api",
+      "guid": "https://himalayas.app/companies/dijital-team-pty-ltd/jobs/ai-developer-python-django"
+    },
+    {
+      "title": "Territory Sales Manager, Commercial Trucking - IL",
+      "excerpt": "Why Join GEICO? At GEICO, we offer a rewarding career where ",
+      "companyName": "GEICO",
+      "companySlug": "geico",
+      "companyLogo": "https://cdn-images.himalayas.app/4i48l7wldcxa93hbvd6zov853pcr",
+      "employmentType": "Full Time",
+      "minSalary": 104550,
+      "maxSalary": 161950,
+      "salaryPeriod": "annual",
+      "seniority": [
+        "Mid-level"
+      ],
+      "currency": "USD",
+      "locationRestrictions": [
+        "United States"
+      ],
+      "timezoneRestrictions": [
+        -10,
+        -9,
+        -8,
+        -7,
+        -6,
+        -5,
+        14
+      ],
+      "categories": [
+        "Territory-Sales-Manager",
+        "Insurance-Sales-Manager",
+        "Agency-Sales-Manager",
+        "Sales-Manager"
+      ],
+      "parentCategories": [
+        "Sales"
+      ],
+      "description": "<h3>Why Join <a href=\"https://himalayas.app/companies/geico\"",
+      "pubDate": 1793413430,
+      "expiryDate": 1798597429,
+      "applicationLink": "https://himalayas.app/companies/geico/jobs/territory-sales-manager-commercial-trucking-il?utm_source=api",
+      "guid": "https://himalayas.app/companies/geico/jobs/territory-sales-manager-commercial-trucking-il"
+    },
+    {
+      "title": "Semiconductor Engineering Expert",
+      "excerpt": "Role Title: Semiconductor Engineering Expert Role Type: Cont",
+      "companyName": "micro1",
+      "companySlug": "micro1",
+      "companyLogo": "https://cdn-images.himalayas.app/91oa56akgt3qjqc1nh3uoruub40c",
+      "employmentType": "Contractor",
+      "minSalary": 85,
+      "maxSalary": 185,
+      "salaryPeriod": "hourly",
+      "seniority": [
+        "Senior"
+      ],
+      "currency": "USD",
+      "locationRestrictions": [],
+      "timezoneRestrictions": [
+        -11,
+        -10,
+        -9.5,
+        -9,
+        -8,
+        -7,
+        -6,
+        -5,
+        -4,
+        -3.5,
+        -3,
+        -2,
+        -1,
+        0,
+        1,
+        2,
+        3,
+        3.5,
+        4,
+        4.5,
+        5,
+        5.5,
+        5.75,
+        6,
+        6.5,
+        7,
+        8,
+        8.75,
+        9,
+        9.5,
+        10,
+        10.5,
+        11,
+        12,
+        12.75,
+        13,
+        14
+      ],
+      "categories": [
+        "Senior-Semiconductor-Engineer",
+        "Semiconductor-Engineering",
+        "Semiconductor-Engineer"
+      ],
+      "parentCategories": [],
+      "description": "<p>Role Title: Semiconductor Engineering Expert</p><h3>Role ",
+      "pubDate": 1793413225,
+      "expiryDate": 1798597224,
+      "applicationLink": "https://himalayas.app/companies/micro1/jobs/semiconductor-engineering-expert?utm_source=api",
+      "guid": "https://himalayas.app/companies/micro1/jobs/semiconductor-engineering-expert"
+    }
+  ]
+}
