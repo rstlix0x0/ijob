@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-31
 milestone: ijob-v1/02
 ---

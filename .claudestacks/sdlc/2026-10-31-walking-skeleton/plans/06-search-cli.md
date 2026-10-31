@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-31
 depends-on: [01, 03, 05]
 built-on: aafd5e32e8cd
@@ -115,3 +115,28 @@ the check in "Done when" (running it proves the entry point resolves).
 - Manual acceptance, run once by the user: `uv run --locked ijob search --greenhouse tailscale --db
   /tmp/ijob-check.db` prints postings; a second run prints the same postings and the database still
   holds one posting per job.
+
+## Review findings
+
+- spec §8 step 2 — the store was opened after `collect`, so an unusable `--db` was found only after robots.txt and the board had been requested (reviewer: `--db <file>/x.db` sent both requests, then an uncaught `FileExistsError`) — `cli.py:135` (fixed and verified: `Store.open` now encloses `collect`, still after the key parse; `test_unusable_db_fails_before_any_request` red before, green after)
+- spec §8 step 3 — one `record` per batch instead of one over all drafts (fixed: one `record` over `chain.from_iterable`)
+- test-mandate — listing only succeeded sources unguarded (fixed: `test_failed_board_lists_none_of_its_stored_postings`, success then 500 on one db → stdout empty, store keeps the postings)
+- test-mandate — `FetchError`/`ParseError` reasons unpinned (fixed: exact `failed greenhouse:tailscale: no route to host`; parse line starts with `… body is not JSON: `)
+- test-mandate — production wiring `app = make_app(PoliteClient)` unguarded (fixed: `test_production_app_shows_help`, no network)
+- tests — two factories used the real clock and sleep (fixed: shared `_factory` with fake time)
+- docstring — "at least one board answered" (fixed: "was read")
+- `case error:` fallback unreachable; all-rejected batch counts as success; empty token / XDG default / UTC-only `seen_at` untested; fixture read across packages via `parents[3]` (nits, not fixed)
+- question — the CLI configures no logging, so the adapter's per-job `WARNING`s reach stderr through `logging.lastResort` before the summary line (left as is: they carry the per-job reason the summary line omits)
+- Reviewer gate re-run before fixes: all five exit 0, `169 passed`; `ijob search --help` lists both options; `uv.lock` unchanged.
+
+## Probe results
+
+- typer 0.27.3: a single-command app collapses into its command, so `ijob search` needs an `@app.callback()` (coder, by run); `CliRunner` separates stderr by default.
+- `uv lock` after adding `[project.scripts]` → `git diff --stat uv.lock` prints nothing.
+- Final gate after the fix round — `uv sync --locked …` → `Checked 28 packages`; `ruff format --check` → `65 files already formatted`; `ruff check --no-fix` → `All checks passed!`; `mypy --strict .` → `Success: no issues found in 32 source files`; `pytest -q` → `172 passed in 0.33s`; `uv run --locked ijob search --help` lists `--greenhouse` and `--db`; ijob-core network/LLM import grep → no output.
+
+## Deviations
+
+- 2026-10-31 — `make_app` adds an `@app.callback()` so `search` stays a subcommand (typer collapses a single-command app).
+- 2026-10-31 — choices the spec leaves open: keys are trimmed and de-duplicated in first-seen order (`collect` would fetch a duplicate twice); stdout lines are tab-separated with `-` for a missing location; stderr lines follow the order the keys were given; `--db` defaults at run time.
+- 2026-10-31 — both tasks built by one coder spawn; the fix round ran inline; the manual acceptance run against the real board is the user's, not run here; per-task commits not made, commits are the user's act (CLAUDE.md).
