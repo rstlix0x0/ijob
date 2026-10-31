@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-31
 built-on: aafd5e32e8cd
 ---
@@ -127,3 +127,29 @@ is green. Commit `feat(core): add sighting draft and stored records`.
 - `uv run --locked pytest packages/ijob-core` passes; the five-command gate is green.
 - `grep -rEn '^\s*(from|import)\s+(httpx|requests|aiohttp|typer|dspy|litellm|anthropic|claude_agent_sdk|urllib\.request|http\.client|socket)\b' packages/ijob-core/src`
   prints nothing (CLAUDE.md boundary: no LLM and no network library in `ijob-core`).
+
+## Review findings
+
+- docstring-discipline — module docstring claimed every value is validated at construction; false for `Posting`, `Sighting`, `SourceRef` — `packages/ijob-core/src/ijob_core/model.py:4` (BLOCKING, fixed and verified: `uv run --locked mypy --strict .` → `Success: no issues found in 16 source files`; `uv run --locked pytest -q` → `42 passed in 0.14s`)
+- modularity — `_HTTP_PREFIXES` declared between classes — `model.py:85` (fixed: moved to the module constants)
+- modularity — `_STRIPE`/`_AWARE` declared mid-file — `test_model.py:45` (fixed: moved under the imports)
+- test-mandate — empty-field test checked only the exception type — `test_model.py:80` (fixed: asserts `exc_info.value.field == field`)
+- test-mandate — no test for a tzinfo whose `utcoffset` is `None` — `model.py:132` (fixed: `test_sighting_draft_rejects_posted_at_whose_zone_has_no_offset`)
+- strong-types — whitespace-only `external_id`/`title`/`company` accepted; meets spec §3 "non-empty" literally — `model.py:127` (risk, not changed; open for the author)
+- errors — `InvalidValueError` does not round-trip through pickle/copy — `errors.py:23` (nit, not fixed)
+- docstring-discipline — empty text reports "not made of letters…" though Raises lists "empty" separately — `model.py:60` (nit, not fixed)
+- strong-types — URL check is prefix-only (`https://` with no host passes; `HTTPS://x` fails), as the spec states — `model.py:130` (nit, not fixed)
+- docstring-discipline — "Built by the store." true only once the store lands (plan 03) — `model.py:140,167` (nit, not fixed)
+- test-mandate — `.field`/`.reason` attributes and frozenness of draft/posting/sighting untested — `test_errors.py:8`, `test_model.py:35` (nit, not fixed)
+- spec additions (harmless) — `InvalidValueError.field/.reason`; extra test `test_posting_and_sighting_hold_their_fields`.
+
+## Probe results
+
+- No probe beyond the named tests: every asserted fact is created by this plan. Boundary grep over `packages/ijob-core/src` → no output (exit 1).
+- Gate before review — `ruff format --check` → `49 files already formatted`; `ruff check --no-fix` → `All checks passed!`; `mypy --strict .` → `no issues found in 16 source files`; `pytest -q` → `41 passed in 0.06s`.
+
+## Deviations
+
+- 2026-10-31 — `InvalidValueError` field names are snake_case (`invalid source_key: …`) so the exception owns its message under ruff TRY003; the plan names no wording.
+- 2026-10-31 — the review fix round ran inline on the main thread rather than in a fresh coder spawn (small, mechanical edits).
+- 2026-10-31 — per-task commits not made: commits are the user's act (CLAUDE.md).
