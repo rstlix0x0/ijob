@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-31
 depends-on: [02]
 built-on: aafd5e32e8cd
@@ -134,3 +134,31 @@ and the gate is green. Commit `feat(core): record sighting drafts without duplic
 
 - `uv run --locked pytest packages/ijob-core` passes; the five-command gate is green.
 - Opening a database written by this plan with `sqlite3 <file> 'pragma user_version'` prints `1`.
+
+## Review findings
+
+- test-mandate — STRICT and UNIQUE(source, external_id) unguarded — `store.py:30` (fixed and verified: `test_schema_enforces_strict_and_unique`, red with UNIQUE→`CHECK (1)` and with STRICT dropped; `uv run --locked pytest -q` → `61 passed in 0.09s`)
+- test-mandate — UTC conversion unguarded; Greenhouse sends offset timestamps — `store.py:81` (fixed and verified: `test_record_stores_non_utc_times_as_utc`, red with `.astimezone(UTC)` removed; same run)
+- errors / test-mandate — `open` failure path untested; `except Exception` cleanup missed BaseException — `store.py:122` (fixed and verified: `ExitStack` + `closing`; `test_failed_migration_leaves_version_zero`, red with the close removed; same run)
+- test-mandate — migration atomicity (explicit BEGIN) unguarded — `store.py:295` (fixed and verified: same test, red with BEGIN removed; same run)
+- concurrency — `record` lookups ran before a deferred BEGIN; two runs could lose a batch — `store.py:165` (fixed: `BEGIN IMMEDIATE`; unverified by test — race-only)
+- concurrency — `user_version` read outside the migration transaction — `store.py:291` (fixed: `BEGIN IMMEDIATE` and re-read inside; unverified by test — race-only)
+- robustness — relative `XDG_DATA_HOME` accepted — `store.py:62` (nit, not fixed)
+- modularity — public `Store.__init__(conn)` skips migration and pragmas — `store.py:96` (nit, not fixed)
+- docstring — `open` Raises omits `OSError` from `mkdir` — `store.py:114` (nit, not fixed)
+- reversion guard — `PRAGMA foreign_keys = ON` untested — `store.py:120` (nit, not fixed)
+- question — raw `sqlite3.Error` leaves the public API rather than a `CoreError`; spec §7 defines no store error — `store.py:115` (open, spec's call)
+- question — a database whose `user_version` is above the known migrations opens and later fails with "no such table" — `store.py:293` (open, spec §4 silent)
+- spec hygiene — empty `XDG_DATA_HOME` fallback goes beyond spec §4's "unset"; recorded in this plan's Risks only.
+- Reviewer gate re-run before fixes: all five exit 0, `58 passed`; `sqlite3 <db> 'pragma user_version'` → `1`.
+
+## Probe results
+
+- `STRICT` tables available — `python3.14 -I -c "import sqlite3,sys; …create table t(a TEXT NOT NULL) STRICT…"` → `3.14.10 3.53.1`, table created.
+- Fresh database schema version — `Store.open(<scratch>/uv-check.db)` then `sqlite3 <scratch>/uv-check.db 'pragma user_version'` → `1`.
+- Final gate after the fix round — `uv sync --locked …` → `Checked 28 packages`; `ruff format --check` → `51 files already formatted`; `ruff check --no-fix` → `All checks passed!`; `mypy --strict .` → `Success: no issues found in 18 source files`; `pytest -q` → `61 passed in 0.09s`; boundary grep → no output.
+
+## Deviations
+
+- 2026-10-31 — additions beyond the plan: naive `seen_at` rejected with `InvalidValueError` (tested); `PRAGMA foreign_keys = ON`; source filter through `json_each(?)` (empty `sources` → `[]`); fixed-width microsecond UTC text so text order equals time order; `BEGIN IMMEDIATE` for migration and `record`.
+- 2026-10-31 — per-task commits not made: commits are the user's act (CLAUDE.md).
