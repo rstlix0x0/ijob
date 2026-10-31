@@ -47,6 +47,11 @@ def test_last_comma_part(text: str, code: str) -> None:
     assert parse_country(text) == CountryCode(code)
 
 
+@pytest.mark.parametrize("text", ["San Francisco, CA", "Atlanta, GA", "Wilmington, DE"])
+def test_last_comma_part_is_not_a_code(text: str) -> None:
+    assert parse_country(text) is None
+
+
 @pytest.mark.parametrize("text", ["Remote", "Europe", "", "Atlantis"])
 def test_unknown_is_none(text: str) -> None:
     assert parse_country(text) is None

@@ -37,12 +37,16 @@ def _table() -> dict[CountryCode, str]:
 
 @cache
 def _lookup() -> dict[str, CountryCode]:
-    """Map each lowercased code, name and alias to its country code."""
-    table = _table()
+    """Map each lowercased country name and alias to its country code."""
     lookup = dict(_ALIASES)
-    lookup.update((name.lower(), code) for code, name in table.items())
-    lookup.update((code.lower(), code) for code in table)
+    lookup.update((name.lower(), code) for code, name in _table().items())
     return lookup
+
+
+@cache
+def _code_lookup() -> dict[str, CountryCode]:
+    """Map each lowercased alpha-2 code to its country code."""
+    return {code.lower(): code for code in _table()}
 
 
 def country_codes() -> frozenset[CountryCode]:
@@ -59,8 +63,10 @@ def parse_country(text: str) -> CountryCode | None:
 
     The whole text is tried first, then the part after its last `", "`, each
     stripped of surrounding whitespace. A part matches, ignoring case, when it is
-    an alpha-2 code, a country name from the table, or one of a few aliases
-    (`USA`, `UK`, `United Kingdom`, `South Korea`, `Czechia`).
+    a country name from the table or one of a few aliases (`USA`, `UK`,
+    `United Kingdom`, `South Korea`, `Czechia`). An alpha-2 code matches only as
+    the whole text, because a code after a comma is usually a region, as in
+    `"San Francisco, CA"`.
 
     Args:
         text: A location as a source reports it, e.g. `"Toronto, Ontario, Canada"`.
@@ -73,11 +79,12 @@ def parse_country(text: str) -> CountryCode | None:
         'US'
         >>> parse_country("Remote") is None
         True
+        >>> parse_country("San Francisco, CA") is None
+        True
     """
-    lookup = _lookup()
+    whole = text.strip().lower()
+    code = _lookup().get(whole) or _code_lookup().get(whole)
+    if code is not None:
+        return code
     last = text.rpartition(_PART_SEPARATOR)[2]
-    for part in (text, last):
-        code = lookup.get(part.strip().lower())
-        if code is not None:
-            return code
-    return None
+    return _lookup().get(last.strip().lower())
