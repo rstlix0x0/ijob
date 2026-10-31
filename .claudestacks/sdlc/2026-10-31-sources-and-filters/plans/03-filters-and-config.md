@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-31
 depends-on: [01]
 built-on: aeb01064881c
@@ -155,3 +155,30 @@ and the gate is green. Commit `feat(app): load search filters from config`.
 - The five-command gate is green across the workspace.
 - `uv run --locked pytest packages/ijob-core/tests/ijob_core_tests/test_filters.py
   packages/ijob-app/tests/ijob_app_tests/test_config.py` passes.
+
+## Review findings
+
+Reviewer verdict: blocking none. Gate re-run by the reviewer: sync 0, format 0 (88 files), ruff 0, mypy --strict 0 (44 files), pytest 400 passed; plan proof 111 passed.
+
+- errors — `parse_since` let a ≥4300-digit count raise a bare ValueError, and accepted durations so large that `now - since` overflows in `keep` — `config.py:122`, `filters.py:107` — fixed: `parse_since` catches OverflowError/ValueError and rejects anything over 36500 days.
+- test-mandate — `_table`, `_only_keys` on min_salary and the non-string currency/period guards had no tests — `config.py:253,328,337` — fixed: six guard cases added (passed first run; guards already correct).
+- test-mandate — float test used 12.5, which binary floats hold exactly, so it did not guard `Decimal(str(amount))` — `test_config.py:127` — fixed: uses 0.1.
+- errors — one `try` covered both `Period(...)` and `Money(...)` — `config.py:198` — fixed: separate blocks.
+- errors — re-raised reason dropped the sub-field — `config.py:204` — fixed ("invalid filters.min_salary: currency 'sgd' is not three uppercase letters").
+- message clarity — "invalid filters: is not a table" — `config.py:254,262` — fixed ("not a table", "unknown key"); other "is …" reasons left as they were.
+- errors / strong-types — `assert … # noqa: S101` re-checked a Money invariant — `filters.py:121` — fixed: `next(bound for bound in (money.max, money.min) if bound is not None)`.
+- typing — `_Table = dict[str, Any]` — `config.py:64` — fixed: `dict[str, object]`.
+- strong-types (question, deferred) — a ranged `min_salary` threshold is judged on its max, while parsers build only min-only thresholds — `filters.py:142,147` — not changed.
+- Verified after the fix round: `uv run --locked pytest packages/ijob-core/tests/ijob_core_tests/test_filters.py packages/ijob-app/tests/ijob_app_tests/test_config.py -q` → `132 passed in 0.09s`; `uv run --locked ruff check --no-fix` → `All checks passed!`.
+
+## Probe results
+
+- TOML literal strings keep `\b` — `uv run --locked python -I -c "import tomllib; print(tomllib.loads(\"a = ['\\\\bengineer', 'エンジニア']\"))"` → `{'a': ['\\bengineer', 'エンジニア']}` (as planned; the default config uses single-quoted strings).
+- `uv build --package ijob-app --wheel` ships `ijob_app/data/default_config.toml` (coder-run; output deleted).
+
+## Deviations
+
+- 2026-10-31 — unknown keys under `[filters]`, `[filters.role]` and `[filters.min_salary]` raise InvalidValueError, so a typo does not silently drop a filter. Not in spec §8; reviewer accepted as reasonable.
+- 2026-10-31 — `parse_*` functions take a public `field` keyword so config errors name the `filters.*` key.
+- 2026-10-31 — `parse_since` rejects durations over 36500 days (fix round).
+- 2026-10-31 — test naming: `test_flag_parsers` became eight `test_parse_*` tests; `test_config_path_xdg` gained `test_config_path_home_fallback`.
