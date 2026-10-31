@@ -42,7 +42,7 @@ they could only start now.
 
 - `ijob search` with no source flag searches the seed companies and the user's sources, across every
   Tier A and Tier B source the milestone names:
-  - Hiring systems: Greenhouse, Gem, Ashby, Lever, SmartRecruiters, Workable.
+  - Hiring systems: Greenhouse, Gem, Ashby, Lever, Workable.
   - Job boards: Himalayas, Jobicy, RemoteOK, Arbeitnow, 4dayweek, MyCareersFuture, Kalibrr, and
     through one generic RSS adapter We Work Remotely, Python.org Jobs, Golangprojects, Elixir Jobs,
     Djinni and Berlin Startup Jobs.
@@ -71,11 +71,11 @@ they could only start now.
   - Country is ISO-3166 alpha-2 plus a remote scope (`none / country / region / worldwide`). An
     unknown country passes.
   - Role filter: include and exclude title regexes from configuration (including エンジニア and
-    開発), plus hiring-system hints such as SmartRecruiters `function` and Ashby `department`;
+    開発), plus hiring-system hints such as Workable `function` and Ashby `department`;
     keep when in doubt.
   - The ETag cache lives inside the polite HTTP client and hands the cached body back on `304`.
   - Workable is spaced more slowly (about 3 s between requests), after the 429s seen in research.
-  - Gem reuses the Greenhouse parser.
+  - Gem gets its own parser: its response is not Greenhouse-shaped (checked 2026-10-31).
   - Seed companies come from the verified rows of `docs/research/companies.csv`, shipped as package
     data. User sources live in SQLite.
   - A manual URL is detected by the research regexes for hiring systems, else as a schema.org
@@ -97,6 +97,8 @@ they could only start now.
 
 - Everything the milestone excludes: LLM features (including parsing HN comment bodies beyond the
   first line), the TUI, Tier C and Tier D sources, and currency conversion.
+- SmartRecruiters: its API's robots.txt disallows every crawler but LinkedInBot (checked
+  2026-10-31), so its seed companies are skipped as unsupported.
 - JobStreet beyond a deep link.
 - Output formatting beyond a plain listing.
 - Scheduling or background refresh; a search runs when the user runs it.

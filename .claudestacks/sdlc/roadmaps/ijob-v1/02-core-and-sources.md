@@ -10,7 +10,7 @@ created: 2026-10-30
 `ijob search` (no LLM) fetches software-engineering postings from a closed set of Tier A and Tier B
 sources and the seed companies:
 
-- Tier A, hiring systems: Greenhouse, Gem, Ashby, Lever, SmartRecruiters, Workable.
+- Tier A, hiring systems: Greenhouse, Gem, Ashby, Lever, Workable.
 - Tier A, job boards: Himalayas, Jobicy, RemoteOK, Arbeitnow, 4dayweek, MyCareersFuture, Kalibrr,
   and through one generic RSS adapter We Work Remotely, Python.org Jobs, Golangprojects, Elixir
   Jobs, Djinni and Berlin Startup Jobs.
