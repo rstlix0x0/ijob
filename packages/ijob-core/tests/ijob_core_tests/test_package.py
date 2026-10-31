@@ -12,3 +12,8 @@ def test_package_imports() -> None:
 
 def test_package_ships_typing_marker() -> None:
     assert (importlib.resources.files("ijob_core") / "py.typed").is_file()
+
+
+def test_package_requires_python_floor() -> None:
+    requires = importlib.metadata.metadata("ijob-core")["Requires-Python"]
+    assert requires == ">=3.14.10"

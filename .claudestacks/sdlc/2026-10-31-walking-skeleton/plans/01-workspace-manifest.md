@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-31
 built-on: aafd5e32e8cd
 ---
@@ -105,3 +105,22 @@ gate is green. Commit `build: declare walking-skeleton runtime dependencies`.
 
 - The five-command gate in CLAUDE.md is green.
 - `uv run --locked python -c "import httpx, typer, ijob_core, ijob_sources"` exits 0.
+
+## Review findings
+
+- test-mandate — dependency tests check names only; an `==` pin would still pass — `packages/ijob-app/tests/ijob_app_tests/test_package.py:23`, `packages/ijob-sources/tests/ijob_sources_tests/test_package.py:23` (nit, not fixed)
+- project-layout — no test pins `.python-version` to the floor; review is the only guard — `.python-version:1` (nit, not fixed)
+- question — httpx pulls in anyio, whose pytest plugin now autoloads (`plugins: anyio-4.15.1`); later async tests must not lean on it undeclared — `uv.lock` (open)
+- docs — README says "installs Python 3.14", less exact than the 3.14.10 floor; README was out of scope — `README.md:54` (nit, not fixed)
+- blocking: none. Reviewer re-ran the five-command gate: all exit 0, `15 passed` on Python 3.14.10.
+
+## Probe results
+
+- uv can resolve the 3.14.10 floor locally — `uv python list 3.14` → `cpython-3.14.10-macos-aarch64-none /Users/hiraq/.local/bin/python3.14` (installed; no download needed).
+- Gate after the change — `uv sync --locked --all-groups --all-packages` → `Checked 28 packages`; `ruff format --check` → `45 files already formatted`; `ruff check --no-fix` → `All checks passed!`; `mypy --strict .` → `Success: no issues found in 12 source files`; `pytest -q` → `15 passed in 0.03s`; `python -c "import httpx, typer, ijob_core, ijob_sources"` → exit 0.
+- Locked versions — httpx 0.28.1, typer 0.27.3.
+
+## Deviations
+
+- 2026-10-31 — plan 01 ran before plan 02 instead of beside it: changing `.python-version` rebuilds the shared `.venv`, which would race with plan 02's gate in the same worktree. No content change.
+- 2026-10-31 — the per-task commits named in "Done when" were not made: commits are the user's act (CLAUDE.md). Changes are left in the working tree.
