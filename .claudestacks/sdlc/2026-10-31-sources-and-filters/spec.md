@@ -148,6 +148,26 @@ Closed JazzHR jobs answered 410 (three URLs tried). No page used `@graph`.
 | JapanDev (`japandev:all`) | `https://japan-dev.com/cdn/sitemaps/sitemap.xml`, then each new `/jobs/…` page | robots `User-agent: *` has only two salary-guide disallows. The sitemap held 290 `/jobs/` URLs and has no `<lastmod>`. Detail pages are about 210–225 KB with no etag; their `last-modified` equals the request time. JSON-LD `JobPosting` carries `title`, `datePosted` (date), `url`, `hiringOrganization.name`, `jobLocation.address.{addressLocality, addressCountry "JP"}`, `identifier.value` (the URL slug), and `jobLocationType` `TELECOMMUTE` on the remote job, which lists about 240 countries in `applicantLocationRequirements`. `baseSalary` appeared on 1 of 3 pages: `{"currency":"JPY","value":{"minValue":8000000,"maxValue":16000000,"unitText":"YEAR"}}`. |
 | HN (`hn:whoishiring`) | `https://hn.algolia.com/api/v1/search_by_date?tags=story,author_whoishiring`, then `https://hn.algolia.com/api/v1/search?tags=comment,story_{id}&hitsPerPage=1000` | `hn.algolia.com/robots.txt` answered 404 (allow). The same author also posts "Who wants to be hired?", so the thread is chosen by the title prefix `Ask HN: Who is hiring?`. Latest: 49922569, "Ask HN: Who is hiring? (October 2026)", 391 comments in one page (`nbPages` 1), of which 261 are top level (`parent_id` == story id). `comment_text` is HTML with entities (`&#x2F;`, `&#x27;`, `&amp;`); 253 of 261 use `<p>`. 229 of 261 first lines contain at least two `|`, in no fixed field order. |
 
+### 2.5a Keys and JSON types the adapters read
+
+A probe over the saved bodies of §2.1–§2.5 printed:
+
+```text
+ashby keys {'id': True, 'jobUrl': True, 'publishedAt': True, 'department': True} True   # last: compensation.summaryComponents
+lever keys {'id': True, 'hostedUrl': True} True                                          # last: categories.department
+greenhouse departments[0].name Data
+jobicy url True 4dayweek url True
+arbeitnow url True links.next https://www.arbeitnow.com/api/job-board-api?page=2
+mcf _links.next.href https://api.mycareersfuture.gov.sg/v2/jobs?limit=100&page=1&search=software%20en…
+workable job url https://apply.workable.com/j/81B46579FE top description Here at Hugging Face, we're on a journey
+id types: jobicy int kalibrr int
+hn thread objectID type str comment parent_id type int story_id type int created_at 2026-10-22T16:30:02Z
+```
+
+- JSON integer ids (Jobicy, Kalibrr, YC, Greenhouse) become text for `ExternalId`.
+- HN's thread `objectID` is a string, while a comment's `parent_id` is an integer. Comparing them as
+  received keeps none of the comments, so the top-level test compares as integers.
+
 ### 2.6 Seed companies
 
 `docs/research/companies.csv` has 235 rows. A probe (`csv.DictReader`, because the notes column
@@ -251,7 +271,7 @@ Version 1 rows therefore read back with the defaults.
 
 | Operation | Behaviour |
 |---|---|
-| `record(drafts, *, seen_at, still_listed=())` | As in C1 for a known `(source, external_id)`. For a new one, it attaches the sighting to an existing posting only if that posting has **no sighting from the same source** and matches on `canonical_url`, or failing that on `fingerprint` (§7). Otherwise it creates a posting, as C1 does. The same-source exclusion keeps distinct jobs of one board apart: in the saved `palantir` body, 166 of 299 jobs share a normalised title and country with another job. On a match: the display fields follow the latest draft (C1). `country`, `remote`, `role_hint` and `salaries` take the draft's value only when it is non-empty. `still_listed` is a collection of `(SourceRef, ExternalId)`; each known pair gets `last_seen = seen_at` on its sighting and its posting, and unknown pairs are ignored. `RecordResult` gains `merged: int = 0`, which counts new sightings attached to an existing posting. |
+| `record(drafts, *, seen_at, still_listed=())` | As in C1 for a known `(source, external_id)`. For a new one, it attaches the sighting to an existing posting only if that posting has **no sighting from the same source** and matches on `canonical_url`, or failing that on `fingerprint` (§7). Otherwise it creates a posting, as C1 does. The same-source exclusion keeps distinct jobs of one board apart: in the saved `palantir` body, 166 of 299 jobs share a normalised title and country with another job. On every update, known pair or match, the display fields follow the latest draft (C1). `country`, `remote`, `role_hint` and `salaries` take the draft's value only when it is non-empty, so a source that omits a field never erases another source's value. `canonical_url` and `fingerprint` are then recomputed from the posting's resulting values, not from the draft alone. `still_listed` is a collection of `(SourceRef, ExternalId)`; each known pair gets `last_seen = seen_at` on its sighting and its posting, and unknown pairs are ignored. `RecordResult` gains `merged: int = 0`, which counts new sightings attached to an existing posting. |
 | `mark_fetched(ref, at)` | Sets `sources.last_fetched_at`. |
 | `open_postings(*, sources=None, now)` | The postings that have a sighting whose `last_seen` equals its source's `last_fetched_at`. The source must not be removed, its `last_fetched_at` must be within 7 days of `now`, and it must be in `sources` when that is given. Ordered as C1's `postings`. |
 | `stale_sources(*, now)` | The sources not removed whose `last_fetched_at` is older than 7 days. |
@@ -292,14 +312,22 @@ local `/usr/share/zoneinfo/iso3166.tab`, begins "This file is in the public doma
 of 2009-05-17 by Arthur David Olson". The file has 249 data rows (`grep -c -v '^#'` printed `249`),
 for example `US	United States`, `GB	Britain (UK)` and `KR	Korea (South)`.
 
-`parse_country(text)` tries the whole text and then the part after its last `", "`. A part is
-accepted, case-insensitively, when it is:
+`parse_country(text)` tries the whole text and then the part after its last `", "`, stripping each
+part. A part is accepted, case-insensitively, when it is:
 
 - an alpha-2 code in the table;
 - a name in the table;
-- an alias for a spelling seen in the fetched bodies that the table spells differently: `USA`
-  (Ashby, §2.1), `UK` (Jobicy `jobGeo`, one item in each saved page) and `Czechia` (Himalayas
-  `locationRestrictions`; the table has `CZ	Czech Republic`).
+- an alias for a spelling that the fetched bodies use and the table spells differently:
+
+  | Alias | Code | Seen in | Table spelling |
+  |---|---|---|---|
+  | `USA` | US | Ashby, §2.1 | |
+  | `UK` | GB | Jobicy `jobGeo`, one item in each saved page | |
+  | `United Kingdom` | GB | 4dayweek (71 occurrences over two pages), Ashby `ramp` (192), Gem `retool` (6), Greenhouse `tailscale` (72), Himalayas (4) | `GB	Britain (UK)` |
+  | `South Korea` | KR | Jobicy (1) | `Korea (South)` |
+  | `Czechia` | CZ | Himalayas `locationRestrictions` | `CZ	Czech Republic` |
+
+  The counts are text occurrences, printed by a probe over the saved bodies.
 
 Anything else returns `None`, and a posting without a country passes every country filter (§8).
 `"San Francisco, United States"` and `"Toronto, Ontario, Canada"` therefore resolve to `US` and `CA`.
@@ -369,8 +397,9 @@ below is recorded in §2.
 - `title` ← `title`; company ← `hiringOrganization.name`.
 - `jobLocation` may be an object or a list (§2.4):
   - location ← the first `address.addressLocality`, or `address` itself when it is a string
-    (elixirjobs, §2.3);
-  - country ← the first `addressCountry` that `parse_country` accepts.
+    (elixirjobs, §2.3), or else the first `addressCountry` (LetsGetRusty carries only that, §2.5);
+  - country ← the first `addressCountry` that `parse_country` accepts, or else a string `address`
+    through `parse_country` (`"Helsinki, Finland"` → `FI`).
 - `jobLocationType == "TELECOMMUTE"` makes the job remote. The scope is `COUNTRY` when
   `applicantLocationRequirements` names exactly one country, and `None` otherwise.
 - `baseSalary.value.{minValue,maxValue}` with `currency` and `unitText` `YEAR`/`MONTH`/`HOUR` becomes
@@ -397,8 +426,14 @@ empty batch; otherwise it needs one of these:
 | Source | Passes when |
 |---|---|
 | `greenhouse`, `workable` | Greenhouse: any job's `company_name`; Workable: the top-level `name`. The value must equal or contain the company, or be contained by it. |
-| `gem`, `ashby`, `lever` (and also greenhouse and workable) | any job's description (`content`, `content_plain`, `descriptionPlain`, `description`) contains the company. §2.7 shows this holds on real boards. |
+| `gem`, `ashby`, `lever` (and also greenhouse and workable) | a description contains the company. The descriptions are each job's `content`, `content_plain` or `descriptionPlain`, and Workable's top-level `description` (§2.5a). §2.7 shows this holds on real boards. |
 | `jobposting:<h>` | the page's `hiringOrganization.name` matches the company, as in the first row |
+
+Both sides of every comparison go through the same company normalisation (§7). Three verified seeds
+have punctuated names: `Anysphere (Cursor)`, `Checkout.com` and `Crypto.com` (a probe over
+`companies.csv` printed exactly these three). Normalising only one side would therefore never match
+a description that writes `Checkout.com`. A company with a parenthesised part also passes when the
+part inside the parentheses, or the part before them, matches on its own (`Cursor`, `Anysphere`).
 
 - **Exempt sources.** Boards, feeds and Tier B sources are exempt: each lists many companies, so
   there is no single company to match. A `feed:<h>` has no per-item company field (§2.3), so the
@@ -418,8 +453,11 @@ empty batch; otherwise it needs one of these:
    `docs/research/ats_endpoints.md:216` ("Detecting the ATS behind a careers URL") and narrowed to
    `(boards|job-boards).greenhouse.io/{t}`, `jobs.lever.co/{t}`, `jobs.ashbyhq.com/{t}`,
    `apply.workable.com/{t}` and `jobs.gem.com/{t}`. It becomes that kind's source with key `{t}`.
-2. **A JobPosting page.** Otherwise the page is fetched. One `JobPosting` in its JSON-LD makes it a
-   `jobposting:<h>` source.
+   On Workable, `{t}` is never `j` or `api`: a job link such as
+   `https://apply.workable.com/j/81B46579FE` (§2.5a) names no account, so it goes on to step 2.
+2. **A JobPosting page.** Otherwise the page is fetched. **Exactly one** `JobPosting` in its JSON-LD
+   makes it a `jobposting:<h>` source. Several (a listing page) go on to step 3. The identity check
+   uses this same response; there is no second fetch.
 3. **A feed.** Otherwise, when the body parses as RSS 2.0, it becomes a `feed:<h>` source.
 4. **Rejected.** Otherwise `UnsupportedUrlError` names the reason.
 
@@ -458,7 +496,7 @@ Every rule keeps a posting when the data cannot decide.
 
 | Filter | Drops a posting only when |
 |---|---|
-| role | the title matches an `exclude` pattern; or it matches no `include` pattern, its `role_hint` is present, and the hint matches none either |
+| role | the title matches an `exclude` pattern; or `include` is non-empty, the title matches no `include` pattern, its `role_hint` is present, and the hint matches none either. An empty `include` never drops. |
 | country | `countries` is set, the posting's country is known and not in it, and its remote scope is `NONE` or `COUNTRY`. An unknown (`None`), `REGION` or `WORLDWIDE` scope passes. |
 | remote | `remote` is set, and the posting's scope is known and not in it |
 | since | `posted_at` is known and older than `now - since` |
@@ -476,7 +514,10 @@ Every rule keeps a posting when the data cannot decide.
   - With no file, `ijob_app/data/default_config.toml` applies. Its include patterns are
     `\bengineer`, `\bdeveloper`, `エンジニア` and `開発`; its excludes are `\bsales\b`, `\brecruit`,
     `\bmarketing\b` and `\baccount executive\b`.
-  - A per-run flag replaces its config value. An invalid config exits `2` and names the key.
+  - A user file is layered over the shipped default key by key: a key it does not set keeps the
+    default's value, so a file setting only `countries` keeps the default role patterns.
+  - A per-run flag replaces its config value. An invalid config, or a `--config` path that does not
+    exist, exits `2` and names the key or the path.
 - **Default-pattern probe.**
 
   | Title | include | exclude |
@@ -499,7 +540,9 @@ ijob search [--source REF]... [--country CC]... [--remote SCOPE]... [--since 7d]
 ijob sources list | add REF --company NAME | remove REF | add-url URL --company NAME   [--db PATH]
 ```
 
-1. **Open and seed.** Open the store and import the seeds.
+1. **Validate, open and seed.** Build the filters from config and flags first, so a bad value exits
+   `2` before any request (as C1 validated keys before fetching). Then open the store and import the
+   seeds.
 2. **Choose the sources.** Without `--source`, every row not removed. Each `--source REF` must parse
    with `parse_source_ref` and name a row that is not removed; otherwise exit `2` with
    `unknown source <ref>; add it with: ijob sources add <ref> --company NAME`. Either way, sources
@@ -526,7 +569,8 @@ ijob sources list | add REF --company NAME | remove REF | add-url URL --company 
 
 - `ijob_sources.errors` gains `IdentityMismatchError(SourcesError)` (ref, reason) and
   `UnsupportedUrlError(SourcesError)` (url, reason).
-- `Money`, `parse_source_ref`, `parse_country` and config validation raise `InvalidValueError`.
+- `Money`, `parse_source_ref` and config validation raise `InvalidValueError`. `parse_country`
+  never raises; it returns `None` for text it cannot read (§5.2).
 - Walking-skeleton spec §7 holds: `raise … from` in every handler, and `collect` is the one isolation
   point. The per-job catch of a detail request's `SourcesError` (§6.1) sits inside the adapter, like
   the C1 per-job `InvalidValueError` catch.
