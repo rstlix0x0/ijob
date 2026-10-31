@@ -1,0 +1,169 @@
+kind,key,company
+greenhouse,anthropic,Anthropic
+greenhouse,stripe,Stripe
+ashby,notion,Notion
+greenhouse,databricks,Databricks
+ashby,openai,OpenAI
+greenhouse,cloudflare,Cloudflare
+greenhouse,datadog,Datadog
+ashby,ramp,Ramp
+greenhouse,figma,Figma
+ashby,linear,Linear
+ashby,supabase,Supabase
+greenhouse,vercel,Vercel
+greenhouse,discord,Discord
+ashby,snowflake,Snowflake
+greenhouse,airbnb,Airbnb
+workable,huggingface,Hugging Face
+greenhouse,coinbase,Coinbase
+ashby,cohere,Cohere
+ashby,perplexity,Perplexity
+greenhouse,gitlab,GitLab
+ashby,mistral.ai,Mistral AI
+greenhouse,elastic,Elastic
+greenhouse,mongodb,MongoDB
+greenhouse,scaleai,Scale AI
+greenhouse,robinhood,Robinhood
+greenhouse,dropbox,Dropbox
+greenhouse,reddit,Reddit
+greenhouse,pinterest,Pinterest
+greenhouse,lyft,Lyft
+greenhouse,twilio,Twilio
+ashby,plaid,Plaid
+greenhouse,okta,Okta
+greenhouse,asana,Asana
+greenhouse,instacart,Instacart
+greenhouse,gusto,Gusto
+greenhouse,brex,Brex
+greenhouse,samsara,Samsara
+ashby,replit,Replit
+lever,palantir,Palantir
+greenhouse,affirm,Affirm
+ashby,cursor,Anysphere (Cursor)
+greenhouse,roblox,Roblox
+ashby,modal,Modal
+greenhouse,airtable,Airtable
+ashby,elevenlabs,ElevenLabs
+greenhouse,duolingo,Duolingo
+greenhouse,doordashusa,DoorDash
+gem,retool,Retool
+greenhouse,xai,xAI
+greenhouse,togetherai,Together AI
+ashby,benchling,Benchling
+greenhouse,coreweave,CoreWeave
+ashby,harvey,Harvey
+greenhouse,gleanwork,Glean
+ashby,runway-ml,Runway
+ashby,lambda,Lambda
+ashby,sierra,Sierra
+greenhouse,webflow,Webflow
+ashby,zapier,Zapier
+gem,groq,Groq
+greenhouse,faire,Faire
+ashby,sentry,Sentry
+lever,spotify,Spotify
+greenhouse,n26,N26
+ashby,confluent,Confluent
+ashby,DeepL,DeepL
+greenhouse,monzo,Monzo
+greenhouse,adyen,Adyen
+greenhouse,celonis,Celonis
+greenhouse,getyourguide,GetYourGuide
+greenhouse,contentful,Contentful
+greenhouse,traderepublicbank,Trade Republic
+greenhouse,hellofresh,HelloFresh
+greenhouse,sumup,SumUp
+greenhouse,realtimeboardglobal,Miro
+ashby,synthesia,Synthesia
+ashby,qonto,Qonto
+ashby,checkout.com,Checkout.com
+greenhouse,gocardless,GoCardless
+greenhouse,deliveroo,Deliveroo
+ashby,mollie,Mollie
+greenhouse,wolt,Wolt
+greenhouse,dataiku,Dataiku
+ashby,pleo,Pleo
+greenhouse,doctolib,Doctolib
+ashby,photoroom,Photoroom
+greenhouse,typeform,Typeform
+greenhouse,raisin,Raisin
+greenhouse,bitpanda,Bitpanda
+lever,pipedrive,Pipedrive
+workable,mercari,Mercari
+greenhouse,paypay,PayPay
+workable,smartnews,SmartNews
+ashby,pennylane,Pennylane
+lever,woven-by-toyota,Woven by Toyota
+lever,Autify,Autify
+workable,sakana-ai,Sakana AI
+greenhouse,xendit,Xendit
+greenhouse,agoda,Agoda
+lever,ninjavan,Ninja Van
+ashby,airwallex,Airwallex
+workable,fundingsocieties,Funding Societies
+lever,nium,Nium
+ashby,1password,1Password
+ashby,zed,Zed Industries
+greenhouse,tailscale,Tailscale
+lever,crypto,Crypto.com
+ashby,materialize,Materialize
+lever,Coda,Coda Payments
+ashby,neon,Neon
+greenhouse,grafanalabs,Grafana Labs
+ashby,railway,Railway
+greenhouse,planetscale,PlanetScale
+ashby,temporal,Temporal
+ashby,render,Render
+greenhouse,warp,Warp
+greenhouse,cockroachlabs,Cockroach Labs
+ashby,clickhouse,ClickHouse
+greenhouse,chainguard,Chainguard
+ashby,influxdata,InfluxData
+ashby,astral,Astral
+greenhouse,fastly,Fastly
+greenhouse,mozilla,Mozilla
+greenhouse,dfinity,DFINITY
+ashby,mystenlabs,Mysten Labs
+ashby,docker,Docker
+ashby,svix,Svix
+lever,meili,Meilisearch
+ashby,ditto,Ditto
+ashby,kong,Kong
+ashby,vanta,Vanta
+ashby,ledger,Ledger
+greenhouse,pulumicorporation,Pulumi
+ashby,parity,Parity Technologies
+greenhouse,thunes,Thunes
+lever,binance,Binance
+workable,ajaib,Ajaib
+greenhouse,brave,Brave
+greenhouse,helsing,Helsing
+greenhouse,aptoslabs,Aptos Labs
+ashby,prefect,Prefect
+workable,anza-xyz,Anza
+greenhouse,buildkite,Buildkite
+ashby,matter-labs,Matter Labs
+greenhouse,polyai,PolyAI
+ashby,lovable,Lovable
+ashby,supercell,Supercell
+ashby,wayve,Wayve
+greenhouse,sourcegraph91,Sourcegraph
+ashby,taxfix.com,Taxfix
+himalayas,all,-
+jobicy,engineering,-
+remoteok,all,-
+arbeitnow,all,-
+4dayweek,engineering,-
+mycareersfuture,software-engineer,-
+kalibrr,software-engineer,-
+rss,wwr-programming,-
+rss,wwr-backend,-
+rss,python,-
+rss,golang,-
+rss,elixir,-
+rss,djinni-python,-
+rss,bsj,-
+yc,swe,-
+letsgetrusty,all,-
+japandev,all,-
+hn,whoishiring,-
