@@ -1,19 +1,24 @@
 import dataclasses
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from decimal import Decimal
 from typing import Any, override
 
 import pytest
+from ijob_core.countries import CountryCode
 from ijob_core.errors import InvalidValueError
 from ijob_core.model import (
     ExternalId,
     Posting,
     PostingId,
+    RemoteScope,
     Sighting,
     SightingDraft,
     SourceKind,
     SourceRef,
     parse_source_key,
+    parse_source_ref,
 )
+from ijob_core.money import Money, Period
 
 _STRIPE = SourceRef(SourceKind.GREENHOUSE, parse_source_key("stripe"))
 _AWARE = datetime(2026, 8, 4, 14, 21, 41, tzinfo=timezone(timedelta(hours=-4)))
@@ -43,6 +48,38 @@ def test_source_ref_is_frozen_and_hashable() -> None:
     assert {first: 1}[second] == 1
     with pytest.raises(dataclasses.FrozenInstanceError):
         first.key = parse_source_key("other")  # type: ignore[misc]  # frozen field
+
+
+@pytest.mark.parametrize("kind", list(SourceKind))
+def test_source_ref_round_trip(kind: SourceKind) -> None:
+    ref = SourceRef(kind, parse_source_key("x"))
+    assert parse_source_ref(str(ref)) == ref
+
+
+def test_parse_source_ref_fourdayweek() -> None:
+    ref = parse_source_ref("4dayweek:engineering")
+    assert ref.kind is SourceKind.FOURDAYWEEK
+    assert ref.key == "engineering"
+
+
+def test_parse_source_ref_rejects_a_second_colon() -> None:
+    with pytest.raises(InvalidValueError):
+        parse_source_ref("greenhouse:a:b")
+
+
+@pytest.mark.parametrize("text", ["greenhouse", "nosuch:x", "greenhouse:a/b", ":x"])
+def test_parse_source_ref_rejects(text: str) -> None:
+    with pytest.raises(InvalidValueError):
+        parse_source_ref(text)
+
+
+def test_remote_scope_values() -> None:
+    assert [scope.value for scope in RemoteScope] == [
+        "none",
+        "country",
+        "region",
+        "worldwide",
+    ]
 
 
 def _draft(**overrides: Any) -> SightingDraft:  # noqa: ANN401  # forwards arbitrary field overrides
@@ -76,6 +113,31 @@ def test_sighting_draft_accepts_valid_values() -> None:
     assert bare.posted_at is None
 
 
+def test_draft_new_fields_default() -> None:
+    draft = _draft()
+    assert draft.salaries == ()
+    assert draft.country is None
+    assert draft.remote is None
+    assert draft.role_hint is None
+    assert not draft.low_confidence
+
+
+def test_draft_carries_new_fields() -> None:
+    pay = Money(Decimal(100), Decimal(200), "USD", Period.YEAR)
+    draft = _draft(
+        salaries=(pay,),
+        country=CountryCode("CA"),
+        remote=RemoteScope.COUNTRY,
+        role_hint="data engineer",
+        low_confidence=True,
+    )
+    assert draft.salaries == (pay,)
+    assert draft.country == "CA"
+    assert draft.remote is RemoteScope.COUNTRY
+    assert draft.role_hint == "data engineer"
+    assert draft.low_confidence
+
+
 @pytest.mark.parametrize("field", ["external_id", "title", "company", "url"])
 def test_sighting_draft_rejects_empty_required_text(field: str) -> None:
     with pytest.raises(InvalidValueError) as exc_info:
@@ -87,6 +149,14 @@ def test_sighting_draft_rejects_empty_required_text(field: str) -> None:
 def test_sighting_draft_rejects_non_http_url(url: str) -> None:
     with pytest.raises(InvalidValueError):
         _draft(url=url)
+
+
+@pytest.mark.parametrize("url", ["https://[bad/1", "https://example\uff0f.com/x"])
+def test_sighting_draft_rejects_unparseable_url(url: str) -> None:
+    with pytest.raises(InvalidValueError) as exc_info:
+        _draft(url=url)
+    assert exc_info.value.field == "url"
+    assert isinstance(exc_info.value.__cause__, ValueError)
 
 
 def test_sighting_draft_rejects_naive_posted_at() -> None:
@@ -136,3 +206,37 @@ def test_posting_and_sighting_hold_their_fields() -> None:
     )
     assert sighting.posting_id == posting.id
     assert sighting.last_seen == posting.last_seen
+
+
+def test_posting_new_fields_default_and_carry() -> None:
+    when = datetime(2026, 10, 1, tzinfo=UTC)
+    plain = Posting(
+        id=PostingId(1),
+        title="T",
+        company="C",
+        location=None,
+        url="https://x",
+        posted_at=None,
+        first_seen=when,
+        last_seen=when,
+    )
+    assert plain.salaries == ()
+    assert plain.country is None
+    assert plain.remote is None
+    assert plain.role_hint is None
+    assert not plain.low_confidence
+
+    pay = Money(Decimal(5), None, "EUR", Period.HOUR)
+    full = dataclasses.replace(
+        plain,
+        salaries=(pay,),
+        country=CountryCode("DE"),
+        remote=RemoteScope.WORLDWIDE,
+        role_hint="backend",
+        low_confidence=True,
+    )
+    assert full.salaries == (pay,)
+    assert full.country == "DE"
+    assert full.remote is RemoteScope.WORLDWIDE
+    assert full.role_hint == "backend"
+    assert full.low_confidence

@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-31
 built-on: aeb01064881c
 ---
@@ -158,3 +158,28 @@ included) and the gate is green. Commit `feat(core): extend the model for every 
 - `uv run --locked pytest packages/ijob-core` passes, the C1 tests included.
 - `grep -rnE "^(import|from) (httpx|anthropic|openai|dspy)" packages/ijob-core/src` prints nothing:
   `ijob-core` stays free of network and LLM imports.
+
+## Review findings
+
+- docstring-discipline — `low_confidence` docstrings on SightingDraft and Posting stated the wrong meaning — `model.py:176`, `model.py:237` — fixed and verified: `uv run --locked pytest packages/ijob-core/tests/ijob_core_tests/test_model.py packages/ijob-core/tests/ijob_core_tests/test_countries.py -q` → `72 passed in 0.03s`; both docstrings now read "Whether the fields were parsed heuristically (as from free-text comments) and may be mis-assigned."
+- correctness (spec defect, deferred) — spec §5.2 accepts an alpha-2 code as the last comma part, so US "City, ST" locations resolve to other countries ("San Francisco, CA"→CA, "Atlanta, GA"→GA, "Wilmington, DE"→DE) — `countries.py:80` / spec §5.2 — not changed: the code follows the approved spec; to be amended by `design` before plan 06 calls `parse_country` on Greenhouse locations.
+- docstring-discipline — `country_codes` summary said "List" for a frozenset — `countries.py:48` — fixed (summary "Return the set of alpha-2 codes in the table.").
+- test-mandate — `test_parse_source_ref_splits_at_the_first_colon` claimed more than it tested — `test_model.py:65` — fixed (renamed `test_parse_source_ref_rejects_a_second_colon`).
+- strict-quality — two `# type: ignore[arg-type]` in test_model.py — fixed (typed construction plus `dataclasses.replace`).
+- strong-types (nit, no action) — Money fields `min`/`max` shadow builtins; currency is a validated `str` — `money.py:38` — kept: spec §5.1 names the fields.
+- test-mandate (nit, no action) — nothing in the gate catches `iso3166.tab` missing from the wheel; verified by hand with `uv build --package ijob-core --wheel` (ships `ijob_core/data/iso3166.tab`, 4841 bytes).
+- spec addition — public `country_codes()` added for the 249-row test (see Deviations).
+- spec addition — Money rejects NaN and ±Infinity bounds (see Deviations).
+
+## Probe results
+
+- iso3166.tab row count and licence — `grep -vc '^#' /usr/share/zoneinfo/iso3166.tab` → `249`; line 3 `# This file is in the public domain, so clarified as of`; spellings `CZ Czech Republic`, `GB Britain (UK)`, `KR Korea (South)`, `US United States` (aliases needed, as planned).
+- model symbols Task 3 assumes — `grep -nE "^class |^def " model.py errors.py` → `SourceKind` L25, `parse_source_key` L36, `SourceRef` L70, `SightingDraft` L88, `Posting` L136, `InvalidValueError` errors.py L8 (as planned).
+- plan proof — `grep -rnE "^(import|from) (httpx|anthropic|openai|dspy)" packages/ijob-core/src` → no output (exit 1).
+- plan proof — `uv run --locked pytest packages/ijob-core -q` → `114 passed` (before the fix round).
+
+## Deviations
+
+- 2026-10-31 — `Money.__post_init__` also rejects non-finite bounds (NaN, ±Infinity) with `InvalidValueError`. `Decimal("NaN") < 0` raises `decimal.InvalidOperation`, which would break spec §10's "raises InvalidValueError". Plan-level addition; spec §5.1 should record it at the next design pass.
+- 2026-10-31 — `countries.py` exposes public `country_codes() -> frozenset[CountryCode]` so `test_table_has_249_codes` does not read a private member. Plan-level addition.
+- 2026-10-31 — extra tests beyond the named ones (Posting defaults, RemoteScope values, zero/equal bounds, frozen/hashable Money).

@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-10-31
 depends-on: [01]
 built-on: aeb01064881c
@@ -248,3 +248,27 @@ included) and the gate is green. Commit `feat(core): list open postings`.
 
 - The five-command gate is green across the workspace.
 - `uv run --locked pytest packages/ijob-core` passes, the C1 store tests included, unchanged.
+
+## Review findings
+
+Reviewer verdict: blocking `dedupe.py:67`. Gate re-run by the reviewer: all five commands exit 0, pytest 455 passed.
+
+- correctness (blocking) — `canonical_url` calls `urlsplit`, which raises ValueError on a malformed URL (`https://[bad/1`) that SightingDraft accepted, so one bad job aborted and rolled back a whole `record` batch — `dedupe.py:67` — fixed: `SightingDraft.__post_init__` rejects an unparseable URL with InvalidValueError (`from` the ValueError); `test_sighting_draft_rejects_unparseable_url` failed first, then passed.
+- test-mandate — no test that a canonical_url match beats a fingerprint match — `store.py:373-390` — fixed: `test_canonical_url_match_beats_fingerprint_match` (guard; mutation with `reversed(keys)` makes it fail).
+- performance — `open_postings` scanned sightings with no index on `sightings.posting_id` (reviewer measured 0.29 s at 5k postings, 4.43 s at 20k) — `store.py:505-514` — fixed: migration 2 gains `CREATE INDEX sightings_posting_id ON sightings(posting_id)`; speedup not measured.
+- design (deferred, needs spec decision) — a posting's `canonical_url` follows the last writer, so a later source carrying the first source's URL and no country can create a duplicate (`RecordResult(new=1)`) — `store.py:420-459` — not changed.
+- nits fixed — canonical_url docstring states its precondition and Raises; `_open_ids` renamed `_open_titles`; needless `merged=0` reverted on a C1 assertion.
+- nits/questions skipped — `_normalise_text` punctuation-only collision (behaviour change), untested `role_hint=""` branch, weak `ORDER BY id` guard, version-1 `canonical_url` backfill (needs spec amendment).
+- Verified after the fix round (full gate, 2026-10-31): sync ok; `ruff format --check` → `88 files already formatted`; `ruff check --no-fix` → `All checks passed!`; `mypy --strict .` → `Success: no issues found in 44 source files`; `pytest -q` → `458 passed in 0.55s`.
+
+## Probe results
+
+- store.py structure the tasks assume — `grep -n "_MIGRATIONS\|BEGIN IMMEDIATE\|def " store.py` → `_MIGRATIONS` L30, `RecordResult` L68, `_to_text` L80 (fixed-width UTC, `isoformat(timespec="microseconds")`), `Store.open` L106, `record` L126, `BEGIN IMMEDIATE` L152, `_write_draft` L161, `postings` L212, `sighting` L245, `_migrate` L290 (as planned).
+
+## Deviations
+
+- 2026-10-31 — defect of the plan: the plan's Proof says "C1 store tests included, unchanged", but C1 tests asserted schema version 1. `test_open_creates_schema_version_1` became `test_fresh_database_is_version_2`, and `test_open_is_idempotent` asserts 2. Three C1 tests that recorded two sources with the same default URL now give source B a distinct URL, because those drafts merge as spec §4 intends. `test_record_is_atomic` imports the private `_Outcome`. Test intent is unchanged.
+- 2026-10-31 — migration 2 has one statement more than spec §4 lists: the `sightings_posting_id` index (fix round). Migration 2 is unreleased, so it was added in place.
+- 2026-10-31 — `SightingDraft` (plan 01's model) now rejects unparseable URLs (fix round).
+- 2026-10-31 — `normalise_company` never strips the last remaining token ("Co" → "co"), so a key is never empty; the `utm_` match ignores case; `low_confidence` follows the latest draft on update or merge (outside the spec's non-empty rule, as plan Task 2 says).
+- 2026-10-31 — `remove_source` and `mark_fetched` on an unknown ref are silent no-ops; `add_source` on an existing ref only clears `removed`; the 7-day window is inclusive; `stale_sources` ignores never-fetched rows.

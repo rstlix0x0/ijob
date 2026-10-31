@@ -1,9 +1,14 @@
 """Domain types for job sources, the postings seen on them and their sightings.
 
 A source adapter returns `SightingDraft` values; the store turns them into
-`Posting` and `Sighting` records. `parse_source_key` and `SightingDraft` validate
-their input when called or built, so code that receives a `SourceKey` or a draft can
-trust it; `Posting` and `Sighting` are records the store builds from accepted drafts.
+`Posting` and `Sighting` records. `parse_source_key`, `parse_source_ref` and
+`SightingDraft` validate their input when called or built, so code that receives a
+`SourceKey`, a `SourceRef` from `parse_source_ref`, or a draft can trust it;
+`Posting` and `Sighting` are records the store builds from accepted drafts.
+
+`SourceKind` names every kind of source. `RemoteScope` says where a remote job
+may be worked from. A draft and a `Posting` can also carry salaries (`Money`), a
+`CountryCode`, a remote scope, a role hint and a low-confidence flag.
 
 The display fields of a `Posting` are `title`, `company`, `location`, `url` and
 `posted_at`.
@@ -14,18 +19,49 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Final, NewType, override
+from urllib.parse import urlsplit
 
+from ijob_core.countries import CountryCode
 from ijob_core.errors import InvalidValueError
+from ijob_core.money import Money
 
 _SOURCE_KEY_PATTERN: Final = re.compile(r"[A-Za-z0-9._-]+")
 _RESERVED_SOURCE_KEYS: Final = frozenset({".", ".."})
 _HTTP_PREFIXES: Final = ("http://", "https://")
+_REF_SEPARATOR: Final = ":"
 
 
 class SourceKind(StrEnum):
     """The kind of job source a posting was seen on."""
 
     GREENHOUSE = "greenhouse"
+    GEM = "gem"
+    ASHBY = "ashby"
+    LEVER = "lever"
+    WORKABLE = "workable"
+    HIMALAYAS = "himalayas"
+    JOBICY = "jobicy"
+    REMOTEOK = "remoteok"
+    ARBEITNOW = "arbeitnow"
+    MYCAREERSFUTURE = "mycareersfuture"
+    KALIBRR = "kalibrr"
+    RSS = "rss"
+    YC = "yc"
+    LETSGETRUSTY = "letsgetrusty"
+    JAPANDEV = "japandev"
+    HN = "hn"
+    JOBPOSTING = "jobposting"
+    FEED = "feed"
+    FOURDAYWEEK = "4dayweek"
+
+
+class RemoteScope(StrEnum):
+    """Where a remote job may be worked from."""
+
+    NONE = "none"
+    COUNTRY = "country"
+    REGION = "region"
+    WORLDWIDE = "worldwide"
 
 
 SourceKey = NewType("SourceKey", str)
@@ -84,6 +120,40 @@ class SourceRef:
         return f"{self.kind}:{self.key}"
 
 
+def parse_source_ref(text: str) -> SourceRef:
+    """Read `<kind>:<key>` as a source reference.
+
+    The text is split at its first `:`. This is the inverse of `str(SourceRef)`.
+
+    Args:
+        text: The text to read, e.g. `greenhouse:stripe`.
+
+    Returns:
+        The source reference the text names.
+
+    Raises:
+        InvalidValueError: If `text` has no `:`, its kind is not a `SourceKind`
+            value, or its key is not a valid source key.
+
+    Examples:
+        >>> str(parse_source_ref("4dayweek:engineering"))
+        '4dayweek:engineering'
+        >>> parse_source_ref("greenhouse")
+        Traceback (most recent call last):
+            ...
+        ijob_core.errors.InvalidValueError: invalid source_ref: 'greenhouse' has no ':'
+    """
+    kind_text, separator, key_text = text.partition(_REF_SEPARATOR)
+    if not separator:
+        raise InvalidValueError("source_ref", f"{text!r} has no {_REF_SEPARATOR!r}")
+    try:
+        kind = SourceKind(kind_text)
+    except ValueError as error:
+        reason = f"{kind_text!r} is not a source kind"
+        raise InvalidValueError("source_ref", reason) from error
+    return SourceRef(kind, parse_source_key(key_text))
+
+
 @dataclass(frozen=True, slots=True)
 class SightingDraft:
     """A job seen on a source, as an adapter reports it.
@@ -98,6 +168,14 @@ class SightingDraft:
         posted_at: When the source published the job, timezone-aware, when
             the source says.
         raw: The source's payload for the job, as text.
+        salaries: The pay the source states, one `Money` per range; empty when
+            it states none.
+        country: The country the job is in, when known.
+        remote: Where the job may be worked from, when the source says.
+        role_hint: The source's own label for the kind of role, when it gives
+            one.
+        low_confidence: Whether the fields were parsed heuristically (as from
+            free-text comments) and may be mis-assigned.
     """
 
     source: SourceRef
@@ -108,14 +186,20 @@ class SightingDraft:
     url: str
     posted_at: datetime | None
     raw: str
+    salaries: tuple[Money, ...] = ()
+    country: CountryCode | None = None
+    remote: RemoteScope | None = None
+    role_hint: str | None = None
+    low_confidence: bool = False
 
     def __post_init__(self) -> None:
         """Reject a draft that cannot describe a job.
 
         Raises:
             InvalidValueError: If `external_id`, `title`, `company` or `url` is
-                empty, if `url` does not start with `http://` or `https://`,
-                or if `posted_at` is set but has no timezone.
+                empty, if `url` does not start with `http://` or `https://` or
+                cannot be parsed as an address, or if `posted_at` is set but
+                has no timezone.
         """
         required = (
             ("external_id", self.external_id),
@@ -128,6 +212,10 @@ class SightingDraft:
                 raise InvalidValueError(name, "is empty")
         if not self.url.startswith(_HTTP_PREFIXES):
             raise InvalidValueError("url", f"{self.url!r} is not an http(s) address")
+        try:
+            urlsplit(self.url)
+        except ValueError as error:
+            raise InvalidValueError("url", f"{self.url!r} cannot be parsed") from error
         if self.posted_at is not None and self.posted_at.utcoffset() is None:
             raise InvalidValueError("posted_at", "has no timezone")
 
@@ -147,6 +235,13 @@ class Posting:
         posted_at: When the job was published, when known.
         first_seen: When the posting was first recorded.
         last_seen: When the posting was last recorded.
+        salaries: The pay the posting states, one `Money` per range; empty when
+            none is stated.
+        country: The country the job is in, when known.
+        remote: Where the job may be worked from, when known.
+        role_hint: The source's own label for the kind of role, when known.
+        low_confidence: Whether the fields were parsed heuristically (as from
+            free-text comments) and may be mis-assigned.
     """
 
     id: PostingId
@@ -157,6 +252,11 @@ class Posting:
     posted_at: datetime | None
     first_seen: datetime
     last_seen: datetime
+    salaries: tuple[Money, ...] = ()
+    country: CountryCode | None = None
+    remote: RemoteScope | None = None
+    role_hint: str | None = None
+    low_confidence: bool = False
 
 
 @dataclass(frozen=True, slots=True)
