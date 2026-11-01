@@ -8,7 +8,7 @@ import asyncio
 import json
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from typing import Any, Final
+from typing import Any, Final, assert_never
 
 import dspy
 from dspy.utils.exceptions import AdapterParseError, LMError
@@ -24,7 +24,7 @@ from ijob_ai.errors import (
 )
 from ijob_ai.llm.budget import Budget
 from ijob_ai.llm.meter import CallMeter, open_meter
-from ijob_ai.llm.reference import Provider
+from ijob_ai.llm.reference import Provider, parse_model_ref
 from ijob_ai.llm.settings import Task
 from ijob_ai.tracing import attributes
 from ijob_ai.tracing.attributes import Outcome
@@ -50,11 +50,38 @@ def _openrouter_cost(entry: Mapping[str, Any]) -> float | None:
     return None
 
 
+def _count(value: object) -> int | None:
+    """Return `value` when it is a token count, else None."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def _meter_openrouter(meter: CallMeter, history: list[Mapping[str, Any]]) -> None:
     """Fill the meter from the LM copy's last history entry, when it has one."""
-    if history:
-        meter.completed = True
-        meter.cost_usd = _openrouter_cost(history[-1])
+    if not history:
+        return
+    entry = history[-1]
+    meter.completed = True
+    meter.cost_usd = _openrouter_cost(entry)
+    response_model = entry.get("response_model")
+    if isinstance(response_model, str):
+        meter.model = response_model
+    usage = entry.get("usage")
+    if isinstance(usage, Mapping):
+        meter.input_tokens = _count(usage.get("prompt_tokens"))
+        meter.output_tokens = _count(usage.get("completion_tokens"))
+
+
+def _meter_from_history(
+    provider: Provider, meter: CallMeter, history: list[Mapping[str, Any]]
+) -> None:
+    """Complete the meter from history for a provider that does not meter itself."""
+    match provider:
+        case Provider.OPENROUTER:
+            _meter_openrouter(meter, history)
+        case Provider.CLAUDE_SDK:
+            pass
+        case _:
+            assert_never(provider)
 
 
 def _translate(failure: Exception, timeout_s: float, task: Task) -> LlmError:
@@ -66,7 +93,9 @@ def _translate(failure: Exception, timeout_s: float, task: Task) -> LlmError:
         if isinstance(cause, LlmError):
             return cause
         return ProviderFailedError(f"{type(failure).__name__}: {failure}")
-    return ProviderFailedError(f"timed out after {timeout_s:g} s")
+    if isinstance(failure, TimeoutError):
+        return ProviderFailedError(f"timed out after {timeout_s:g} s")
+    return ProviderFailedError(f"{type(failure).__name__}: {failure}")
 
 
 def _outcome(error: LlmError) -> Outcome:
@@ -91,9 +120,19 @@ def _clip(text: str) -> str:
     return keep.decode(errors="ignore") + _TRUNCATED
 
 
-def _record_exchange(span: Span, history: list[Mapping[str, Any]]) -> None:
-    """Record the prompt and completion of the last history entry, when there is one."""
+def _record_exchange(
+    span: Span, history: list[Mapping[str, Any]], inputs: Mapping[str, object]
+) -> None:
+    """Record the prompt and completion of the last history entry.
+
+    A call that failed before any history entry has no prompt of its own, so
+    its inputs stand in for it, as JSON with sorted keys.
+    """
     if not history:
+        fallback = json.dumps(
+            dict(inputs), ensure_ascii=False, sort_keys=True, default=str
+        )
+        span.set_attribute(attributes.PROMPT, _clip(fallback))
         return
     entry = history[-1]
     prompt = entry.get("messages") or entry.get("prompt")
@@ -115,6 +154,7 @@ def _record_call(  # noqa: PLR0913  # one fact of the call per argument
     model: str,
     meter: CallMeter,
     history: list[Mapping[str, Any]],
+    inputs: Mapping[str, object],
     task: Task,
     task_version: str,
     posting_id: PostingId | None,
@@ -138,7 +178,7 @@ def _record_call(  # noqa: PLR0913  # one fact of the call per argument
         span.set_attribute(attributes.OUTPUT_TOKENS, meter.output_tokens)
     if meter.cost_usd is not None:
         span.set_attribute(attributes.COST, meter.cost_usd)
-    _record_exchange(span, history)
+    _record_exchange(span, history, inputs)
 
 
 @contextmanager
@@ -148,6 +188,7 @@ def _call_span(  # noqa: PLR0913  # one fact of the call per argument
     model: str,
     meter: CallMeter,
     history: list[Mapping[str, Any]],
+    inputs: Mapping[str, object],
     task: Task,
     task_version: str,
     posting_id: PostingId | None,
@@ -176,6 +217,7 @@ def _call_span(  # noqa: PLR0913  # one fact of the call per argument
                 model=model,
                 meter=meter,
                 history=history,
+                inputs=inputs,
                 task=task,
                 task_version=task_version,
                 posting_id=posting_id,
@@ -204,16 +246,18 @@ async def run_call(  # noqa: PLR0913  # the call's whole contract, one argument 
 
     Inside an operation trace the call is recorded as a span named
     `chat <model>`, with the provider, model, tokens, cost, task, outcome,
-    prompt and completion. Prompt and completion are each cut to 16 KB.
-    Outside one, no span is opened.
+    prompt and completion. A call that failed before the model recorded a
+    prompt carries `inputs` as JSON instead. Prompt and completion are each cut
+    to 16 KB. Outside one, no span is opened.
 
     Args:
         predict: The DSPy predictor to run.
         lm: The task's LM; the call runs on a copy, so concurrent calls do not
             share history.
         inputs: Keyword inputs of the predictor's signature.
-        provider: The provider serving `lm`. OpenRouter's cost is read from the
-            copy's history; claude-sdk's is metered by its engine.
+        provider: The provider serving `lm`; it must be the provider named by
+            `lm.model`. OpenRouter's cost, model and tokens are read from the
+            copy's history; claude-sdk's are metered by its engine.
         budget: The operation's budget, charged with the call's cost.
         timeout_s: Seconds the call may take.
         task: The task the call serves; named in a `TaskOutputError` and
@@ -226,21 +270,29 @@ async def run_call(  # noqa: PLR0913  # the call's whole contract, one argument 
         The predictor's output.
 
     Raises:
+        ValueError: If `lm.model` names a provider other than `provider`;
+            nothing is called and nothing is charged.
+        InvalidValueError: If `lm.model` is not a `<provider>/<model>` reference.
         CostUnknownError: If the call completed and its cost cannot be found.
             It takes precedence over any other failure of the same call.
         TaskOutputError: If the answer did not match the signature.
         ProviderFailedError: If the provider failed or the call timed out.
         LlmError: Any error an engine raised from this family, unchanged.
     """
+    model_ref = parse_model_ref(str(lm.model), "lm.model")
+    if model_ref.provider is not provider:
+        msg = f"provider {provider.value!r} does not serve the LM {str(lm.model)!r}"
+        raise ValueError(msg)
     attempt = lm.copy()
     failure: Exception | None = None
     with (
         open_meter() as meter,
         _call_span(
             provider=provider,
-            model=str(lm.model).removeprefix(f"{provider}/"),
+            model=model_ref.model,
             meter=meter,
             history=attempt.history,
+            inputs=inputs,
             task=task,
             task_version=task_version,
             posting_id=posting_id,
@@ -253,8 +305,7 @@ async def run_call(  # noqa: PLR0913  # the call's whole contract, one argument 
         except (AdapterParseError, LMError, TimeoutError) as error:
             failure = error
         finally:
-            if provider is Provider.OPENROUTER:
-                _meter_openrouter(meter, attempt.history)
+            _meter_from_history(provider, meter, attempt.history)
             if meter.completed:
                 if meter.cost_usd is None:
                     raise CostUnknownError(str(lm.model))

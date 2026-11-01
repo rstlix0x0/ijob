@@ -1,5 +1,8 @@
 import base64
+import logging
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import override
 
@@ -13,6 +16,8 @@ from ijob_ai.tracing.setup import (
     start_tracing,
 )
 from ijob_core.traces import SpanRow, TraceStore, TraceSummary
+from opentelemetry import trace
+from opentelemetry.trace import ProxyTracerProvider
 
 _ENDPOINT = "http://localhost:3000"
 _DISABLED_WARNING = (
@@ -65,6 +70,22 @@ def _one_call(tracing: Tracing, name: str = "search") -> None:
 def _summaries(path: Path) -> list[TraceSummary]:
     with TraceStore.open(path) as store:
         return store.summaries(10)
+
+
+@contextmanager
+def _no_root_handlers() -> Iterator[None]:
+    """Hide the root logger's handlers, as in a host app that never set logging up.
+
+    Python then prints unhandled warnings and errors to stderr, which is what
+    pytest's own log capture would otherwise hide.
+    """
+    root = logging.getLogger()
+    saved = list(root.handlers)
+    root.handlers[:] = []
+    try:
+        yield
+    finally:
+        root.handlers[:] = saved
 
 
 @pytest.fixture(autouse=True)
@@ -233,6 +254,16 @@ def test_finish_prunes_and_reports(tmp_path: Path) -> None:
     assert "ijob search" in operations
 
 
+@pytest.fixture
+def _fast_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shrink the OTLP exporter's retry backoff so a failing export ends at once."""
+    monkeypatch.setattr(
+        "opentelemetry.exporter.otlp.common.http._OTLPHTTPClient._compute_backoff",
+        lambda *_args: 0.001,
+    )
+
+
+@pytest.mark.usefixtures("_fast_retry")
 def test_export_failure_does_not_raise(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -250,3 +281,37 @@ def test_export_failure_does_not_raise(
     assert report.dropped == 0
     assert adapter.requests
     assert len(_summaries(path)) == 1
+
+
+@pytest.mark.usefixtures("_fast_retry")
+def test_export_failure_prints_nothing_to_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+    adapter = RecordingAdapter(error=requests.ConnectionError())
+    with _no_root_handlers():
+        tracing = start_tracing(
+            tmp_path / "traces.db",
+            TracingSettings(langfuse_endpoint=_ENDPOINT),
+            session=_session(adapter),
+        )
+        _one_call(tracing)
+        tracing.finish()
+    assert len(adapter.requests) > 2
+    assert capfd.readouterr().err == ""
+
+
+def test_repeated_start_adds_no_log_handlers(tmp_path: Path) -> None:
+    for _ in range(2):
+        start_tracing(tmp_path / "traces.db", TracingSettings()).finish()
+    handlers = logging.getLogger("opentelemetry.exporter.otlp").handlers
+    null_handlers = [h for h in handlers if isinstance(h, logging.NullHandler)]
+    assert len(null_handlers) == 1
+
+
+def test_global_tracer_provider_is_untouched(tmp_path: Path) -> None:
+    tracing = start_tracing(tmp_path / "traces.db", TracingSettings())
+    _one_call(tracing)
+    tracing.finish()
+    assert isinstance(trace.get_tracer_provider(), ProxyTracerProvider)

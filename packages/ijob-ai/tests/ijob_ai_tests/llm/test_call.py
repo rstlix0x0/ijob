@@ -1,13 +1,15 @@
 import asyncio
+import json
 import socket
 from collections.abc import Coroutine, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, override
 
 import dspy
 import pytest
 from dspy.lm15 import Request, Response
+from dspy.utils.exceptions import AdapterParseError, LMError
 from ijob_ai.errors import (
     CostUnknownError,
     ProviderFailedError,
@@ -15,7 +17,7 @@ from ijob_ai.errors import (
     TaskOutputError,
 )
 from ijob_ai.llm.budget import Budget
-from ijob_ai.llm.call import run_call
+from ijob_ai.llm.call import _translate, run_call
 from ijob_ai.llm.reference import Provider
 from ijob_ai.llm.registry import prepare_environment
 from ijob_ai.llm.settings import Task
@@ -374,6 +376,7 @@ def test_call_span_provider_unavailable_outcome(tmp_path: Path) -> None:
     assert values[attributes.OUTCOME] == "provider_unavailable"
     assert attributes.COST not in values
     assert attributes.COMPLETION not in values
+    assert json.loads(values[attributes.PROMPT]) == {"posting": "AAA"}
 
 
 @pytest.mark.parametrize(
@@ -401,6 +404,7 @@ def test_call_span_failure_outcomes(
 
     values = attrs(span_named(exporter, "chat claude-haiku-5-5"))
     assert values[attributes.OUTCOME] == outcome
+    assert "AAA" in values[attributes.PROMPT]
 
 
 def test_call_span_truncates_prompt(tmp_path: Path) -> None:
@@ -432,3 +436,108 @@ def test_call_without_operation_trace_opens_no_span(tmp_path: Path) -> None:
     tracing.finish()
 
     assert exporter.get_finished_spans() == ()
+
+
+def test_call_span_prompt_fallback_serializes_inputs_sorted(tmp_path: Path) -> None:
+    engine = FakeAsyncEngine(raises=RuntimeError("x"))
+    with traced(tmp_path) as exporter, pytest.raises(ProviderFailedError):
+        asyncio.run(
+            run_call(
+                dspy.Predict(Judge),
+                claude_lm(engine),
+                inputs={"posting": "AAA", "extra": Path("/x")},
+                provider=Provider.CLAUDE_SDK,
+                budget=Budget(1.0),
+                timeout_s=5,
+                task=Task.JUDGE,
+                task_version="v1",
+                posting_id=None,
+            )
+        )
+
+    prompt = attrs(span_named(exporter, "chat claude-haiku-5-5"))[attributes.PROMPT]
+    assert prompt == '{"extra": "/x", "posting": "AAA"}'
+
+
+def test_call_span_prompt_fallback_is_clipped(tmp_path: Path) -> None:
+    engine = FakeAsyncEngine(raises=RuntimeError("x"))
+    with traced(tmp_path) as exporter, pytest.raises(ProviderFailedError):
+        asyncio.run(call(claude_lm(engine), Budget(1.0), posting="x" * 20_000))
+
+    prompt = attrs(span_named(exporter, "chat claude-haiku-5-5"))[attributes.PROMPT]
+    assert len(prompt.encode()) == 16 * 1024
+    assert prompt.endswith("[truncated]")
+
+
+def test_call_span_openrouter_records_response_model_and_tokens(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    serve_openrouter(monkeypatch, [ok_response(VERDICT, cost=0.000123)])
+    with traced(tmp_path) as exporter:
+        asyncio.run(call(openrouter_lm(), Budget(1.0), provider=Provider.OPENROUTER))
+
+    values = attrs(span_named(exporter, "chat anthropic/claude-sonnet-4.5"))
+    assert values[attributes.PROVIDER_NAME] == "openrouter"
+    assert values[attributes.REQUEST_MODEL] == "anthropic/claude-sonnet-4.5"
+    assert values[attributes.RESPONSE_MODEL] == "anthropic/claude-sonnet-4.5"
+    assert values[attributes.INPUT_TOKENS] == 11
+    assert values[attributes.OUTPUT_TOKENS] == 4
+    assert values[attributes.COST] == 0.000123
+    assert values[attributes.OUTCOME] == "ok"
+
+
+def test_run_call_claude_lm_with_openrouter_provider_raises_before_any_call() -> None:
+    engine = FakeAsyncEngine()
+    budget = Budget(1.0)
+
+    with pytest.raises(ValueError, match="provider"):
+        asyncio.run(call(claude_lm(engine), budget, provider=Provider.OPENROUTER))
+
+    assert engine.requests == []
+    assert budget.spent == 0
+
+
+def test_run_call_openrouter_lm_with_claude_provider_raises_before_any_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = serve_openrouter(monkeypatch, [ok_response(VERDICT, cost=0.5)])
+    budget = Budget(1.0)
+
+    with pytest.raises(ValueError, match="provider"):
+        asyncio.run(call(openrouter_lm(), budget, provider=Provider.CLAUDE_SDK))
+
+    assert transport.requests == []
+    assert budget.spent == 0
+
+
+def test_run_call_mismatch_opens_no_span(tmp_path: Path) -> None:
+    lm = claude_lm(FakeAsyncEngine())
+    with traced(tmp_path) as exporter, suppress(ValueError):
+        asyncio.run(call(lm, Budget(1.0), provider=Provider.OPENROUTER))
+
+    assert exporter.get_finished_spans() == ()
+
+
+def test_run_call_translated_errors_chain_the_failure() -> None:
+    with pytest.raises(TaskOutputError) as parse:
+        asyncio.run(call(claude_lm(FakeAsyncEngine([JUNK])), Budget(1.0)))
+    with pytest.raises(ProviderFailedError) as failed:
+        asyncio.run(
+            call(claude_lm(FakeAsyncEngine(raises=RuntimeError("x"))), Budget(1.0))
+        )
+    with pytest.raises(ProviderFailedError) as timeout:
+        asyncio.run(
+            call(claude_lm(FakeAsyncEngine(delay_s=1.0)), Budget(1.0), timeout_s=0.1)
+        )
+
+    assert isinstance(parse.value.__cause__, AdapterParseError)
+    assert isinstance(failed.value.__cause__, LMError)
+    assert isinstance(timeout.value.__cause__, TimeoutError)
+
+
+def test_translate_unrecognised_failure_is_not_reported_as_timeout() -> None:
+    translated = _translate(KeyError("k"), 5, Task.JUDGE)
+
+    assert isinstance(translated, ProviderFailedError)
+    assert "timed out" not in str(translated)
+    assert "KeyError" in str(translated)

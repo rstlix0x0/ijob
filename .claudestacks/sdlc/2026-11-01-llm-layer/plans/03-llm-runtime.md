@@ -289,16 +289,16 @@ follows spec §3.5:
 
 Reviewer verdict: blocking none. DoD re-run green: ruff format 0, ruff check 0, `mypy --strict .` 0 (161 files), `pytest packages/ijob-ai` 106 passed, `uv lock --check` 0. All findings open (no blocking set, so no fix round), except where noted:
 
-- open 🟡 `call.py:66` `provider` is passed separately from `lm.model`; a mismatch leaves the meter uncompleted and charges 0, bypassing the cap. Derive it from the LM or assert they agree.
+- fixed 🟡 `call.py:66` `provider` is passed separately from `lm.model`; a mismatch leaves the meter uncompleted and charges 0, bypassing the cap. Fix: `run_call` parses `lm.model` first and raises `ValueError` on mismatch before any call, span or charge. Gate after fix: `uv run --locked pytest` → 2341 passed.
 - open 🟡 `call.py:107` OpenRouter `completed` comes only from history; a timeout between pricing and `finalize()` charges 0 for a billed call (bounded at one call per timeout; within the plan's rule).
 - open 🟡 `call.py:111` `CostUnknownError` raised in `finally` replaces an in-flight `CancelledError` and is not chained from the failure.
 - open 🟡 `settings.py:21` `LlmSettings` accepts `concurrency<=0`, `timeout_s<=0`, `max_cost_usd<0` (plan 07's reader validates config values).
 - open 🟡 `settings.py:35` `models` is a mutable dict in a frozen dataclass.
 - open 🟡 `fakes.py:33,223`, `test_reference.py:48`, `test_settings.py:46,49`, `test_package.py:57,75` suppressions without a reason comment.
 - addressed by plan 05 Task 3: 🔵 `call.py:52` `TaskOutputError` task fixed to "model call" (run_call gains `task` there).
-- open 🔵 `call.py:58` `_translate` maps any unrecognised exception to "timed out"; check `TimeoutError` explicitly.
-- open 🔵 `call.py:107`, `registry.py:97` provider dispatch by `is`/else; use `match` + `assert_never`.
-- open 🔵 `call.py:113` no test for `from failure` chaining or for an OpenRouter `CostUnknownError`.
+- fixed 🔵 `call.py:58` `_translate` now checks `TimeoutError` explicitly (`pytest` → 2341 passed).
+- fixed 🔵 `call.py:107` provider dispatch uses `match` + `assert_never`; open: `registry.py:97` still dispatches by `is`/else.
+- fixed 🔵 `call.py:113` `__cause__` chain test added; open: no test for an OpenRouter `CostUnknownError`.
 - open 🔵 `budget.py:12` negative/NaN cap and negative charge accepted.
 - open 🔵 `registry.py:11` dspy imported at module top, before the cost-map flag is set; reviewer verified harmless (flag read at first price lookup).
 - open 🔵 `settings.py:36` money as bare `float` (plan mandates it); `settings.py:59` `TracingSettings` not `kw_only`.

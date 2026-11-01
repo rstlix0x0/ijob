@@ -182,17 +182,18 @@ exporter wrapped in `operation_trace`:
 
 Reviewer verdict: blocking none. Full CLAUDE.md gate re-run from the worktree root: `uv sync` 0, `ruff format --check` 0, `ruff check --no-fix` 0, `mypy --strict .` 0 (161 files), `pytest` 0 (2330 passed, 40.7 s). Hard constraints checked: `set_tracer_provider` never called; `OTEL_SDK_DISABLED` popped before `TracerProvider(sampler=ALWAYS_ON)` is built; Langfuse export only with endpoint and both keys; tests use a recording adapter (no network); ijob-core imports no OTel or requests. All findings open (no blocking set, so no fix round):
 
-- open 🟡 `call.py:53` OpenRouter spans never carry `gen_ai.response.model` or tokens; plan 03's `_meter_openrouter` fills only `completed` and `cost_usd`, though the history entry has both. No OpenRouter span test.
-- open 🟡 `call.py:94` `ijob.prompt` comes only from history, so calls failing before a history entry (timeout, provider_unavailable, provider_failed) have no prompt; fall back to the `inputs` mapping. Also a 🟡 partial against Task 3's "In finally it sets … ijob.prompt".
-- open 🟡 `setup.py:255` an unreachable Langfuse makes the OTLP exporter log retry lines to stderr from its worker thread (reproduced with `-p no:logging`); this would corrupt a TUI. Latent until plan 08 calls `start_tracing`. Silence the `opentelemetry.exporter.otlp*` loggers and assert empty stderr.
-- open 🟡 `setup.py:231` no test that the global tracer provider stays a `ProxyTracerProvider` after `start_tracing`/`finish`.
+- fixed 🟡 `call.py:53` OpenRouter spans now carry `gen_ai.response.model` and tokens: `_meter_openrouter` fills them from the history entry's `response_model` and `usage.prompt_tokens`/`completion_tokens`; an OpenRouter span test was added. Gate after fix: `uv run --locked pytest` → 2341 passed.
+- fixed 🟡 `call.py:94` with no history entry, `ijob.prompt` falls back to the `inputs` mapping as sorted JSON, clipped to 16 KB; the provider_unavailable, timeout, provider_failed and cost_unknown span tests assert it.
+- fixed 🟡 `setup.py:255` `start_tracing` gives the `opentelemetry.exporter.otlp`, `opentelemetry.sdk._shared_internal` and `opentelemetry.sdk.trace.export` loggers one `NullHandler` each (idempotent; records still propagate). `test_export_failure_prints_nothing_to_stderr` failed before the fix with 5 retry lines and 1 failure line on stderr; it passes after, also under `-p no:logging`.
+- fixed 🟡 `setup.py:231` `test_global_tracer_provider_is_untouched` asserts a `ProxyTracerProvider` after `start_tracing` and `finish`.
 - open 🔵 `setup.py:110` the root span starts from the ambient context; pass an empty `Context()` so it always starts a new trace.
 - open 🔵 `setup.py:128` `finish()`/`start_tracing` can leak the open store if flush, shutdown or the exporter constructor raises.
 - open 🔵 `setup.py:142` a second `operation_trace` on one `Tracing` silently reuses the first root and name.
 - open 🔵 `attributes.py:12` two-way package dependency between `ijob_ai.tracing` and `ijob_ai.llm` (no module cycle).
 - open 🔵 `sqlite_exporter.py:35` docstring says "full screen"; "full disk" was meant.
-- open 🔵 `test_setup.py:236` the failure test sleeps through real OTLP backoff (~3.2 s) and does not check stderr.
-- open ❓ Task 3: should OpenRouter fill the meter's response model and tokens (see `call.py:53`)?
+- fixed 🔵 `test_setup.py:236` a `_fast_retry` fixture patches the OTLP backoff to 1 ms, and the new stderr test checks stderr.
+- answered ❓ Task 3: yes, OpenRouter fills the meter's response model and tokens (fixed above).
+- open 🔵 follow-up review: `_translate`'s last `return` is unreachable (narrow to the caught union); the `InvalidValueError` for an unparseable `lm.model` has no test; the two `opentelemetry.sdk.*` logger names are not guarded by a test; the OpenRouter fixture body's model equals the request model; `suppress(ValueError)` in a test should be `pytest.raises`; `_fast_retry` patches a private OTel method; the idempotency test checks one of three loggers.
 - open 🔵 additions beyond the Files list, all justified: `current_operation_trace()` getter; call-site arguments in `test_registry.py`/`test_claude_engine.py`; `requests>=2.34.2,<3` in ijob-ai's pyproject plus `uv.lock`.
 
 ## Deviations

@@ -11,6 +11,7 @@ trace.
 """
 
 import base64
+import logging
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -40,6 +41,12 @@ _DISABLED_WARNING: Final = (
 _MISSING_KEY_WARNING: Final = (
     "warning: Langfuse export skipped; "
     f"set {_PUBLIC_KEY_VARIABLE} and {_SECRET_KEY_VARIABLE}"
+)
+
+_EXPORT_LOGGERS: Final = (
+    "opentelemetry.exporter.otlp",
+    "opentelemetry.sdk._shared_internal",
+    "opentelemetry.sdk.trace.export",
 )
 
 _LANGFUSE_TRACES_PATH: Final = "/api/public/otel/v1/traces"
@@ -209,7 +216,9 @@ def start_tracing(
     """Build the tracing of one operation.
 
     Removes `OTEL_SDK_DISABLED` from the process environment, since ijob's
-    tracing is always on, and records a warning when it was set.
+    tracing is always on, and records a warning when it was set. Also keeps the
+    OpenTelemetry exporter and span-processor loggers off stderr, where their
+    retry and failure lines would corrupt a terminal UI.
 
     Args:
         traces_path: The trace database file.
@@ -223,6 +232,7 @@ def start_tracing(
     Raises:
         sqlite3.Error: If the trace database cannot be opened.
     """
+    _silence_export_logs()
     warnings: list[str] = []
     if os.environ.pop(_DISABLED_VARIABLE, None) is not None:
         warnings.append(_DISABLED_WARNING)
@@ -250,6 +260,22 @@ def start_tracing(
         max_size_mb=settings.max_size_mb,
         warnings=warnings,
     )
+
+
+def _silence_export_logs() -> None:
+    """Stop the OpenTelemetry export loggers from reaching stderr, idempotently.
+
+    Each logger gets one `NullHandler`, so Python's last-resort stderr handler
+    never fires for its records. Records still propagate, so logging the
+    application configures keeps receiving them. Other loggers, the root logger
+    included, are left as they are.
+    """
+    for name in _EXPORT_LOGGERS:
+        logger = logging.getLogger(name)
+        if not any(
+            isinstance(handler, logging.NullHandler) for handler in logger.handlers
+        ):
+            logger.addHandler(logging.NullHandler())
 
 
 def _langfuse_exporter(
