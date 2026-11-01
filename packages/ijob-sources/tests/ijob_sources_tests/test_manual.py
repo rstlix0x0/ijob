@@ -30,11 +30,13 @@ from ijob_sources.jsonld import job_postings
 from ijob_sources.manual import (
     FeedUrl,
     JobPostingPage,
+    description_from_raw,
     manual_key,
     parse_feed,
     parse_jobposting_page,
 )
 from ijob_sources.polite_http import CachedResponse, ConditionalCache, PoliteClient
+from ijob_sources.rss import description_from_raw as rss_description_from_raw
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 _JAZZHR = (_FIXTURES / "jsonld" / "jazzhr.html").read_bytes()
@@ -517,3 +519,114 @@ def test_fetch_is_the_feed_parsed() -> None:
     batch = _fetch(feed, _serving(httpx.Response(200, content=_GOLANG)))
 
     assert batch == _parse_feed(_GOLANG)
+
+
+# --- descriptions ----------------------------------------------------------
+
+
+_ECLIPSE_DESCRIPTION = (
+    "Do manual and repetitive build, test and deploy tasks make you cringe? Do "
+    "you get the satisfaction of automating all the things and supporting "
+    "developers around the globe? Do you like solving a failed build mystery "
+    "and are not afraid to find out that you misspelled a variable? Do you "
+    "like to work in an open and transparent environment? If so, our **Open "
+    "Source Software Release Engineer** is likely the job for you!\n"
+    "\n"
+    "The Eclipse Foundation is one of the "
+    "world\N{RIGHT SINGLE QUOTATION MARK}s largest open source software "
+    "foundations. Its member base and project count is growing significantly. "
+    "Some of the largest projects include the various Eclipse IDEs, Jakarta EE "
+    "(successor of Java EE), Adoptium (previously AdoptOpenJDK). As such, the "
+    "Eclipse Foundation is looking for an individual to join our release "
+    "engineering team in order to help us manage the infrastructure and the "
+    "CI/CD tools, and to support the developer community of these open source "
+    "projects.\n"
+    "\n"
+    "Working closely with the members of our IT team, "
+    "you\N{RIGHT SINGLE QUOTATION MARK}ll play a key role in fulfilling the "
+    "mandate of the Foundation and help drive the success of our large "
+    "community of open source developers.\n"
+    "\n"
+    "**Location**\n"
+    "This is a remote position, and the selected candidate will be expected to "
+    "work from their home office. All qualified candidates will be considered, "
+    "with preference for candidates based in Germany, France, Italy, Spain, "
+    "Portugal, other EU countries, or Canada.\n"
+    "\n"
+    "**Salary Range**\n"
+    "$100-130k CAD / \N{EURO SIGN}55k\N{EN DASH}\N{EURO SIGN}80k in Europe, "
+    "depending on the country and experience.\n"
+    "\n"
+    "**Responsibilities**\n"
+    "\n"
+    "- You will support and operate (as part of the team) two large scale "
+    "continuous integration systems: a farm of 200+ Jenkins instances and a "
+    "growing GitLab CI set-up.\n"
+    "- You will work directly with community members through public channels "
+    "to provide assistance and tools, helping them with their CI/CD "
+    "requirements."
+)
+
+
+def test_draft_carries_description() -> None:
+    (draft,) = _parse(_JAZZHR).drafts
+
+    assert draft.description == _ECLIPSE_DESCRIPTION
+
+
+def test_description_from_raw_matches_draft() -> None:
+    (draft,) = _parse(_JAZZHR).drafts
+
+    assert description_from_raw(draft.raw) == draft.description
+
+
+def test_description_missing_gives_none() -> None:
+    (draft,) = _parse(_page(_posting()), company="Acme").drafts
+
+    assert draft.description is None
+    assert description_from_raw(draft.raw) is None
+
+
+@pytest.mark.parametrize(
+    ("description", "expected"),
+    [
+        ("<p>Build <b>things</b></p>", "Build **things**"),
+        ("Plain text with 5 < 6", "Plain text with 5 \\< 6"),
+    ],
+)
+def test_description_form_is_detected(description: str, expected: str) -> None:
+    (draft,) = _parse(_page(_posting(description=description)), company="Acme").drafts
+
+    assert draft.description == expected
+    assert description_from_raw(draft.raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["[]", '"text"', "null", "not json"])
+def test_description_from_raw_refuses_a_raw_that_is_not_an_object(raw: str) -> None:
+    with pytest.raises(ParseError):
+        description_from_raw(raw)
+
+
+@pytest.mark.parametrize("raw", ["{}", '{"description": 5}', '{"description": null}'])
+def test_description_from_raw_gives_none_for_a_missing_or_unusable_field(
+    raw: str,
+) -> None:
+    assert description_from_raw(raw) is None
+
+
+def test_manual_feed_draft_carries_description() -> None:
+    batch = _parse_feed(_GOLANG, company="Golang Projects")
+
+    first = batch.drafts[0]
+    assert first.description is not None
+    assert first.description.startswith("Remote - Established in 1744, Sotheby")
+    assert rss_description_from_raw(first.raw) == first.description
+
+
+def test_manual_feed_item_without_a_description_has_none() -> None:
+    body = _feed("<item><title>Go</title><link>https://x.test/1</link></item>")
+
+    (draft,) = _parse_feed(body).drafts
+
+    assert draft.description is None
+    assert rss_description_from_raw(draft.raw) is None

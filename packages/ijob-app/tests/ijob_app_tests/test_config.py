@@ -1,16 +1,20 @@
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from ijob_app.config import (
-    default_config_path,
+    FilterFlags,
+    flags_from_spec,
     load_filters,
     parse_country_flag,
     parse_min_salary,
     parse_remote,
     parse_since,
+    read_filters,
+    spec_from_flags,
 )
 from ijob_core.countries import CountryCode
 from ijob_core.errors import InvalidValueError
@@ -382,14 +386,97 @@ def test_parse_country_flag_rejects(text: str) -> None:
         parse_country_flag(text)
 
 
-def test_config_path_xdg() -> None:
-    environ = {"XDG_CONFIG_HOME": "/xdg"}
+def test_read_filters_layers_flags_over_config(tmp_path: Path) -> None:
+    path = _write(tmp_path, 'filters.countries = ["SG"]\nfilters.since = "7d"\n')
+    default = tmp_path / "home.toml"
+    flags = FilterFlags(countries=("Japan",), companies=("Acme",))
 
-    assert default_config_path(environ) == Path("/xdg/ijob/config.toml")
+    spec = read_filters(path, flags, default=default)
+
+    assert spec.countries == {CountryCode("JP")}
+    assert spec.companies == ("Acme",)
+    assert spec.since == timedelta(days=7)
+    assert read_filters(path, FilterFlags(), default=default).countries == {
+        CountryCode("SG")
+    }
+
+    missing = tmp_path / "absent.toml"
+    with pytest.raises(InvalidValueError, match=re.escape(str(missing))):
+        read_filters(missing, FilterFlags(), default=default)
+    with pytest.raises(InvalidValueError, match="must not be blank"):
+        read_filters(path, FilterFlags(companies=(" ",)), default=default)
 
 
-@pytest.mark.parametrize("environ", [{}, {"XDG_CONFIG_HOME": ""}])
-def test_config_path_home_fallback(environ: dict[str, str]) -> None:
-    expected = Path.home() / ".config" / "ijob" / "config.toml"
+def test_read_filters_reads_the_default_file_when_none_is_named(
+    tmp_path: Path,
+) -> None:
+    default = tmp_path / "home.toml"
+    default.write_text('filters.countries = ["SG"]\n', encoding="utf-8")
 
-    assert default_config_path(environ) == expected
+    spec = read_filters(None, FilterFlags(), default=default)
+
+    assert spec.countries == {CountryCode("SG")}
+
+
+def test_read_filters_skips_a_missing_default_file(tmp_path: Path) -> None:
+    spec = read_filters(None, FilterFlags(), default=tmp_path / "absent.toml")
+
+    assert spec == load_filters(tmp_path / "absent.toml", explicit=False)
+
+
+def test_read_filters_without_any_file_uses_the_packaged_defaults(
+    tmp_path: Path,
+) -> None:
+    spec = read_filters(None, FilterFlags())
+
+    assert spec == load_filters(tmp_path / "absent.toml", explicit=False)
+
+
+def test_flags_from_spec_round_trips() -> None:
+    base = FilterSpec(include=(re.compile("engineer", re.IGNORECASE),))
+    spec = replace(
+        base,
+        countries=frozenset({CountryCode("SG"), CountryCode("JP")}),
+        remote=frozenset({RemoteScope.WORLDWIDE}),
+        since=timedelta(days=7),
+        companies=("Acme",),
+        min_salary=Money(Decimal(6000), None, "SGD", Period.MONTH),
+        require_salary=True,
+    )
+
+    flags = flags_from_spec(spec)
+
+    assert flags == FilterFlags(
+        countries=("JP", "SG"),
+        remotes=("worldwide",),
+        since="7d",
+        companies=("Acme",),
+        min_salary="6000:SGD:month",
+        require_salary=True,
+    )
+    assert spec_from_flags(base, flags) == spec
+    assert flags_from_spec(replace(spec, since=timedelta(hours=36))).since == "36h"
+
+
+def test_spec_from_flags_empty_clears() -> None:
+    base = FilterSpec(
+        include=(re.compile("engineer", re.IGNORECASE),),
+        exclude=(re.compile("sales", re.IGNORECASE),),
+        countries=frozenset({CountryCode("SG")}),
+        remote=frozenset({RemoteScope.COUNTRY}),
+        since=timedelta(days=3),
+        companies=("Acme",),
+        min_salary=Money(Decimal(1), None, "USD", Period.YEAR),
+        require_salary=True,
+    )
+
+    spec = spec_from_flags(base, FilterFlags())
+
+    assert spec == FilterSpec(include=base.include, exclude=base.exclude)
+
+
+def test_spec_from_flags_rejects_bad_values() -> None:
+    with pytest.raises(InvalidValueError, match="since"):
+        spec_from_flags(FilterSpec(), FilterFlags(since="abc"))
+    with pytest.raises(InvalidValueError, match="company"):
+        spec_from_flags(FilterSpec(), FilterFlags(companies=("",)))

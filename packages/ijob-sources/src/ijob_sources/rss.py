@@ -5,7 +5,8 @@ rules. `FEEDS` holds the rules of each known feed: where the company sits in
 the title, where the location sits, and whether the item only links to a page
 that carries the job. `RssFeed` fetches one of them through the `PoliteClient`.
 `item_link` and `item_raw` are the link check and the `raw` text of an item, for
-every source that drafts feed items.
+every source that drafts feed items. `description_from_raw` reads a draft's
+description back out of that `raw` text.
 
 A feed whose items name no company is a detail feed. `RssFeed` fetches the
 detail page of each item it has not been told is known, reads the page's
@@ -40,8 +41,10 @@ from ijob_core.model import (
 )
 
 from ijob_sources.collect import SourceBatch
+from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError, SourcesError
 from ijob_sources.jsonld import job_postings, read_job_posting
+from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -386,6 +389,7 @@ class RssFeed:
             url=link,
             posted_at=item.pub_date,
             raw=item_raw(item),
+            description=_description(item.description),
         )
 
     def _detail_draft(self, item: RssItem, link: str, page: bytes) -> SightingDraft:
@@ -417,6 +421,7 @@ class RssFeed:
             salaries=fields.salaries,
             country=fields.country,
             remote=fields.remote,
+            description=_description(postings[0].get("description")),
         )
 
     def _log_rejected(self, item: RssItem, index: int, error: Exception) -> None:
@@ -502,3 +507,41 @@ def _raw(payload: dict[str, Any]) -> str:
         return json.dumps(payload)
     except RecursionError as error:
         raise InvalidValueError("raw", "is nested too deeply") from error
+
+
+def description_from_raw(raw: str) -> str | None:
+    """Read the description out of the `raw` text of an RSS or manual-feed draft.
+
+    A `raw` that holds a `jobposting` key is a detail-feed draft, and the
+    description is the posting's own. Any other `raw` is an item, and the
+    description is the item's. An item's description is already unescaped once
+    when the feed is parsed, so it is not unescaped again.
+
+    Args:
+        raw: The `raw` text of a draft from an RSS feed or a manual feed.
+
+    Returns:
+        The description as Markdown, or `None` when the field is missing, is
+        not text, or is blank.
+
+    Raises:
+        ParseError: `raw` is not a JSON object.
+    """
+    payload = raw_object(raw)
+    if "jobposting" in payload:
+        posting = payload["jobposting"]
+        return _description(
+            posting.get("description") if isinstance(posting, dict) else None
+        )
+    return _description(payload.get("description"))
+
+
+def _description(value: object) -> str | None:
+    """Normalize a feed description of any form to Markdown.
+
+    Returns:
+        The Markdown text, or `None` when `value` is not text or is blank.
+    """
+    if not isinstance(value, str):
+        return None
+    return normalize(value, TextForm.DETECT)

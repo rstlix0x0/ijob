@@ -9,11 +9,17 @@ from pathlib import Path
 import httpx
 import pytest
 from ijob_core.countries import CountryCode
-from ijob_core.model import ExternalId, SourceKind, SourceRef, parse_source_key
+from ijob_core.model import (
+    ExternalId,
+    SightingDraft,
+    SourceKind,
+    SourceRef,
+    parse_source_key,
+)
 from ijob_core.money import Money, Period
 from ijob_sources.collect import CollectResult, SourceBatch, collect
 from ijob_sources.errors import ParseError, SourceNotFoundError
-from ijob_sources.japandev import JapanDev, parse_sitemap
+from ijob_sources.japandev import JapanDev, description_from_raw, parse_sitemap
 from ijob_sources.polite_http import CachedResponse, PoliteClient
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "japandev"
@@ -447,3 +453,92 @@ def test_collect_runs_the_source() -> None:
 
     assert result.failures == []
     assert len(result.batches[SourceRef(SourceKind.JAPANDEV, _KEY)].drafts) == 3
+
+
+def _plain_draft() -> SightingDraft:
+    drafts = {draft.external_id: draft for draft in _fetch(_site(_SITEMAP)).drafts}
+    return drafts[ExternalId(_PLAIN_ID)]
+
+
+_ABBEAL_DESCRIPTION = (
+    "**Location requirement**\n"
+    "\n"
+    "You must already be living in Japan with valid work authorization. We are "
+    "not sponsoring relocation or visa transfers from overseas for this role. "
+    "Applications from outside Japan will not be considered.\n"
+    "\n"
+    "**Job Requirements/Responsibilities**\n"
+    "\n"
+    "- Move AI out of labs and into production\n"
+    "- RAG, agents, MLOps, vision/NLP\n"
+    "- Python, PyTorch, LangChain/LlamaIndex\n"
+    "- Pinecone/Weaviate\n"
+    "- Pinecone/Weaviate, FastAPI\n"
+    "- Cost/token optimisation\n"
+    "\n"
+    "**Interview Process**\n"
+    "\n"
+    "- Screening intro (30 min, video call)\n"
+    "  - Call with an Abbeal Lead Engineer. We qualify your expectations, "
+    "background, relationship to the craft. No technical quiz \N{EM DASH} a "
+    "real conversation. By the end, you know whether we continue together.\n"
+    "- Tech challenge (3-4 hours)\n"
+    "  - An open project, on your time, due within 5 days. No leetcode "
+    "disconnected from the actual work. We evaluate your code under real "
+    "conditions: prompt reading, architecture choices, tests, readability.\n"
+    "- System design (1 hour video call)\n"
+    "  - You walk us through an architecture you know in depth (a recent "
+    "project, or an in-house topic). We dig into trade-offs, constraints, "
+    "pivots. We want to see your depth on a domain you master \N{EM DASH} not "
+    "test your cramming."
+)
+
+
+def test_draft_carries_description() -> None:
+    assert _plain_draft().description == _ABBEAL_DESCRIPTION
+
+
+def test_description_from_raw_matches_draft() -> None:
+    for draft in _fetch(_site(_SITEMAP)).drafts:
+        assert description_from_raw(draft.raw) == draft.description
+
+
+def test_description_missing_gives_none() -> None:
+    path = "/jobs/acme/x-1"
+    pages = {path: _page_for("x-1")}
+
+    (draft,) = _fetch(_site(_sitemap(path), pages)).drafts
+
+    assert draft.description is None
+    assert description_from_raw(draft.raw) is None
+
+
+def test_description_is_read_as_html() -> None:
+    path = "/jobs/acme/x-1"
+    pages = {path: _page_for("x-1", description="<p>5 &lt; 6 &amp; <b>more</b></p>")}
+
+    (draft,) = _fetch(_site(_sitemap(path), pages)).drafts
+
+    assert draft.description == "5 \\< 6 & **more**"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "{}",
+        '{"item": "u"}',
+        '{"item": "u", "jobposting": null}',
+        '{"item": "u", "jobposting": {}}',
+        '{"item": "u", "jobposting": {"description": 5}}',
+    ],
+)
+def test_description_from_raw_gives_none_for_a_missing_or_unusable_field(
+    raw: str,
+) -> None:
+    assert description_from_raw(raw) is None
+
+
+@pytest.mark.parametrize("raw", ["[]", '"text"', "null", "not json"])
+def test_description_from_raw_refuses_a_raw_that_is_not_an_object(raw: str) -> None:
+    with pytest.raises(ParseError):
+        description_from_raw(raw)

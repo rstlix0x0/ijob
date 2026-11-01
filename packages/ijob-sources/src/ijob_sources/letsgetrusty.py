@@ -6,7 +6,8 @@ many pages follow, up to a cap. Each page carries its jobs as the items of a
 schema.org `ItemList` in a JSON-LD script; `parse_lgr_page` turns them into a
 `SourceBatch`. A job that cannot be read is logged at `WARNING` and counted in
 `SourceBatch.rejected`. No request carries a `job` parameter: the site's
-robots.txt disallows a listing URL that combines `page` and `job`.
+robots.txt disallows a listing URL that combines `page` and `job`. A listing
+carries only a short snippet of each job's text, so a draft has no description.
 """
 
 import json

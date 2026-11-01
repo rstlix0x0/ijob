@@ -10,21 +10,24 @@ from ijob_core.countries import CountryCode, parse_country
 from ijob_core.errors import InvalidValueError
 from ijob_core.model import (
     ExternalId,
+    Label,
     PostingId,
     RemoteScope,
     SightingDraft,
     SourceKind,
     SourceRef,
+    StoredCv,
+    Vote,
     parse_source_key,
 )
 from ijob_core.money import Money, Period
 from ijob_core.store import (
+    _MIGRATIONS,
     RecordResult,
     SourceOrigin,
     SourceRow,
     Store,
     _Outcome,
-    default_db_path,
 )
 
 _A = SourceRef(SourceKind.GREENHOUSE, parse_source_key("alpha"))
@@ -74,17 +77,17 @@ def _draft(
     return SightingDraft(source=source, external_id=ExternalId(external_id), **values)
 
 
-def test_fresh_database_is_version_2(tmp_path: Path) -> None:
+def test_fresh_database_is_version_3(tmp_path: Path) -> None:
     path = tmp_path / "ijob.db"
     with Store.open(path):
         pass
-    assert _scalar(path, "PRAGMA user_version") == 2
+    assert _scalar(path, "PRAGMA user_version") == 3
     tables = _scalar(
         path,
         "SELECT group_concat(name) FROM "
         "(SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name)",
     )
-    assert tables == "postings,sightings,sources"
+    assert tables == "cv,labels,postings,sightings,sources"
     indexes = _scalar(
         path,
         "SELECT group_concat(name) FROM "
@@ -107,7 +110,7 @@ def test_open_is_idempotent(tmp_path: Path) -> None:
         )
     with Store.open(path):
         pass
-    assert _scalar(path, "PRAGMA user_version") == 2
+    assert _scalar(path, "PRAGMA user_version") == 3
     assert _scalar(path, "SELECT count(*) FROM postings") == 1
 
 
@@ -116,20 +119,6 @@ def test_open_creates_missing_parent_directory(tmp_path: Path) -> None:
     with Store.open(path):
         pass
     assert path.is_file()
-
-
-def test_default_db_path_uses_xdg_data_home() -> None:
-    assert default_db_path({"XDG_DATA_HOME": "/x"}) == Path("/x/ijob/ijob.db")
-
-
-@pytest.mark.parametrize("environ", [{}, {"XDG_DATA_HOME": ""}])
-def test_default_db_path_falls_back_to_local_share(
-    environ: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    assert (
-        default_db_path(environ) == tmp_path / ".local" / "share" / "ijob" / "ijob.db"
-    )
 
 
 def test_record_new_draft_creates_posting_and_sighting(tmp_path: Path) -> None:
@@ -357,7 +346,7 @@ def test_record_rejects_naive_seen_at(tmp_path: Path) -> None:
         store.record([_draft()], seen_at=datetime(2026, 10, 1, 8, 0))  # noqa: DTZ001  # naive on purpose
 
 
-def test_migration_1_to_2_keeps_rows(tmp_path: Path) -> None:
+def test_version_1_database_migrates_and_keeps_rows(tmp_path: Path) -> None:
     path = tmp_path / "ijob.db"
     with closing(sqlite3.connect(path)) as conn, conn:
         conn.execute(
@@ -387,7 +376,7 @@ def test_migration_1_to_2_keeps_rows(tmp_path: Path) -> None:
         conn.execute("PRAGMA user_version = 1")
     with Store.open(path) as store:
         postings = store.postings(sources=[_A])
-    assert _scalar(path, "PRAGMA user_version") == 2
+    assert _scalar(path, "PRAGMA user_version") == 3
     assert len(postings) == 1
     posting = postings[0]
     assert (posting.title, posting.company) == ("Engineer", "Acme")
@@ -871,3 +860,221 @@ def test_open_queries_reject_naive_now(tmp_path: Path) -> None:
             store.open_postings(now=naive)
         with pytest.raises(InvalidValueError):
             store.stale_sources(now=naive)
+
+
+def _version_2_database(path: Path) -> None:
+    """Build a database by applying only the first two migrations."""
+    with closing(sqlite3.connect(path)) as conn, conn:
+        for statements in _MIGRATIONS[:2]:
+            for statement in statements:
+                conn.execute(statement)
+        conn.execute(
+            "INSERT INTO postings (title, company, location, url, first_seen, "
+            "last_seen) VALUES ('Engineer', 'Acme', 'Remote', "
+            "'https://example.com/jobs/1', ?, ?)",
+            (_T1_TEXT, _T1_TEXT),
+        )
+        conn.execute(
+            "INSERT INTO sightings (posting_id, source, external_id, first_seen, "
+            "last_seen, raw) VALUES (1, 'greenhouse:alpha', '1', ?, ?, '{}')",
+            (_T1_TEXT, _T1_TEXT),
+        )
+        conn.execute("PRAGMA user_version = 2")
+
+
+def test_migration_3_on_version_2_database(tmp_path: Path) -> None:
+    path = tmp_path / "ijob.db"
+    _version_2_database(path)
+    with Store.open(path) as store:
+        (posting,) = store.postings(sources=[_A])
+    assert _scalar(path, "PRAGMA user_version") == 3
+    assert posting.title == "Engineer"
+    assert posting.description is None
+    tables = _scalar(
+        path,
+        "SELECT group_concat(name) FROM "
+        "(SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name)",
+    )
+    assert tables == "cv,labels,postings,sightings,sources"
+
+
+def test_record_stores_description(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.record([_draft(description="## About")], seen_at=_T1)
+        (posting,) = store.postings(sources=[_A])
+    assert posting.description == "## About"
+
+
+def test_record_keeps_description_when_draft_has_none(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.record([_draft(description="## About")], seen_at=_T1)
+        store.record([_draft(description=None)], seen_at=_T2)
+        (posting,) = store.postings(sources=[_A])
+    assert posting.description == "## About"
+
+
+def test_record_keeps_description_when_draft_description_is_empty(
+    tmp_path: Path,
+) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.record([_draft(description="## About")], seen_at=_T1)
+        store.record([_draft(description="")], seen_at=_T2)
+        (posting,) = store.postings(sources=[_A])
+    assert posting.description == "## About"
+
+
+def test_record_replaces_description_when_draft_has_one(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.record([_draft(description="## About")], seen_at=_T1)
+        store.record([_draft(description="## Newer")], seen_at=_T2)
+        (posting,) = store.postings(sources=[_A])
+    assert posting.description == "## Newer"
+
+
+def _record_ids(store: Store, *drafts: SightingDraft) -> list[PostingId]:
+    """Record each draft as its own batch and return the ids of source `_A` postings."""
+    for draft in drafts:
+        store.record([draft], seen_at=_T1)
+    return [posting.id for posting in store.postings(sources=[_A])]
+
+
+def _distinct_drafts() -> list[SightingDraft]:
+    return [
+        _draft(
+            external_id=str(n),
+            title=f"Engineer {n}",
+            company=f"Company {n}",
+            url=f"https://example.com/jobs/{n}",
+        )
+        for n in (1, 2, 3)
+    ]
+
+
+def test_posting_by_id(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.record([_draft(description="## About")], seen_at=_T1)
+        (listed,) = store.postings(sources=[_A])
+        assert store.posting(listed.id) == listed
+        assert store.posting(PostingId(999)) is None
+
+
+def test_sightings_of_in_id_order(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.record([_draft(_B, "b-1", raw="b")], seen_at=_T1)
+        store.record([_draft(_A, "a-1", raw="a")], seen_at=_T2)
+        (posting,) = store.postings(sources=[_A, _B])
+        sightings = store.sightings_of(posting.id)
+        assert store.sightings_of(PostingId(999)) == []
+        assert sightings == [
+            store.sighting(_B, ExternalId("b-1")),
+            store.sighting(_A, ExternalId("a-1")),
+        ]
+    assert [s.raw for s in sightings] == ["b", "a"]
+
+
+def test_set_description_writes_text(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        (posting_id,) = _record_ids(store, _draft())
+        store.set_description(posting_id, "## Full text")
+        posting = store.posting(posting_id)
+        assert posting is not None
+        assert posting.description == "## Full text"
+        with pytest.raises(InvalidValueError, match="posting_id"):
+            store.set_description(PostingId(999), "x")
+
+
+@pytest.mark.parametrize("text", ["", "  \n\t "])
+def test_set_description_rejects_blank_text(tmp_path: Path, text: str) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        (posting_id,) = _record_ids(store, _draft(description="## Kept"))
+        with pytest.raises(InvalidValueError, match="text"):
+            store.set_description(posting_id, text)
+        posting = store.posting(posting_id)
+        assert posting is not None
+        assert posting.description == "## Kept"
+
+
+def test_set_label_then_replace(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        (posting_id,) = _record_ids(store, _draft())
+        first = store.set_label(posting_id, Vote.UP, "fit", at=_T1)
+        assert first == Label(posting_id, Vote.UP, "fit", _T1)
+        second = store.set_label(posting_id, Vote.DOWN, None, at=_T2)
+        assert second == Label(posting_id, Vote.DOWN, None, _T2)
+        assert store.label(posting_id) == second
+    assert _scalar(tmp_path / "ijob.db", "SELECT count(*) FROM labels") == 1
+
+
+def test_set_label_returns_what_label_reads_back(tmp_path: Path) -> None:
+    jakarta = timezone(timedelta(hours=7))
+    with Store.open(tmp_path / "ijob.db") as store:
+        (posting_id,) = _record_ids(store, _draft())
+        stored = store.set_label(
+            posting_id, Vote.UP, None, at=datetime(2026, 10, 1, 15, 0, tzinfo=jakarta)
+        )
+        read = store.label(posting_id)
+    assert stored == read
+    assert repr(stored) == repr(read)
+
+
+def test_set_label_rejects_naive_time_and_unknown_posting(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        (posting_id,) = _record_ids(store, _draft())
+        with pytest.raises(InvalidValueError, match="invalid at:"):
+            store.set_label(
+                posting_id,
+                Vote.UP,
+                None,
+                at=datetime(2026, 10, 1, 8, 0),  # noqa: DTZ001  # naive on purpose
+            )
+        with pytest.raises(InvalidValueError, match="posting_id"):
+            store.set_label(PostingId(999), Vote.UP, None, at=_T1)
+        assert store.label(posting_id) is None
+
+
+def test_clear_label(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        cleared, kept = _record_ids(store, *_distinct_drafts()[:2])
+        store.set_label(cleared, Vote.UP, None, at=_T1)
+        survivor = store.set_label(kept, Vote.DOWN, "no", at=_T2)
+        store.clear_label(cleared)
+        assert store.label(cleared) is None
+        assert store.label(kept) == survivor
+        store.clear_label(cleared)
+        store.clear_label(PostingId(999))
+
+
+def test_labels_for_ids(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        a, b, c = _record_ids(store, *_distinct_drafts())
+        store.set_label(a, Vote.UP, "fit", at=_T1)
+        store.set_label(c, Vote.DOWN, None, at=_T2)
+        found = store.labels([a, b, c])
+        assert found == {
+            a: Label(a, Vote.UP, "fit", _T1),
+            c: Label(c, Vote.DOWN, None, _T2),
+        }
+        assert store.labels([]) == {}
+        assert store.labels([b]) == {}
+
+
+def test_label_survives_new_sighting(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        (posting_id,) = _record_ids(store, _draft())
+        label = store.set_label(posting_id, Vote.UP, "fit", at=_T1)
+        result = store.record([_draft(_B, "b-1")], seen_at=_T2)
+        assert result.merged == 1
+        assert len(store.sightings_of(posting_id)) == 2
+        assert store.label(posting_id) == label
+
+
+def test_cv_round_trip_and_replace(tmp_path: Path) -> None:
+    first = StoredCv("cv.pdf", "ab" * 32, 100, _T1)
+    second = StoredCv("cv2.pdf", "cd" * 32, 200, _T2)
+    with Store.open(tmp_path / "ijob.db") as store:
+        assert store.cv() is None
+        store.set_cv(first)
+        assert store.cv() == first
+        store.set_cv(second)
+        assert store.cv() == second
+    assert _scalar(tmp_path / "ijob.db", "SELECT count(*) FROM cv") == 1

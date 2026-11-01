@@ -8,6 +8,7 @@ from ijob_core.countries import CountryCode
 from ijob_core.errors import InvalidValueError
 from ijob_core.model import (
     ExternalId,
+    Label,
     Posting,
     PostingId,
     RemoteScope,
@@ -15,6 +16,8 @@ from ijob_core.model import (
     SightingDraft,
     SourceKind,
     SourceRef,
+    StoredCv,
+    Vote,
     parse_source_key,
     parse_source_ref,
 )
@@ -240,3 +243,91 @@ def test_posting_new_fields_default_and_carry() -> None:
     assert full.remote is RemoteScope.WORLDWIDE
     assert full.role_hint == "backend"
     assert full.low_confidence
+
+
+def test_sighting_draft_description_defaults_to_none() -> None:
+    assert _draft().description is None
+    assert _draft(description="## About").description == "## About"
+
+
+def test_posting_description_defaults_to_none() -> None:
+    when = datetime(2026, 10, 1, tzinfo=UTC)
+    plain = Posting(
+        id=PostingId(1),
+        title="T",
+        company="C",
+        location=None,
+        url="https://x",
+        posted_at=None,
+        first_seen=when,
+        last_seen=when,
+    )
+    assert plain.description is None
+    assert dataclasses.replace(plain, description="text").description == "text"
+
+
+def test_vote_values() -> None:
+    assert Vote("up") is Vote.UP
+    assert Vote("down") is Vote.DOWN
+    with pytest.raises(ValueError, match="meh"):
+        Vote("meh")
+
+
+def test_label_holds_its_fields() -> None:
+    label = Label(PostingId(3), Vote.UP, "fit", _AWARE)
+    assert (label.posting_id, label.vote, label.note) == (3, Vote.UP, "fit")
+    assert label.labeled_at == _AWARE
+    assert Label(PostingId(3), Vote.DOWN, None, _AWARE).note is None
+
+
+def test_label_rejects_naive_time() -> None:
+    naive = datetime(2026, 10, 1, 8, 0)  # noqa: DTZ001  # naive on purpose
+    with pytest.raises(InvalidValueError, match="labeled_at"):
+        Label(PostingId(1), Vote.UP, None, naive)
+
+
+@pytest.mark.parametrize("note", ["", "  ", "\n\t"])
+def test_label_rejects_blank_note(note: str) -> None:
+    with pytest.raises(InvalidValueError, match="note"):
+        Label(PostingId(1), Vote.UP, note, _AWARE)
+
+
+_HASH = "ab" * 32
+
+
+def _cv(**overrides: Any) -> StoredCv:  # noqa: ANN401  # forwards arbitrary field overrides
+    values: dict[str, Any] = {
+        "name": "cv.pdf",
+        "sha256": _HASH,
+        "size": 1234,
+        "stored_at": _AWARE,
+    }
+    values.update(overrides)
+    return StoredCv(**values)
+
+
+def test_stored_cv_holds_its_fields() -> None:
+    cv = _cv()
+    assert (cv.name, cv.sha256, cv.size, cv.stored_at) == (
+        "cv.pdf",
+        _HASH,
+        1234,
+        _AWARE,
+    )
+    assert _cv(size=0).size == 0
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"name": ""},
+        {"sha256": "a" * 63},
+        {"sha256": "A" * 64},
+        {"sha256": "g" * 64},
+        {"size": -1},
+        {"stored_at": datetime(2026, 10, 1, 8, 0)},  # noqa: DTZ001  # naive on purpose
+    ],
+)
+def test_stored_cv_rejects_bad_fields(overrides: dict[str, Any]) -> None:
+    with pytest.raises(InvalidValueError):
+        _cv(**overrides)

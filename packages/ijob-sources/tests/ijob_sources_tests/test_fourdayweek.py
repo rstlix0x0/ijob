@@ -17,7 +17,11 @@ from ijob_core.model import (
 )
 from ijob_sources.collect import CollectResult, SourceBatch, collect
 from ijob_sources.errors import ParseError
-from ijob_sources.fourdayweek import FourDayWeekBoard, parse_fourdayweek
+from ijob_sources.fourdayweek import (
+    FourDayWeekBoard,
+    description_from_raw,
+    parse_fourdayweek,
+)
 from ijob_sources.polite_http import PoliteClient
 
 _FIXTURES = resources.files("ijob_sources_tests.fixtures.fourdayweek")
@@ -311,3 +315,112 @@ def test_fourdayweek_board_satisfies_source_protocol() -> None:
     assert board.ref == SourceRef(SourceKind.FOURDAYWEEK, _KEY)
     assert result.failures == []
     assert len(result.batches[board.ref].drafts) == 5
+
+
+_DESCRIPTION = (
+    "Banyan Software is the best permanent home for software businesses "
+    "that serve specialized industries, their employees, and their "
+    "customers. With a buy-grow-and-hold-for-life approach and a permanent "
+    "capital base, Banyan acquires and grows companies worldwide, honoring "
+    "founder legacies and helping portfolio companies modernize through "
+    "shared AI expertise and operational discipline. Founded in 2016, "
+    "Banyan operates more than 120 portfolio companies across North and "
+    "South America, Europe, and APAC, and has appeared on the Inc. 5000 "
+    "list for six consecutive years. The Banyan Software Foundation, "
+    "endowed with $100 million in Banyan stock, leverages technology to "
+    "build a greener and more equitable world.\n"
+    "\n"
+    "Point & Click Solutions is seeking a Software Developer to build and "
+    "maintain healthcare applications used by clinical and administrative "
+    "teams. You will work across modern\u00a0[ASP.NET](http://asp.net/) "
+    "Core applications, established .NET systems, SQL Server databases, "
+    "and patient-facing web experiences.\n"
+    "\n"
+    "**Responsibilities**\n"
+    "\n"
+    "- Develop and maintain applications using C#, "
+    "[ASP.NET](http://asp.net/) Core, Razor, JavaScript, and SQL Server.\n"
+    "\n"
+    "- Design APIs, services, background jobs, database procedures, and "
+    "responsive user interfaces.\n"
+    "\n"
+    "- Troubleshoot issues across application, database, integration, and "
+    "deployment layers.\n"
+    "\n"
+    "- Write automated unit and browser-based integration tests.\n"
+    "\n"
+    "- Modernize legacy .NET and Windows components while preserving "
+    "production reliability.\n"
+    "\n"
+    "- Build secure integrations using REST, SOAP, SFTP, XML, and "
+    "healthcare data formats.\n"
+    "\n"
+    "- Participate in code reviews, technical design, testing, and release "
+    "validation.\n"
+    "\n"
+    "- Protect sensitive healthcare data through secure coding and "
+    "authorization practices.\n"
+    "\n"
+    "- Collaborate with product, support, QA, and implementation teams to "
+    "translate operational needs into practical solutions.\n"
+    "\n"
+    "**Required Qualifications**\n"
+    "\n"
+    "- Professional experience with C# and .NET."
+)
+
+
+def test_draft_carries_description() -> None:
+    draft = parse_fourdayweek(_PAGE1, _KEY).batch.drafts[0]
+
+    assert draft.description == _DESCRIPTION
+
+
+def test_description_from_raw_matches_draft() -> None:
+    draft = parse_fourdayweek(_PAGE1, _KEY).batch.drafts[0]
+
+    assert draft.description is not None
+    assert description_from_raw(draft.raw) == draft.description
+
+
+def test_description_missing_gives_none() -> None:
+    job = {name: value for name, value in _JOBS[0].items() if name != "description"}
+
+    draft = parse_fourdayweek(_page([job]), _KEY).batch.drafts[0]
+
+    assert draft.description is None
+    assert description_from_raw(draft.raw) is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(None, id="null"),
+        pytest.param(7, id="number"),
+        pytest.param(["<p>text</p>"], id="list"),
+        pytest.param("", id="empty"),
+        pytest.param(" \n ", id="blank"),
+    ],
+)
+def test_description_without_usable_text_gives_none(value: object) -> None:
+    draft = parse_fourdayweek(
+        _page([{**_JOBS[0], "description": value}]), _KEY
+    ).batch.drafts[0]
+
+    assert draft.description is None
+    assert description_from_raw(draft.raw) is None
+
+
+def test_description_drops_a_lone_surrogate() -> None:
+    draft = parse_fourdayweek(
+        _page([{**_JOBS[0], "description": "a\ud800b"}]), _KEY
+    ).batch.drafts[0]
+
+    assert draft.description == "ab"
+    assert description_from_raw(draft.raw) == "ab"
+
+
+@pytest.mark.parametrize("raw", ["not json", "[]", '"text"', "null"])
+def test_description_from_raw_rejects_a_raw_that_is_no_object(raw: str) -> None:
+    with pytest.raises(ParseError):
+        description_from_raw(raw)

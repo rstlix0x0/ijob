@@ -1,0 +1,22 @@
+# ijob config. Every setting below is commented out, so ijob uses its built-in
+# defaults. Remove the leading "# " from a setting to change it; a key you set
+# replaces the built-in value for that key alone.
+
+# [filters]
+# countries = ["SG"]          # country codes or names
+# remote = ["worldwide"]      # none, country, region or worldwide
+# since = "7d"                # <n>d or <n>h
+# companies = ["Acme"]        # case-insensitive substrings
+# require_salary = false      # drop postings that state no salary
+
+# Keep postings paying at least this much.
+# [filters.min_salary]
+# amount = 6000
+# currency = "SGD"
+# period = "month"            # hour, month or year
+
+# Role patterns are regular expressions, matched case-insensitively. Single
+# quotes keep each backslash as written.
+# [filters.role]
+# include = ['\bengineer', '\bdeveloper', 'エンジニア', '開発']
+# exclude = ['\bsales\b', '\brecruit', '\bmarketing\b', '\baccount executive\b']

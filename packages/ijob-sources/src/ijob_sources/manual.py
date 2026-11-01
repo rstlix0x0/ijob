@@ -6,7 +6,8 @@ names the company the source was registered for. `FeedUrl` fetches any RSS 2.0
 feed and hands the body to `parse_feed`, which drafts every item under the
 registered company; a generic feed names no company per item, so it has no
 identity check. `manual_key` derives the source key both are filed under from
-the URL.
+the URL. `description_from_raw` reads a page draft's description back out of its
+`raw` text; a feed draft's is read by `ijob_sources.rss.description_from_raw`.
 
 A job or item that cannot be read is logged at `WARNING` and counted in
 `SourceBatch.rejected`.
@@ -28,11 +29,14 @@ from ijob_core.model import (
 )
 
 from ijob_sources.collect import SourceBatch
+from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError
 from ijob_sources.identity import check_identity
 from ijob_sources.jsonld import job_postings, read_job_posting
+from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
 from ijob_sources.rss import RssItem, item_link, item_raw, parse_rss
+from ijob_sources.rss import description_from_raw as rss_description_from_raw
 
 _LOGGER = logging.getLogger(__name__)
 _KEY_LENGTH = 16
@@ -171,6 +175,7 @@ def _posting_draft(
         salaries=fields.salaries,
         country=fields.country,
         remote=fields.remote,
+        description=_description(posting.get("description")),
     )
 
 
@@ -260,6 +265,7 @@ def _feed_draft(item: RssItem, ref: SourceRef, company: str) -> SightingDraft:
     link = item_link(item)
     if item.title is None:
         raise InvalidValueError("title", "is missing")
+    raw = item_raw(item)
     return SightingDraft(
         source=ref,
         external_id=ExternalId(link),
@@ -268,7 +274,8 @@ def _feed_draft(item: RssItem, ref: SourceRef, company: str) -> SightingDraft:
         location=None,
         url=link,
         posted_at=item.pub_date,
-        raw=item_raw(item),
+        raw=raw,
+        description=rss_description_from_raw(raw),
     )
 
 
@@ -282,3 +289,35 @@ def _raw(payload: dict[str, Any]) -> str:
         return json.dumps(payload)
     except RecursionError as error:
         raise InvalidValueError("raw", "is nested too deeply") from error
+
+
+def description_from_raw(raw: str) -> str | None:
+    """Read the description out of the `raw` text of a manual job-page draft.
+
+    A `feed` draft keeps an RSS item as its `raw`, so
+    `ijob_sources.rss.description_from_raw` reads it, not this function.
+
+    Args:
+        raw: The `raw` text of a draft from `JobPostingPage`: the page's
+            `JobPosting` object as JSON.
+
+    Returns:
+        The posting's `description` as Markdown, or `None` when it is missing,
+        is not text, or is blank.
+
+    Raises:
+        ParseError: `raw` is not a JSON object.
+    """
+    posting = raw_object(raw)
+    return _description(posting.get("description"))
+
+
+def _description(value: object) -> str | None:
+    """Normalize a posting's description, whose form is unknown, to Markdown.
+
+    Returns:
+        The Markdown text, or `None` when `value` is not text or is blank.
+    """
+    if not isinstance(value, str):
+        return None
+    return normalize(value, TextForm.DETECT)

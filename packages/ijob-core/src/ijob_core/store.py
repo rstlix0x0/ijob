@@ -6,14 +6,17 @@ merges the sightings of one job seen by several sources into a single posting,
 reads postings and sightings back as the records of `ijob_core.model`, lists the
 postings a source's latest fetch still showed, and closes it. It also keeps the
 table of sources, the boards ijob collects from: seeded or added by the user,
-removable, and stamped with the time each was last fetched. The schema version
-lives in `PRAGMA user_version`; opening a database applies every migration newer
-than that version, each in one transaction.
+removable, and stamped with the time each was last fetched. It also keeps a
+posting's description, the user's vote on each posting and the one CV the user
+stored.
+
+The schema version lives in `PRAGMA user_version`; opening a database applies
+every migration newer than that version, each in one transaction.
 """
 
 import json
 import sqlite3
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable
 from contextlib import ExitStack, closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -28,12 +31,15 @@ from ijob_core.dedupe import canonical_url, fingerprint
 from ijob_core.errors import InvalidValueError
 from ijob_core.model import (
     ExternalId,
+    Label,
     Posting,
     PostingId,
     RemoteScope,
     Sighting,
     SightingDraft,
     SourceRef,
+    StoredCv,
+    Vote,
     parse_source_ref,
 )
 from ijob_core.money import Money, Period
@@ -76,22 +82,24 @@ _MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
         ) STRICT
         """,
     ),
+    (
+        "ALTER TABLE postings ADD COLUMN description TEXT",
+        """
+        CREATE TABLE labels (
+            posting_id INTEGER PRIMARY KEY REFERENCES postings(id),
+            vote TEXT NOT NULL CHECK (vote IN ('up', 'down')),
+            note TEXT, labeled_at TEXT NOT NULL
+        ) STRICT
+        """,
+        """
+        CREATE TABLE cv (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            name TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL,
+            stored_at TEXT NOT NULL
+        ) STRICT
+        """,
+    ),
 )
-
-
-def default_db_path(environ: Mapping[str, str]) -> Path:
-    """Locate the database file when the caller names none.
-
-    Args:
-        environ: The process environment.
-
-    Returns:
-        `$XDG_DATA_HOME/ijob/ijob.db`, or `~/.local/share/ijob/ijob.db` when
-        `XDG_DATA_HOME` is unset or empty.
-    """
-    data_home = environ.get("XDG_DATA_HOME")
-    base = Path(data_home) if data_home else Path.home() / ".local" / "share"
-    return base / "ijob" / "ijob.db"
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,7 +183,7 @@ def _source_row(row: tuple[str, str, str | None, str, int, str | None]) -> Sourc
 _SELECT_POSTINGS: Final = (
     "SELECT id, title, company, location, url, posted_at, "
     "first_seen, last_seen, salaries, country, remote, role_hint, "
-    "low_confidence FROM postings"
+    "low_confidence, description FROM postings"
 )
 
 _NEWEST_FIRST: Final = "ORDER BY posted_at IS NULL, posted_at DESC, id"
@@ -199,6 +207,36 @@ def _posting(row: tuple[Any, ...]) -> Posting:
         remote=None if row[10] is None else RemoteScope(row[10]),
         role_hint=row[11],
         low_confidence=bool(row[12]),
+        description=row[13],
+    )
+
+
+_SELECT_SIGHTINGS: Final = (
+    "SELECT posting_id, source, external_id, first_seen, last_seen, raw FROM sightings"
+)
+
+_SELECT_LABELS: Final = "SELECT posting_id, vote, note, labeled_at FROM labels"
+
+
+def _sighting(row: tuple[Any, ...]) -> Sighting:
+    """Build a `Sighting` from a row selected with `_SELECT_SIGHTINGS`."""
+    return Sighting(
+        posting_id=PostingId(row[0]),
+        source=parse_source_ref(row[1]),
+        external_id=ExternalId(row[2]),
+        first_seen=_from_text(row[3]),
+        last_seen=_from_text(row[4]),
+        raw=row[5],
+    )
+
+
+def _label(row: tuple[Any, ...]) -> Label:
+    """Build a `Label` from a row selected with `_SELECT_LABELS`."""
+    return Label(
+        posting_id=PostingId(row[0]),
+        vote=Vote(row[1]),
+        note=row[2],
+        labeled_at=_from_text(row[3]),
     )
 
 
@@ -290,11 +328,12 @@ class Store:
         shares its `canonical_url`, or failing that its `fingerprint`; with no
         such posting it adds a posting. Either way the sighting is added to the
         posting, whose display fields and `last_seen` follow the draft. Its
-        salaries, country, remote scope and role hint follow the draft only when
-        the draft has a value for them, and its confidence flag always follows
-        the draft. The posting's `canonical_url` and `fingerprint` are then
-        recomputed from its resulting values. Each draft is matched after the
-        earlier ones in the batch are written.
+        salaries, country, remote scope, role hint and description follow the
+        draft only when the draft has a value for them (an empty string counts as
+        no value for the role hint and the description), and its confidence
+        flag always follows the draft. The posting's `canonical_url` and
+        `fingerprint` are then recomputed from its resulting values. Each draft
+        is matched after the earlier ones in the batch are written.
 
         Args:
             drafts: The jobs a source showed.
@@ -397,8 +436,8 @@ class Store:
                 "INSERT INTO postings "
                 "(title, company, location, url, posted_at, first_seen, last_seen, "
                 "salaries, country, remote, role_hint, low_confidence, "
-                "canonical_url, fingerprint) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                "canonical_url, fingerprint, description) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
                 (
                     draft.title,
                     draft.company,
@@ -414,6 +453,7 @@ class Store:
                     int(draft.low_confidence),
                     canonical_url(draft.url),
                     fingerprint(draft.company, draft.title, draft.country),
+                    draft.description,
                 ),
             ).fetchone()[0]
         )
@@ -427,7 +467,8 @@ class Store:
             "posted_at = ?, last_seen = ?, low_confidence = ?, "
             "salaries = CASE WHEN ? = '[]' THEN salaries ELSE ? END, "
             "country = COALESCE(?, country), remote = COALESCE(?, remote), "
-            "role_hint = COALESCE(NULLIF(?, ''), role_hint) WHERE id = ?",
+            "role_hint = COALESCE(NULLIF(?, ''), role_hint), "
+            "description = COALESCE(NULLIF(?, ''), description) WHERE id = ?",
             (
                 draft.title,
                 draft.company,
@@ -441,6 +482,7 @@ class Store:
                 draft.country,
                 None if draft.remote is None else draft.remote.value,
                 draft.role_hint,
+                draft.description,
                 posting_id,
             ),
         )
@@ -576,19 +618,171 @@ class Store:
             never showed that external id.
         """
         row = self._conn.execute(
-            "SELECT posting_id, first_seen, last_seen, raw FROM sightings "
-            "WHERE source = ? AND external_id = ?",
+            f"{_SELECT_SIGHTINGS} WHERE source = ? AND external_id = ?",
             (str(source), external_id),
+        ).fetchone()
+        return None if row is None else _sighting(row)
+
+    def sightings_of(self, posting_id: PostingId) -> list[Sighting]:
+        """Read every source's record of a posting.
+
+        Args:
+            posting_id: The posting to read.
+
+        Returns:
+            Its sightings in the order they were first recorded; empty if the
+            posting is unknown.
+        """
+        rows = self._conn.execute(
+            f"{_SELECT_SIGHTINGS} WHERE posting_id = ? ORDER BY id", (posting_id,)
+        ).fetchall()
+        return [_sighting(row) for row in rows]
+
+    def posting(self, posting_id: PostingId) -> Posting | None:
+        """Read one posting.
+
+        Args:
+            posting_id: The posting to read.
+
+        Returns:
+            The posting, or `None` if the id is unknown.
+        """
+        row = self._conn.execute(
+            f"{_SELECT_POSTINGS} WHERE id = ?", (posting_id,)
+        ).fetchone()
+        return None if row is None else _posting(row)
+
+    def set_description(self, posting_id: PostingId, text: str) -> None:
+        """Store a posting's description, replacing any earlier one.
+
+        Args:
+            posting_id: The posting to describe.
+            text: The description, as Markdown.
+
+        Raises:
+            InvalidValueError: If `text` is empty or only whitespace, or the
+                posting is unknown.
+            sqlite3.Error: If the write fails.
+        """
+        if not text.strip():
+            raise InvalidValueError("text", "is blank")
+        with self._conn:
+            changed = self._conn.execute(
+                "UPDATE postings SET description = ? WHERE id = ?", (text, posting_id)
+            ).rowcount
+        if not changed:
+            raise InvalidValueError("posting_id", f"{posting_id} is not a posting")
+
+    def set_label(
+        self, posting_id: PostingId, vote: Vote, note: str | None, *, at: datetime
+    ) -> Label:
+        """Store the user's vote on a posting, replacing any earlier one.
+
+        Args:
+            posting_id: The posting voted on.
+            vote: The verdict.
+            note: Why, or `None`.
+            at: When the vote was cast, timezone-aware.
+
+        Returns:
+            The stored label, with `labeled_at` in UTC as `label` reads it back.
+
+        Raises:
+            InvalidValueError: If `at` has no timezone, `note` is blank or the
+                posting is unknown.
+            sqlite3.Error: If the write fails.
+        """
+        if at.utcoffset() is None:
+            raise InvalidValueError("at", "has no timezone")
+        stamp = _to_text(at)
+        label = Label(posting_id, vote, note, _from_text(stamp))
+        with self._conn:
+            known = self._conn.execute(
+                "SELECT 1 FROM postings WHERE id = ?", (posting_id,)
+            ).fetchone()
+            if known is None:
+                raise InvalidValueError("posting_id", f"{posting_id} is not a posting")
+            self._conn.execute(
+                "INSERT OR REPLACE INTO labels (posting_id, vote, note, labeled_at) "
+                "VALUES (?, ?, ?, ?)",
+                (posting_id, vote.value, note, stamp),
+            )
+        return label
+
+    def clear_label(self, posting_id: PostingId) -> None:
+        """Remove the vote on a posting; a posting without one is ignored.
+
+        Args:
+            posting_id: The posting whose vote to remove.
+
+        Raises:
+            sqlite3.Error: If the write fails.
+        """
+        with self._conn:
+            self._conn.execute("DELETE FROM labels WHERE posting_id = ?", (posting_id,))
+
+    def label(self, posting_id: PostingId) -> Label | None:
+        """Read the vote on a posting.
+
+        Args:
+            posting_id: The posting to read.
+
+        Returns:
+            The label, or `None` if the posting has none.
+        """
+        row = self._conn.execute(
+            f"{_SELECT_LABELS} WHERE posting_id = ?", (posting_id,)
+        ).fetchone()
+        return None if row is None else _label(row)
+
+    def labels(self, ids: Collection[PostingId]) -> dict[PostingId, Label]:
+        """Read the votes on several postings at once.
+
+        Args:
+            ids: The postings to read.
+
+        Returns:
+            The labels by posting id; ids without a label are absent, and `{}`
+            when `ids` is empty.
+        """
+        wanted = json.dumps(list(ids))
+        rows = self._conn.execute(
+            f"{_SELECT_LABELS} WHERE posting_id IN "  # noqa: S608  # constants above
+            "(SELECT value FROM json_each(?))",
+            (wanted,),
+        ).fetchall()
+        labels = (_label(row) for row in rows)
+        return {label.posting_id: label for label in labels}
+
+    def set_cv(self, cv: StoredCv) -> None:
+        """Store the CV record, replacing the earlier one.
+
+        Args:
+            cv: The CV to record.
+
+        Raises:
+            sqlite3.Error: If the write fails.
+        """
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO cv (id, name, sha256, size, stored_at) "
+                "VALUES (1, ?, ?, ?, ?)",
+                (cv.name, cv.sha256, cv.size, _to_text(cv.stored_at)),
+            )
+
+    def cv(self) -> StoredCv | None:
+        """Read the stored CV record.
+
+        Returns:
+            The record, or `None` if no CV was stored.
+        """
+        row = self._conn.execute(
+            "SELECT name, sha256, size, stored_at FROM cv WHERE id = 1"
         ).fetchone()
         if row is None:
             return None
-        return Sighting(
-            posting_id=PostingId(row[0]),
-            source=source,
-            external_id=external_id,
-            first_seen=_from_text(row[1]),
-            last_seen=_from_text(row[2]),
-            raw=row[3],
+        return StoredCv(
+            name=row[0], sha256=row[1], size=row[2], stored_at=_from_text(row[3])
         )
 
     def import_seeds(self, rows: Iterable[tuple[SourceRef, str]]) -> int:

@@ -1,5 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Python.org Jobs Feed</title><link>https://www.python.org/jobs/</link><description>Python jobs from Python.org</description><atom:link href="https://www.python.org/jobs/feed/rss/" rel="self"/><language>en-us</language><lastBuildDate>Sat, 31 Oct 2026 02:28:52 +0000</lastBuildDate><item><title>Senior Python Engineer, webbyfox consultancy</title><link>https://www.python.org/jobs/8183/</link><description>London, UK
-&lt;p&gt;Trimmed description.&lt;/p&gt;</description><guid>https://www.python.org/jobs/8183/</guid></item><item><title>Senior Software Engineer — Python, React &amp; AI, Camden Kelly Staffing</title><link>https://www.python.org/jobs/8181/</link><description>Rowlett, TX, United States
+&lt;p&gt;We're looking for a Senior Python Engineer to design, build, and scale the backend systems that power our products. You'll own services end to end — from architecture and API design through to deployment and monitoring — and work closely with product, data, and DevOps teams.&lt;/p&gt;
+&lt;p&gt;Key responsibilities:
+- Design, develop, and maintain scalable, high-performance backend services and APIs in Python
+- Lead technical design discussions and make sound architectural decisions
+- Write clean, well-tested, maintainable code and champion engineering best practices
+- Review code and mentor junior and mid-level engineers
+- Optimise application performance, reliability, and security
+- Collaborate with cross-functional teams to translate requirements into technical solutions
+- Contribute to CI/CD pipelines, observability, and production support
+- Stay current with the Python ecosystem and help evolve our tech stack&lt;/p&gt;
+
+&lt;ul class="simple"&gt;
+&lt;li&gt;5+ years of professional software development experience, with strong expertise in Python&lt;/li&gt;
+&lt;li&gt;Solid experience with at least one major web framework (Django, FastAPI, or Flask)&lt;/li&gt;
+&lt;li&gt;Strong understanding of RESTful API design; GraphQL experience is a plus&lt;/li&gt;
+&lt;li&gt;Proficiency with relational databases (PostgreSQL/MySQL) and ORMs; NoSQL experience (Redis, MongoDB) is a plus&lt;/li&gt;
+&lt;li&gt;Experience with asynchronous programming (asyncio) and task queues (Celery, RQ, or similar)&lt;/li&gt;
+&lt;li&gt;Hands-on experience with cloud platforms (AWS, GCP, or Azure), Docker, and Kubernetes&lt;/li&gt;
+&lt;li&gt;Strong testing discipline (pytest, unit/integration testing, TDD)&lt;/li&gt;
+&lt;li&gt;Familiarity with CI/CD, Git workflows, and monitoring/logging tools&lt;/li&gt;
+&lt;li&gt;Good knowledge of software design patterns, system design, and security best practices&lt;/li&gt;
+&lt;li&gt;Excellent communication skills and experience mentoring other engineers&lt;/li&gt;
+&lt;li&gt;Bachelor's degree in Computer Science or a related field, or equivalent practical experience&lt;/li&gt;
+&lt;/ul&gt;
+</description><guid>https://www.python.org/jobs/8183/</guid></item><item><title>Senior Software Engineer — Python, React &amp; AI, Camden Kelly Staffing</title><link>https://www.python.org/jobs/8181/</link><description>Rowlett, TX, United States
 &lt;p&gt;Trimmed description.&lt;/p&gt;</description><guid>https://www.python.org/jobs/8181/</guid></item><item><title>SENIOR Back-End Python Engineer - FULLY REMOTE-WORLDWIDE, ActivePrime, Inc.</title><link>https://www.python.org/jobs/8134/</link><description>REMOTE, REMOTE
 &lt;p&gt;Trimmed description.&lt;/p&gt;</description><guid>https://www.python.org/jobs/8134/</guid></item></channel></rss>

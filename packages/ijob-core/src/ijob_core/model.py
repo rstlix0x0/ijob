@@ -8,7 +8,11 @@ A source adapter returns `SightingDraft` values; the store turns them into
 
 `SourceKind` names every kind of source. `RemoteScope` says where a remote job
 may be worked from. A draft and a `Posting` can also carry salaries (`Money`), a
-`CountryCode`, a remote scope, a role hint and a low-confidence flag.
+`CountryCode`, a remote scope, a role hint, a low-confidence flag and a
+description in Markdown.
+
+`Label` records the user's `Vote` on a posting, and `StoredCv` describes the CV
+the user keeps in the store.
 
 The display fields of a `Posting` are `title`, `company`, `location`, `url` and
 `posted_at`.
@@ -28,6 +32,7 @@ from ijob_core.money import Money
 _SOURCE_KEY_PATTERN: Final = re.compile(r"[A-Za-z0-9._-]+")
 _RESERVED_SOURCE_KEYS: Final = frozenset({".", ".."})
 _HTTP_PREFIXES: Final = ("http://", "https://")
+_SHA256_PATTERN: Final = re.compile(r"[0-9a-f]{64}")
 _REF_SEPARATOR: Final = ":"
 
 
@@ -53,6 +58,13 @@ class SourceKind(StrEnum):
     JOBPOSTING = "jobposting"
     FEED = "feed"
     FOURDAYWEEK = "4dayweek"
+
+
+class Vote(StrEnum):
+    """The user's verdict on a posting."""
+
+    UP = "up"
+    DOWN = "down"
 
 
 class RemoteScope(StrEnum):
@@ -176,6 +188,8 @@ class SightingDraft:
             one.
         low_confidence: Whether the fields were parsed heuristically (as from
             free-text comments) and may be mis-assigned.
+        description: The job's description as Markdown, when the source gives
+            one.
     """
 
     source: SourceRef
@@ -191,6 +205,7 @@ class SightingDraft:
     remote: RemoteScope | None = None
     role_hint: str | None = None
     low_confidence: bool = False
+    description: str | None = None
 
     def __post_init__(self) -> None:
         """Reject a draft that cannot describe a job.
@@ -242,6 +257,7 @@ class Posting:
         role_hint: The source's own label for the kind of role, when known.
         low_confidence: Whether the fields were parsed heuristically (as from
             free-text comments) and may be mis-assigned.
+        description: The job's description as Markdown, when known.
     """
 
     id: PostingId
@@ -257,6 +273,7 @@ class Posting:
     remote: RemoteScope | None = None
     role_hint: str | None = None
     low_confidence: bool = False
+    description: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,3 +297,67 @@ class Sighting:
     first_seen: datetime
     last_seen: datetime
     raw: str
+
+
+@dataclass(frozen=True, slots=True)
+class Label:
+    """The user's vote on one posting.
+
+    Attributes:
+        posting_id: The posting voted on.
+        vote: The verdict.
+        note: Why, when the user said; never empty or blank.
+        labeled_at: When the vote was cast, timezone-aware.
+    """
+
+    posting_id: PostingId
+    vote: Vote
+    note: str | None
+    labeled_at: datetime
+
+    def __post_init__(self) -> None:
+        """Reject a label with a blank note or a naive time.
+
+        Raises:
+            InvalidValueError: If `note` is set but empty or only whitespace, or
+                if `labeled_at` has no timezone.
+        """
+        if self.note is not None and not self.note.strip():
+            raise InvalidValueError("note", "is blank")
+        if self.labeled_at.utcoffset() is None:
+            raise InvalidValueError("labeled_at", "has no timezone")
+
+
+@dataclass(frozen=True, slots=True)
+class StoredCv:
+    """The record of the CV the store holds, not the file itself.
+
+    Attributes:
+        name: The file's name.
+        sha256: The SHA-256 of the file's bytes, as 64 lowercase hex characters.
+        size: The file's size in bytes.
+        stored_at: When the CV was stored, timezone-aware.
+    """
+
+    name: str
+    sha256: str
+    size: int
+    stored_at: datetime
+
+    def __post_init__(self) -> None:
+        """Reject a CV record that cannot describe a file.
+
+        Raises:
+            InvalidValueError: If `name` is empty, `sha256` is not 64 lowercase
+                hex characters, `size` is negative, or `stored_at` has no
+                timezone.
+        """
+        if not self.name:
+            raise InvalidValueError("name", "is empty")
+        if _SHA256_PATTERN.fullmatch(self.sha256) is None:
+            reason = f"{self.sha256!r} is not 64 lowercase hex characters"
+            raise InvalidValueError("sha256", reason)
+        if self.size < 0:
+            raise InvalidValueError("size", f"{self.size} is negative")
+        if self.stored_at.utcoffset() is None:
+            raise InvalidValueError("stored_at", "has no timezone")

@@ -18,7 +18,7 @@ from ijob_core.model import (
     parse_source_key,
 )
 from ijob_core.money import Money, Period
-from ijob_sources.ashby import AshbyBoard, parse_ashby
+from ijob_sources.ashby import AshbyBoard, description_from_raw, parse_ashby
 from ijob_sources.collect import CollectResult, SourceBatch, collect
 from ijob_sources.errors import IdentityMismatchError, ParseError, SourceNotFoundError
 from ijob_sources.polite_http import CachedResponse, ConditionalCache, PoliteClient
@@ -501,3 +501,82 @@ def test_ashby_board_satisfies_source_protocol() -> None:
     assert board.ref == SourceRef(SourceKind.ASHBY, _KEY)
     assert result.failures == []
     assert len(result.batches[board.ref].drafts) == 3
+
+
+_EXPECTED_DESCRIPTION = (
+    "# **About Ramp**\n\n"
+    "Ramp is building the smart infrastructure for finance teams, embedded "
+    "in the transaction flow of every dollar a business spends. We "
+    "automate how over $275B in annualized spend flows in and out of "
+    "85,000+ companies: authorizing payments, flagging risk, categorizing "
+    "spend, and closing books.\n\n"
+    "The problems are high-stakes, data-dense, and unforgiving.\n\n"
+    "We hire people with high agency and high urgency. We look for slope "
+    "over intercept. We care less about where you trained and more about "
+    "what you\u2019ve built. At Ramp, everyone is a builder who owns problems "
+    "end to end and makes consequential decisions that shape the outcome.\n\n"
+    "The median Ramp customer saves 7.5% and grows revenue 16% in their "
+    "first year \u2013 far in excess of businesses operating without Ramp. We "
+    "believe every ambitious company deserves the same.\n\n"
+    "If you want to build systems that directly shape how companies move "
+    "and manage billions, Ramp is the place to do it.\n\n"
+    "# About the Role\n\n"
+    "The Security Engineering team helps make Ramp the most secure place "
+    "for our customers to collect, manage, and put to work their business\u2019 "
+    "financial information\n\n"
+    "Our work centers in three areas:\n\n"
+    "- Ramp builds products with an eye for security\n"
+    "- Ramp detects and responds to threats before they cause harm\n"
+    "- Security powers Ramp\u2019s growth\n\n"
+    "Check out our [Engineering Blog](https://engineering.ramp.com/) for "
+    "more on our tech stack, mission and values!"
+)
+
+
+def test_draft_carries_description() -> None:
+    draft = _parse(*_JOBS).drafts[0]
+
+    assert draft.description == _EXPECTED_DESCRIPTION
+
+
+def test_description_from_raw_matches_draft() -> None:
+    draft = _parse(*_JOBS).drafts[0]
+
+    assert description_from_raw(draft.raw) == draft.description
+
+
+def test_description_missing_gives_none() -> None:
+    batch = _parse(_without(_FIRST, "descriptionHtml"))
+
+    assert len(batch.drafts) == 1
+    assert batch.drafts[0].description is None
+    assert description_from_raw(batch.drafts[0].raw) is None
+
+
+@pytest.mark.parametrize("value", [None, 7, ["<p>x</p>"], {"html": "<p>x</p>"}])
+def test_description_not_text_gives_none(value: object) -> None:
+    job = {**_FIRST, "descriptionHtml": value}
+
+    draft = _parse(job).drafts[0]
+
+    assert draft.description is None
+
+
+def test_description_drops_a_lone_surrogate() -> None:
+    job = {**_FIRST, "descriptionHtml": "<p>a\ud800b</p>"}
+
+    draft = _parse(job).drafts[0]
+
+    assert draft.description == "ab"
+    assert description_from_raw(draft.raw) == "ab"
+
+
+@pytest.mark.parametrize("raw", ["[]", '"text"', "null"])
+def test_description_from_raw_non_object_raises_parse_error(raw: str) -> None:
+    with pytest.raises(ParseError):
+        description_from_raw(raw)
+
+
+def test_description_from_raw_not_json_raises_parse_error() -> None:
+    with pytest.raises(ParseError):
+        description_from_raw("{not json")

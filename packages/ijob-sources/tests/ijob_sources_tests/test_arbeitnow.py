@@ -16,7 +16,11 @@ from ijob_core.model import (
     SourceRef,
     parse_source_key,
 )
-from ijob_sources.arbeitnow import ArbeitnowBoard, parse_arbeitnow
+from ijob_sources.arbeitnow import (
+    ArbeitnowBoard,
+    description_from_raw,
+    parse_arbeitnow,
+)
 from ijob_sources.collect import CollectResult, SourceBatch, collect
 from ijob_sources.errors import ParseError
 from ijob_sources.polite_http import CachedResponse, PoliteClient
@@ -282,3 +286,89 @@ def test_arbeitnow_board_satisfies_source_protocol() -> None:
     assert board.ref == SourceRef(SourceKind.ARBEITNOW, _KEY)
     assert result.failures == []
     assert len(result.batches[board.ref].drafts) == 4
+
+
+_DESCRIPTION = (
+    "**Help Build Europe's Hypersonic Capability**\n"
+    "\n"
+    "At **Hypersonica**, we\u2019re redefining what\u2019s possible in "
+    "European defence technology. We exist to deliver speed, resilience, "
+    "and technological independence at a pace that sets a new standard. We "
+    "are a small, elite team working on problems that matter, and solving "
+    "them fast.\n"
+    "\n"
+    "By joining **Hypersonica**, you\u2019re not stepping into a "
+    "predefined role. You\u2019re joining a talent dense environment where "
+    "every individual shapes the direction of the company. Our philosophy "
+    "is to hire a small number of exceptional people with broad, deep "
+    "technical capability, strong judgement, and the ability to operate "
+    "autonomously.\n"
+    "\n"
+    "We hire for talent, not rigid boxes. This role represents a business "
+    "need, but the way it evolves will be shaped by the individual. If "
+    "you\u2019ve achieved what others said was impossible, or you bring a "
+    "unique combination of skills that doesn\u2019t fit a traditional "
+    "mould, we want to hear from you. The work you do here directly "
+    "contributes to Europe\u2019s technological independence.\n"
+    "\n"
+    "**What you'll do**\n"
+    "\n"
+    "- Design and analyze flight control algorithms and Guidance, "
+    "Navigation & Control (GNC) architecture.\n"
+    "- Develop and validate control laws through simulation (e.g. 6-DOF "
+    "simulations).\n"
+    "- Define flight control system requirements and manage interfaces "
+    "with avionics and seeker teams."
+)
+
+
+def test_draft_carries_description() -> None:
+    draft = parse_arbeitnow(_PAGE1, _KEY).batch.drafts[0]
+
+    assert draft.description == _DESCRIPTION
+
+
+def test_description_from_raw_matches_draft() -> None:
+    draft = parse_arbeitnow(_PAGE1, _KEY).batch.drafts[0]
+
+    assert draft.description is not None
+    assert description_from_raw(draft.raw) == draft.description
+
+
+def test_description_missing_gives_none() -> None:
+    job = {name: value for name, value in _BRINGLIESEL.items() if name != "description"}
+
+    draft = _only(job)
+
+    assert draft.description is None
+    assert description_from_raw(draft.raw) is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(None, id="null"),
+        pytest.param(7, id="number"),
+        pytest.param(["<p>text</p>"], id="list"),
+        pytest.param("", id="empty"),
+        pytest.param(" \n ", id="blank"),
+    ],
+)
+def test_description_without_usable_text_gives_none(value: object) -> None:
+    draft = _only({**_BRINGLIESEL, "description": value})
+
+    assert draft.description is None
+    assert description_from_raw(draft.raw) is None
+
+
+def test_description_drops_a_lone_surrogate() -> None:
+    draft = _only({**_BRINGLIESEL, "description": "a\ud800b"})
+
+    assert draft.description == "ab"
+    assert description_from_raw(draft.raw) == "ab"
+
+
+@pytest.mark.parametrize("raw", ["not json", "[]", '"text"', "null"])
+def test_description_from_raw_rejects_a_raw_that_is_no_object(raw: str) -> None:
+    with pytest.raises(ParseError):
+        description_from_raw(raw)

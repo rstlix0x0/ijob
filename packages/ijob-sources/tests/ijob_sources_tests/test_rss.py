@@ -12,15 +12,25 @@ from ijob_core.countries import CountryCode
 from ijob_core.errors import InvalidValueError
 from ijob_core.model import (
     ExternalId,
+    SightingDraft,
     SourceKey,
     SourceKind,
     SourceRef,
     parse_source_key,
 )
 from ijob_sources.collect import CollectResult, SourceBatch, collect
+from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError
 from ijob_sources.polite_http import CachedResponse, ConditionalCache, PoliteClient
-from ijob_sources.rss import FEEDS, RssFeed, RssItem, item_link, item_raw, parse_rss
+from ijob_sources.rss import (
+    FEEDS,
+    RssFeed,
+    RssItem,
+    description_from_raw,
+    item_link,
+    item_raw,
+    parse_rss,
+)
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "rss"
 
@@ -906,3 +916,208 @@ def test_item_link_refuses_a_missing_or_non_http_link(link: str | None) -> None:
 
     with pytest.raises(InvalidValueError):
         item_link(item)
+
+
+# --- descriptions ----------------------------------------------------------
+
+_SOTHEBYS = (
+    "Remote - Established in 1744, Sotheby\N{RIGHT SINGLE QUOTATION MARK}s promotes "
+    "access and ownership "
+    "of exceptional art and luxury objects through auctions, private sales and "
+    "retail. Our deep expertise across 70 selling categories is supported by a "
+    "leading technology platform and a global network of special..."
+)
+
+
+def _djinni_draft() -> SightingDraft:
+    key = _key("djinni-python")
+    pages: dict[str, bytes | int] = {
+        FEEDS[key].url: _DJINNI,
+        _DJINNI_FIRST: _DJINNI_JOB,
+    }
+    known = frozenset(ExternalId(item.link or "") for item in parse_rss(_DJINNI)[1:])
+    (draft,) = _fetch(RssFeed(key, known=known), _serving(pages)).drafts
+    return draft
+
+
+def test_draft_carries_description() -> None:
+    draft = _fetch_one_feed("golang", _GOLANG).drafts[0]
+
+    assert draft.description == _SOTHEBYS
+
+
+_PYTHON_FEED_DESCRIPTION = (
+    "London, UK\n"
+    "\n"
+    "We're looking for a Senior Python Engineer to design, build, and scale "
+    "the backend systems that power our products. You'll own services end to "
+    "end \N{EM DASH} from architecture and API design through to deployment "
+    "and monitoring \N{EM DASH} and work closely with product, data, and "
+    "DevOps teams.\n"
+    "\n"
+    "Key responsibilities: - Design, develop, and maintain scalable, "
+    "high-performance backend services and APIs in Python - Lead technical "
+    "design discussions and make sound architectural decisions - Write clean, "
+    "well-tested, maintainable code and champion engineering best practices - "
+    "Review code and mentor junior and mid-level engineers - Optimise "
+    "application performance, reliability, and security - Collaborate with "
+    "cross-functional teams to translate requirements into technical solutions "
+    "- Contribute to CI/CD pipelines, observability, and production support - "
+    "Stay current with the Python ecosystem and help evolve our tech stack\n"
+    "\n"
+    "- 5+ years of professional software development experience, with strong "
+    "expertise in Python\n"
+    "- Solid experience with at least one major web framework (Django, "
+    "FastAPI, or Flask)\n"
+    "- Strong understanding of RESTful API design; GraphQL experience is a "
+    "plus\n"
+    "- Proficiency with relational databases (PostgreSQL/MySQL) and ORMs; "
+    "NoSQL experience (Redis, MongoDB) is a plus\n"
+    "- Experience with asynchronous programming (asyncio) and task queues "
+    "(Celery, RQ, or similar)\n"
+    "- Hands-on experience with cloud platforms (AWS, GCP, or Azure), Docker, "
+    "and Kubernetes\n"
+    "- Strong testing discipline (pytest, unit/integration testing, TDD)\n"
+    "- Familiarity with CI/CD, Git workflows, and monitoring/logging tools\n"
+    "- Good knowledge of software design patterns, system design, and security "
+    "best practices\n"
+    "- Excellent communication skills and experience mentoring other "
+    "engineers\n"
+    "- Bachelor's degree in Computer Science or a related field, or equivalent "
+    "practical experience"
+)
+
+
+def test_list_feed_description_is_normalized_html() -> None:
+    description = _fetch_one_feed("python", _PYTHON).drafts[0].description
+
+    assert description == _PYTHON_FEED_DESCRIPTION
+
+
+@pytest.mark.parametrize(
+    ("feed_key", "body"), [("golang", _GOLANG), ("python", _PYTHON), ("bsj", _BSJ)]
+)
+def test_description_from_raw_matches_draft(feed_key: str, body: bytes) -> None:
+    for draft in _fetch_one_feed(feed_key, body).drafts:
+        assert description_from_raw(draft.raw) == draft.description
+
+
+def test_description_from_raw_matches_detail_draft() -> None:
+    draft = _djinni_draft()
+
+    assert description_from_raw(draft.raw) == draft.description
+    assert draft.description is not None
+
+
+def test_description_missing_gives_none() -> None:
+    body = _feed_xml(_item_xml("Acme: Engineer", "https://example.test/jobs/1"))
+
+    (draft,) = _fetch_one_feed("wwr-programming", body).drafts
+
+    assert draft.description is None
+    assert description_from_raw(draft.raw) is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "{}",
+        '{"description": 5}',
+        '{"description": null}',
+        '{"description": "   "}',
+        '{"item": {}, "jobposting": {}}',
+        '{"item": {}, "jobposting": {"description": 5}}',
+        '{"item": {"description": "kept in the item"}, "jobposting": {}}',
+    ],
+)
+def test_description_from_raw_gives_none_for_a_missing_or_unusable_field(
+    raw: str,
+) -> None:
+    assert description_from_raw(raw) is None
+
+
+@pytest.mark.parametrize("raw", ["[]", '"text"', "null", "42", "not json", ""])
+def test_description_from_raw_refuses_a_raw_that_is_not_an_object(raw: str) -> None:
+    with pytest.raises(ParseError):
+        description_from_raw(raw)
+
+
+def test_rss_list_item_not_unescaped_twice() -> None:
+    item = RssItem(
+        title="Acme: Engineer",
+        link="https://example.test/jobs/1",
+        pub_date=None,
+        description="AT&amp;T pays 5 < 6",
+        extras={},
+    )
+
+    assert description_from_raw(item_raw(item)) == "AT&amp;T pays 5 \\< 6"
+
+
+_DJINNI_DESCRIPTION = (
+    "We are looking for a Senior AI Platform Engineer to build and own our "
+    "company-wide AI platform from the ground up - a reliable, secure, and "
+    "cost-transparent foundation that empowers every team to leverage LLMs and "
+    "delegate work to autonomous AI agents. In this role, you will take full "
+    "ownership of the platform\N{RIGHT SINGLE QUOTATION MARK}s core "
+    "architecture and drive internal adoption across the entire company. You "
+    "will lead the delivery of our internal LLM gateway as the single entry "
+    "point for all model providers - complete with team quotas, cost tracking, "
+    "and automated failovers - while establishing an observable shared "
+    "platform with monitoring and alerting. In parallel, you will ship native "
+    "internal SDKs for our primary tech stacks, deploy an Agent Control Plane "
+    "enabling teams to orchestrate and track autonomous workflows, and partner "
+    "directly with internal squads to turn high-impact business use cases into "
+    "production-grade solutions.\n"
+    "\n"
+    "Responsibilities\n"
+    "Architect, build, and operate the internal LLM Gateway, including "
+    "routing, rate limiting, quotas, cost tracking, and automated fallbacks.\n"
+    "Design and build the agent control plane, covering agent creation, "
+    "context management, task execution, and state tracking.\n"
+    "Build and maintain internal SDKs to simplify LLM integration across "
+    "teams.\n"
+    "Implement platform observability, monitoring, alerting, tracing, and "
+    "evaluation of LLM and agent workflows, including latency, token usage, "
+    "costs, and failovers.\n"
+    "Implement security and governance for LLM usage and AI agents.\n"
+    "Collaborate with internal teams to translate business needs into working "
+    "AI solutions and drive AI adoption.\n"
+    "Evaluate build-vs-buy options and integrate relevant open-source tools "
+    "where appropriate.\n"
+    "\n"
+    "Requirements\n"
+    "5+ years of experience in backend development.\n"
+    "Strong proficiency in Python or another modern backend language (Go, "
+    "TypeScript, Rust), with a willingness to work with Python as our primary "
+    "platform language."
+)
+
+
+def test_rss_detail_feed_reads_jobposting() -> None:
+    draft = _djinni_draft()
+
+    posting = json.loads(draft.raw)["jobposting"]["description"]
+    assert draft.description == normalize(posting, TextForm.DETECT)
+    assert draft.description == _DJINNI_DESCRIPTION
+    assert description_from_raw(draft.raw) == draft.description
+
+
+def test_rss_detail_feed_ignores_the_items_own_description() -> None:
+    key = _key("elixir")
+    page = (
+        b'<script type="application/ld+json">{"@type":"JobPosting",'
+        b'"hiringOrganization":{"name":"Acme"},"description":"<p>From the page</p>"}'
+        b"</script>"
+    )
+    link = "https://elixirjobs.net/offers/x"
+    handler = _serving(
+        {
+            FEEDS[key].url: _feed_xml(_item_xml("T", link, "From the feed")),
+            link: page,
+        }
+    )
+
+    (draft,) = _fetch(RssFeed(key), handler).drafts
+
+    assert draft.description == "From the page"

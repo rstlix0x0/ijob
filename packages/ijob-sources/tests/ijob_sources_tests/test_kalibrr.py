@@ -19,7 +19,7 @@ from ijob_core.model import (
 from ijob_core.money import Money, Period
 from ijob_sources.collect import CollectResult, SourceBatch, collect
 from ijob_sources.errors import ParseError
-from ijob_sources.kalibrr import KalibrrBoard, parse_kalibrr
+from ijob_sources.kalibrr import KalibrrBoard, description_from_raw, parse_kalibrr
 from ijob_sources.polite_http import PoliteClient
 
 _FIXTURES = resources.files("ijob_sources_tests.fixtures.kalibrr")
@@ -419,3 +419,107 @@ def test_kalibrr_board_satisfies_source_protocol() -> None:
     assert board.ref == SourceRef(SourceKind.KALIBRR, _KEY)
     assert result.failures == []
     assert len(result.batches[board.ref].drafts) == 4
+
+
+_EXPECTED_DESCRIPTION = (
+    "**Key Responsibilities**\n"
+    "\n"
+    "- Design, develop, enhance, and maintain enterprise "
+    "applications using .NET 5 or above, C#, and Microsoft SQL "
+    "Server.\n"
+    "- Develop, integrate, and maintain RESTful APIs and ensure "
+    "proper API documentation, integration standards, and system "
+    "reliability.\n"
+    "- Design and implement efficient database structures, SQL "
+    "queries, and database operations using DML, DDL, and other "
+    "SQL programming techniques.\n"
+    "- Develop and maintain responsive application interfaces "
+    "using JavaScript, jQuery, and UI frameworks such as Telerik "
+    "Kendo UI.\n"
+    "- Prepare and maintain technical documentation, system "
+    "architecture diagrams, and application design specifications.\n"
+    "- Perform system integration testing (SIT), support user "
+    "acceptance testing (UAT), and collaborate with relevant "
+    "stakeholders to ensure application quality.\n"
+    "- Support security testing activities, including penetration "
+    "testing, vulnerability remediation, and implementation of "
+    "recommended security improvements.\n"
+    "- Troubleshoot application issues, perform root cause "
+    "analysis, and implement effective solutions to improve system "
+    "performance and stability.\n"
+    "- Manage source code and collaborate with development teams "
+    "using Git and established version control practices.\n"
+    "- Contribute to application deployment, environment "
+    "configuration, and containerized application management where "
+    "applicable.\n"
+    "- Collaborate with cross-functional teams, including business "
+    "analysts, QA engineers, infrastructure teams, and business "
+    "stakeholders, to deliver effective software solutions.\n"
+    "\n"
+    "**Requirements**\n"
+    "\n"
+    "- Bachelor\u2019s degree in Information Technology, Computer "
+    "Science, Software Engineering, or a related field from a "
+    "reputable university.\n"
+    "- Minimum 5 years of professional experience in software "
+    "development, with strong hands-on experience in .NET 5 or "
+    "above, C#, and Microsoft SQL Server."
+)
+
+
+def test_draft_carries_description() -> None:
+    assert _draft_of(_VLINK).description == _EXPECTED_DESCRIPTION
+
+
+def test_description_from_raw_matches_draft() -> None:
+    draft = _draft_of(_VLINK)
+
+    assert description_from_raw(draft.raw) == draft.description
+
+
+def test_kalibrr_description_appends_qualifications() -> None:
+    text = _draft_of(_VLINK).description
+
+    assert text is not None
+    assert text.index("Key Responsibilities") < text.index("Requirements")
+    assert text.startswith("**Key Responsibilities**")
+    assert text.endswith("Microsoft SQL Server.")
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{}, {"description": None}, {"description": 5}, {"description": ""}],
+    ids=["absent", "null", "non-text", "empty"],
+)
+def test_description_missing_gives_none(change: dict[str, Any]) -> None:
+    job = {
+        k: v for k, v in _VLINK.items() if k not in {"description", "qualifications"}
+    } | change
+    draft = _draft_of(job)
+
+    assert draft.description is None
+    assert description_from_raw(draft.raw) is None
+
+
+def test_description_without_qualifications_keeps_the_description() -> None:
+    job = {k: v for k, v in _VLINK.items() if k != "qualifications"}
+    text = _draft_of(job).description
+
+    assert text is not None
+    assert text.startswith("**Key Responsibilities**")
+    assert "Requirements" not in text
+
+
+def test_qualifications_without_description_are_kept() -> None:
+    job = {k: v for k, v in _VLINK.items() if k != "description"}
+    text = _draft_of(job).description
+
+    assert text is not None
+    assert text.startswith("**Requirements**")
+    assert "Key Responsibilities" not in text
+
+
+@pytest.mark.parametrize("raw", ["<html>", "[]", "null", '"text"'])
+def test_description_from_raw_rejects_non_object(raw: str) -> None:
+    with pytest.raises(ParseError):
+        description_from_raw(raw)

@@ -18,7 +18,7 @@ from ijob_core.model import (
 from ijob_sources.collect import CollectResult, SourceBatch, collect
 from ijob_sources.errors import ParseError
 from ijob_sources.polite_http import CachedResponse, PoliteClient
-from ijob_sources.remoteok import RemoteOkBoard, parse_remoteok
+from ijob_sources.remoteok import RemoteOkBoard, description_from_raw, parse_remoteok
 
 _KEY = parse_source_key("all")
 _URL = "https://remoteok.com/api"
@@ -239,3 +239,88 @@ def test_remoteok_board_satisfies_source_protocol() -> None:
     assert board.ref == SourceRef(SourceKind.REMOTEOK, _KEY)
     assert result.failures == []
     assert len(result.batches[board.ref].drafts) == 2
+
+
+_DESCRIPTION = (
+    "#### **About Self Bill Pro:**\n"
+    "\n"
+    "Self Bill Pro is a rapidly growing startup dedicated to solving one "
+    "of the most persistent challenges in the employee benefits ecosystem: "
+    "the complexity of monthly benefits billing. We provide a tech-enabled "
+    "service where our dedicated team leverages proprietary software to "
+    "eliminate the administrative burdens of manual invoice audits and "
+    "costly billing errors. Our mission is to streamline this critical "
+    "operation, freeing up employers, brokers, and carriers to focus on "
+    "their strategic priorities.\n"
+    "\n"
+    "**About the Role: Compensation - $130,000 - 160,000**\n"
+    "We are seeking a highly motivated and experienced Director of Product "
+    "Management and IT Operations to lead the strategic direction and "
+    "operational execution of our proprietary software platform. This is a "
+    "critical leadership role that requires a unique blend of product "
+    "management expertise, technical acumen, and operational leadership. "
+    "You will be responsible for defining and driving the product roadmap "
+    "while also ensuring the stability and security of our IT "
+    "infrastructure and systems.\n"
+    "\n"
+    "**Reports to:** Chief Operating Officer\n"
+    "\n"
+    "#### **Key Responsibilities:**\n"
+    "\n"
+    "- **Product Leadership:** Partner with our global product manager to "
+    "define, prioritize, and manage the product roadmap, ensuring it "
+    "aligns with overall business objectives and our long-term technology "
+    "vision."
+)
+
+
+def test_draft_carries_description() -> None:
+    draft = parse_remoteok(_BODY, _KEY).drafts[0]
+
+    assert draft.description == _DESCRIPTION
+
+
+def test_description_from_raw_matches_draft() -> None:
+    draft = parse_remoteok(_BODY, _KEY).drafts[0]
+
+    assert draft.description is not None
+    assert description_from_raw(draft.raw) == draft.description
+
+
+def test_description_missing_gives_none() -> None:
+    job = {name: value for name, value in _FRONT_END.items() if name != "description"}
+
+    draft = _only(job)
+
+    assert draft.description is None
+    assert description_from_raw(draft.raw) is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(None, id="null"),
+        pytest.param(7, id="number"),
+        pytest.param(["<p>text</p>"], id="list"),
+        pytest.param("", id="empty"),
+        pytest.param(" \n ", id="blank"),
+    ],
+)
+def test_description_without_usable_text_gives_none(value: object) -> None:
+    draft = _only({**_FRONT_END, "description": value})
+
+    assert draft.description is None
+    assert description_from_raw(draft.raw) is None
+
+
+def test_description_drops_a_lone_surrogate() -> None:
+    draft = _only({**_FRONT_END, "description": "a\ud800b"})
+
+    assert draft.description == "ab"
+    assert description_from_raw(draft.raw) == "ab"
+
+
+@pytest.mark.parametrize("raw", ["not json", "[]", '"text"', "null"])
+def test_description_from_raw_rejects_a_raw_that_is_no_object(raw: str) -> None:
+    with pytest.raises(ParseError):
+        description_from_raw(raw)
