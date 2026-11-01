@@ -1,7 +1,7 @@
 ---
-status: approved
+status: done
 created: 2026-11-01
-built-on: a9902751b191
+built-on: b175307f42cd
 ---
 
 # Description Normalizer Implementation Plan
@@ -99,3 +99,29 @@ packages/ijob-sources/tests/ijob_sources_tests/test_description.py  — [create]
 - `uv run --locked pytest packages/ijob-sources/tests/ijob_sources_tests/test_description.py` passes.
 - The five gate commands in CLAUDE.md exit `0`.
 - `grep -n "^import\|^from" packages/ijob-sources/src/ijob_sources/description.py` shows only standard-library imports.
+
+## Review findings
+
+- security — MARKDOWN link/image filter bypassable (autolinks, reference links, nested/escaped brackets, titles, two-level parens, raw HTML, `[[x](ssh://a)](ssh://b)`) — `description.py` MARKDOWN path — fixed and verified: allow-list scanner; reviewer probe re-run `uv run --locked python -I …/scratchpad/probe.py | grep 'links=\[' | grep -v 'links=\[\]'` → only `https://ok`, `https://x`, `https://x/a`, `https://x/a%5Db`
+- security — `<pre>` fence broke out after a list marker, heading marker or inside a held span — `description.py` pre handling — fixed and verified: fence on its own line, indented in list items, escaped-text fallback; parametrized hostile tests; `uv run --locked pytest -q packages/ijob-sources/tests/ijob_sources_tests/test_description.py` → `154 passed in 0.06s`
+- security — control characters stripped after markup filtering, so stripping created markup — `description.py` finish step — fixed and verified: strip and line-ending unification moved to the input (and to decoded entities/hrefs); same test run
+- spec — escape set of spec §3.1 could not stop `>`, list markers, setext, thematic breaks, indented code — `description.py` — fixed: line-start escaping widened; docstring states the exact guarantee
+- correctness — adjacent/nested emphasis garbled (`**x****y**`) — `description.py` — fixed: same-kind spans merge (`<b>x</b><b>y</b>` → `**xy**`)
+- docstring-discipline — module docstring overclaimed — fixed
+- test-mandate — untested branches (stray `</iframe>`, inline-code pad, rstrip after cut) — fixed: tests added
+- correctness — MARKDOWN escapes brackets inside code spans — accepted as cosmetic
+- correctness — `&` not escaped, so PLAIN `AT&amp;T` renders as `AT&T` — declined: plan 03's `test_rss_list_item_not_unescaped_twice` asserts the literal `AT&amp;T pays 5 \< 6`
+- open — Textual's gfm-like linkify may auto-link bare emails/`ftp://` text — carried to plan 07, whose spec §7 already requires opening only `http(s)` targets on `LinkClicked`
+
+Full gate after the fix round (coder run): `161 files already formatted`; `All checks passed!`; `Success: no issues found in 107 source files`; `1686 passed`.
+
+## Probe results
+
+- Reviewer bypass corpus (`/private/tmp/claude-501/-Users-hiraq-Projects-rstlix0x0-ijob/414123fb-5882-46e9-9bbe-ce9eef8996d3/scratchpad/probe.py`, parses output with markdown-it-py from the reviewer's scratch env) — before fix: ssh/smb links and images survived in MARKDOWN, `<pre>` and control-char cases — AGAINST THE PLAN's MARKDOWN rule as implemented; after fix: only http(s) links survive (see above).
+- Spec §3.1 entity claim (`convert_charrefs` default True) — exercised by `test_html_entities_unescaped` — passes.
+
+## Deviations
+
+- 2026-11-01 — Defect of the spec (§3.1): the listed escape set does not make "source text cannot form markup" true (block quotes, list markers, setext, thematic breaks, indented code), and a regex-level MARKDOWN filter cannot catch every non-http link form with the stdlib alone. Built instead: widened line-start escaping for HTML/PLAIN; MARKDOWN as an allow-list (keep `[text](http(s)://…)` without a title, replace other inline links by their text, drop images, escape every other `[`, `]`, `<`). Every stated requirement of §3.1 still holds (stdlib only, http(s)-only links, Markdown formatting passes through); the spec's wording should be updated by `design` at its next amendment. No `disproves` marker: no requirement the sibling plans depend on changed.
+- 2026-11-01 — Additions not in the spec: control characters stripped on input; `\r\n`/`\r` unified; whitespace moved outside emphasis markers; code text emitted literally with a fence longer than any backtick run; hrefs percent-encoded for whitespace, parens, angle brackets, backslash; a titled http link in MARKDOWN becomes its text; `!` before a kept link is escaped.
+- 2026-11-01 — Per-task commits not made (CLAUDE.md: commit only when the user asks).

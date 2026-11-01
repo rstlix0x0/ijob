@@ -1,8 +1,8 @@
 ---
-status: approved
+status: done
 created: 2026-11-01
 depends-on: [05]
-built-on: a9902751b191
+built-on: b175307f42cd
 ---
 
 # CLI Commands Implementation Plan
@@ -100,3 +100,23 @@ packages/ijob-app/tests/ijob_app_tests/test_cli.py    — [modify] tests for the
 - `uv run --locked pytest packages/ijob-app` passes.
 - The five gate commands in CLAUDE.md exit `0`.
 - `uv run --locked ijob --help` lists `search`, `show`, `label`, `cv` and `sources`.
+
+## Review findings
+
+- test-mandate — `cv set` error text only substring-checked — `test_cli.py` — fixed: exact `error: <path> is not a PDF: it does not start with %PDF-`
+- test-mandate — CacheUnavailableError branch of `_refusals` untested for show/label — fixed: both exit 1, no DB created
+- test-mandate — no test of `show`'s location/salary/country/remote/posted lines — fixed: exact block incl. `120000-150000 USD/year`, `from 120000 USD`, `up to 150000 EUR/month`
+- correctness — after plan 05's fix, a failed CV copy raised a raw `OSError` traceback — `cli.py` `cv set` — fixed and verified: `test_cv_set_copy_failure_exits_1` (failed first, then passed); `uv run --locked pytest -q packages/ijob-app/tests/ijob_app_tests/test_cli.py` → `92 passed in 1.96s`
+- deferred nits — module docstring command list; `_refusals` duplicating search/sources handling; `cv show` prints a timestamp (spec says date); dead fallback in `_detail_lines`; `label --clear` opens the cache; `{ID}` metavar; guard readability; unreachable else in `label`; tab/newline in a note breaks the one-line output; `startswith("20")` check
+
+## Probe results
+
+- `uv run --locked ijob --help` lists show, label, search, sources, cv (coder and reviewer runs).
+- Full gate after plan 06: `168 files already formatted`; `All checks passed!`; `114 source files`; `2013 passed`.
+
+## Deviations
+
+- 2026-11-01 — `show` layout fixed as: title, company, `location:`, `salary:` per range, `country:`, `remote:`, `posted:`, `sources:`, `url:`, `label:`/`note:` when present, blank line, description or `description unavailable: <reason>`.
+- 2026-11-01 — `label` prints `<id>\t<vote>\t<note or ->`; `--clear` prints `<id>\tcleared`; `--clear` with `--note` is a usage error.
+- 2026-11-01 — `cv set` maps a failed copy (`OSError`) to `error: cannot store the CV: …`, exit 1.
+- 2026-11-01 — Per-task commits not made (CLAUDE.md).

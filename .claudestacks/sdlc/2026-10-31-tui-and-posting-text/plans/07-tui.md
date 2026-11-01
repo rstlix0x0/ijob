@@ -1,8 +1,8 @@
 ---
-status: approved
+status: done
 created: 2026-11-01
 depends-on: [05, 06]
-built-on: a9902751b191
+built-on: b175307f42cd
 ---
 
 # TUI Implementation Plan
@@ -211,3 +211,30 @@ packages/ijob-app/tests/ijob_app_tests/tui/test_cv.py         — [create] CV sc
 - The five gate commands in CLAUDE.md exit `0`.
 - `grep -rn "thread=True" packages/ijob-app/src/ijob_app/tui` finds nothing.
 - `grep -rn "Store.open\|sqlite3" packages/ijob-app/src/ijob_app/tui` finds nothing: the TUI reaches data only through `Service`.
+
+## Review findings
+
+- security — DataTable cells took posting title/company/location as Rich markup: `[/remote]` crashed the app, `[@click=app.vote_up]` voted on click, `[@click=app.screenshot(…)]` overwrote a file, `[link=file:///…]` bypassed the link guard — `tui/app.py` — fixed and verified: every cell is `render.plain_cell` (`Text`); `test_table_shows_posting_text_literally` (12 cases, failed first with MarkupError), `test_clicking_a_title_with_a_click_action_votes_nothing`; probe `probe_click.py '[@click=app.vote_up]Vote[/]'` → `spans: []`, `labels after clicks: {}`
+- security — same bare-str cells in the sources table — `tui/sources.py` — fixed: `test_sources_table_shows_company_text_literally`
+- modularity — `_money_text` and the `show` field layout duplicated in cli and tui — fixed: shared `ijob_app/render.py` (`money_text`, `posting_fields`, `plain_cell`) + `test_render.py`
+- performance — every keystroke reloaded the table — fixed: 0.2 s debounce on `Input.Changed`; `test_burst_of_filter_changes_reloads_once`
+- correctness — exclusive label group cancelled the first vote's row update — fixed: non-exclusive, row mark read from the stored label; `test_two_quick_votes_both_mark_their_rows` (failed with `exclusive=True`)
+- test-mandate — `notify(markup=False)` unguarded — fixed: fake records `markup`, tests assert `[False]`
+- declined — C6 comma-split companies (spec §6 defines comma-separated filters)
+- deferred nits — C5, C7, C8, C11, C13–C16 (see reviewer detail 21-reviewer-tui.md)
+
+Final gate (orchestrator run): sync `Checked 32 packages`; `181 files already formatted`; `All checks passed!`; `Success: no issues found in 127 source files`; `2088 passed in 29.71s`.
+
+## Probe results
+
+- Textual worker/widget probes from design (`$SCRATCH/probes/test_textual_probe.py`, `test_worker_probe.py`) — exercised by the TUI tests under the project's pytest config.
+- Reviewer markup/click probes before the fix: MarkupError, stored 👍 vote, 51,878-byte SVG written over a file — AGAINST THE PLAN's claim that posting text is escaped; after the fix: literal text, no spans, no vote.
+
+## Deviations
+
+- 2026-11-01 — Links open only for http(s) with a host; Markdown pane `open_links=False`; third-party text escaped; `notify(markup=False)` everywhere.
+- 2026-11-01 — Filter inputs use Textual Validators so `-invalid` survives blur; starting spec read in `IjobApp.__init__`.
+- 2026-11-01 — NoteScreen: Enter with empty text removes the note, Escape changes nothing.
+- 2026-11-01 — Main-screen actions disabled via `check_action` while another screen is open; Escape returns focus to the table.
+- 2026-11-01 — Added `tui/conftest.py` and `ijob_app/render.py` (not in the plan's file list); textual 8.2.8 pulls linkify-it-py 2.2.0, mdit-py-plugins 0.6.1, platformdirs 4.14.2.
+- 2026-11-01 — Per-task commits not made (CLAUDE.md).

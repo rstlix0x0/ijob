@@ -1,8 +1,9 @@
 ---
-status: approved
+status: done
 created: 2026-11-01
 depends-on: [01, 02]
-built-on: a9902751b191
+built-on: b175307f42cd
+disproves: a9902751b191
 ---
 
 # Payload Descriptions Implementation Plan
@@ -115,3 +116,27 @@ packages/ijob-sources/tests/ijob_sources_tests/fixtures/<module>/…            
 - `uv run --locked pytest packages/ijob-sources` passes.
 - The five gate commands in CLAUDE.md exit `0`.
 - `grep -ln "def description_from_raw" packages/ijob-sources/src/ijob_sources/*.py` lists exactly 16 modules — greenhouse, gem, ashby, lever, himalayas, jobicy, remoteok, arbeitnow, fourdayweek, mycareersfuture, kalibrr, rss, manual, letsgetrusty, japandev, hn — covering the 17 kinds (`feed` shares `rss`).
+
+## Review findings
+
+- correctness — a lone surrogate in a description crashed `Store.record` (7 modules unguarded) — `description.py` input sanitising — fixed at the root and verified: `normalize` strips U+D800–U+DFFF; `test_strips_lone_surrogates`, `test_a_lone_surrogate_in_a_comment_does_not_stop_the_batch_being_stored`; reviewer repro `crash.py` → `RecordResult(new=2, updated=0, merged=0)`, `postings stored: (2,)`; `uv run --locked pytest packages/ijob-sources packages/ijob-core` → `1785 passed in 1.86s`
+- modularity — JSON-object loader duplicated 16×, `_readable` 4×, encode guard 5× — consolidated into `ijob_sources/payload.py` `raw_object` (+ `test_payload.py`, 12 tests); per-module guards removed
+- docstring-discipline — kalibrr/mycareersfuture docstrings misnamed the parser path — fixed
+- naming — lever `_descriptions` vs `_description` — renamed `_identity_texts`
+- test-mandate — hn, japandev, manual, rss tests used partial literals — now full expected constants
+- fixtures — gem/ashby/lever plain-text stubs no longer match the HTML — declined: used only by identity checks, which pass
+- spec — live-data quirks (arbeitnow/remoteok partly escaped HTML, remoteok mojibake, fourdayweek raw HTML in Markdown) — recorded in spec §2.1 as not handled in this chain
+
+## Probe results
+
+- Live capture of every §2.1 fixture source through `PoliteClient` (`$SCRATCH/capture/capture.py`) — all 18 requests `200`.
+- LetsGetRusty list payload — `ItemList` items carry a 153-character snippet ending `...`; the page's one standalone JobPosting is a different job — AGAINST THE SPEC (§2.1 letsgetrusty row).
+- LetsGetRusty job page `https://jobs.letsgetrusty.com?job=recKZTPUl4654gtLM` — `200`, one JobPosting, same title, 2,338-character description.
+- Lever fixture had no `lists` key (spec §2.3 said empty) — against the spec wording; live `lists` content uses `•` bullets in `<p>`.
+
+## Deviations
+
+- 2026-11-01 — Defect of the spec (§2.1): LetsGetRusty's list payload holds only snippets. `disproves` written; the user chose lazy fetch. Spec amended in place (LetsGetRusty → §2.2 fetch group, form MARKDOWN; 16 payload kinds); `letsgetrusty.description_from_raw` removed, drafts carry `description=None`. 15 modules define `description_from_raw`.
+- 2026-11-01 — HN fixture comment replaced wholesale with real comment 50095921; two header-field tests take its values. JapanDev fixture cut early to avoid naming private individuals. Lever fixture keeps two of three list items. Kalibrr/MCF fixtures got a closing `</ul>` after the cut.
+- 2026-11-01 — Shared `payload.raw_object` added (not in the plan) to remove 16 copies.
+- 2026-11-01 — Per-task commits not made (CLAUDE.md: commit only when the user asks).

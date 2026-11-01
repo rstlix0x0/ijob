@@ -1,7 +1,7 @@
 ---
-status: approved
+status: done
 created: 2026-11-01
-built-on: a9902751b191
+built-on: b175307f42cd
 ---
 
 # Core Store Migration 3 Implementation Plan
@@ -112,3 +112,27 @@ packages/ijob-core/tests/ijob_core_tests/test_store.py — [modify] tests for mi
 - `uv run --locked pytest packages/ijob-core` passes.
 - The five gate commands in CLAUDE.md exit `0`.
 - `grep -rn "httpx\|dspy\|anthropic" packages/ijob-core/src` finds nothing (boundary held).
+
+## Review findings
+
+- correctness — a draft with `description=""` overwrote a stored description (COALESCE without NULLIF) — `store.py` `_update_posting` — fixed and verified: `test_record_keeps_description_when_draft_description_is_empty`; `uv run --locked pytest packages/ijob-core packages/ijob-app` → `398 passed in 1.23s`
+- strong-types — `set_description` accepted blank text — `store.py` `set_description` — fixed and verified: `test_set_description_rejects_blank_text` (2 params), same run as above
+- idioms — `set_label` returned the caller's timezone while `label()` returns UTC — `store.py` `set_label` — fixed and verified: `test_set_label_returns_what_label_reads_back`, same run
+- test-mandate — `test_clear_label` could not catch a dropped `WHERE` — `test_store.py` — fixed: a second labelled posting must survive, same run
+- docstring-discipline — store module docstring, `record` docstring, `StoredCv` docstring wording — `store.py`, `model.py` — fixed (wording only)
+- test-mandate — v2 fixture built from live `_MIGRATIONS[:2]` rather than frozen SQL — `test_store.py` `_version_2_database` — declined: migrations are append-only, low risk
+- spec — `_SELECT_SIGHTINGS`/`_sighting` refactor of `sighting()` not named in the plan — `store.py` — accepted: behaviour unchanged, covered by existing tests
+
+## Probe results
+
+- Plan line references (`store.py` 41/175/186/314/393/421/567/720, `model.py` 158-193/224-259) — checked by the coder against the source — all matched.
+- Migration 3 SQL equals spec §4 — reviewer ran `PRAGMA table_xinfo` for `labels` and `cv` on a fresh DB vs the spec SQL executed verbatim — identical (STRICT, FK `labels.posting_id → postings(id)`, `postings.description` nullable TEXT).
+- Boundary — `grep -rn "httpx\|dspy\|anthropic" packages/ijob-core/src` — no output, exit 1.
+- Full gate after plans 01+02 (before fix round): sync 0; `161 files already formatted`; `All checks passed!`; `Success: no issues found in 107 source files`; `1571 passed in 2.25s`.
+
+## Deviations
+
+- 2026-11-01 — Per-task commits named in the plan were not made; CLAUDE.md says commit only when the user asks. Changes left in the working tree.
+- 2026-11-01 — `Label` rejects `""` as well as whitespace-only notes (within the plan's "absent or has text" rule). `set_label` names `at` in its naive-time error, and unknown postings raise `InvalidValueError("posting_id", …)`.
+- 2026-11-01 — Defect of the spec (§4 COALESCE rule): the literal `COALESCE(?, description)` let an empty string overwrite; built as `COALESCE(NULLIF(?, ''), description)`, matching `role_hint`. Spec §4 should be corrected by `design` at its next amendment; no plan behaviour depends on the literal form, so no `disproves` marker was written.
+- 2026-11-01 — Existing tests renamed for schema version 3 (`test_fresh_database_is_version_3`, `test_version_1_database_migrates_and_keeps_rows`); no assertion weakened.

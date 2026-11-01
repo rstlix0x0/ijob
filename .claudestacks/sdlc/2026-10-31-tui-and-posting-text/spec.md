@@ -24,7 +24,7 @@ store, polite client and `Source` protocol, and changes only what §1 lists.
    | `Posting` (`ijob_core/model.py:224-259`) | new field `description: str \| None = None` |
    | store schema | migration 3 (§4) |
    | `Store` | new methods (§4) |
-   | the adapters of the 17 kinds in §2.1 | expose `description_from_raw` and fill `draft.description` (§3.2) |
+   | the adapters of the 16 kinds in §2.1 | expose `description_from_raw` and fill `draft.description` (§3.2) |
    | `ijob_sources` | new modules `description` (§3.1) and `details` (§3.3) |
    | `ijob_app` | new module `service` (§5); `cli` becomes a thin layer over it and gains commands (§6); new package `tui` (§7) |
    | `ijob search` output | a leading posting-id column (§6) |
@@ -32,8 +32,8 @@ store, polite client and `Source` protocol, and changes only what §1 lists.
 2. **Description is normalized once, when recorded** (approach A, chosen in design over deriving it
    from `sightings.raw` on every read). When a posting has no stored description — a row stored before
    migration 3, a job a source no longer re-drafts, or a kind whose list carries none — it is derived
-   the first time the user opens or labels the posting: from the stored `raw` for the 17 kinds of §2.1
-   (no network), by one fetch for the 2 kinds of §2.2. The result is written to the same column.
+   the first time the user opens or labels the posting: from the stored `raw` for the 16 kinds of §2.1
+   (no network), by one fetch for the 3 kinds of §2.2. The result is written to the same column.
 3. **Normalized text is a Markdown subset** (decided in design): headings, paragraphs, lists, emphasis,
    links, code. It is the intent's "clean, normalized plain text" with simple structure kept, renders
    in Textual's `Markdown` widget, and reads as text in the CLI.
@@ -58,7 +58,7 @@ own `PoliteClient` (robots.txt checked; User-Agent `polite_http.py:34-37`). Scri
 `$SCRATCH/probes/{detail_probe,lever_workable_probe,list_and_jsonld_probe,kalibrr_probe}.py`,
 `live_*.{json,html}`, `kalibrr_page.html`.
 
-### 2.1 Description in the stored payload: 17 kinds
+### 2.1 Description in the stored payload: 16 kinds
 
 `TextForm` is defined in §3.1. `DETECT` means HTML when the text matches `<[a-zA-Z][^>]*>`, else PLAIN.
 
@@ -76,23 +76,28 @@ own `PoliteClient` (robots.txt checked; User-Agent `polite_http.py:34-37`). Scri
 | mycareersfuture | `description` | HTML | live list: first result's keys include `description`; value `<p><strong>Location: </strong>Central (Hybrid) </p>…` |
 | kalibrr | `description`, then `qualifications` | HTML | live list: job keys include `description` and `qualifications`; values `<p><strong><u>Key Responsibilities</u>…` and `<p><strong><u>Requirements</u>…` |
 | rss | item `<description>` (list feeds); `jobposting.description` (detail feeds) | DETECT | list: `rss.py:135` already unescapes, so no second unescape; detail: live djinni page JSON-LD `has tags: False` `We are looking for a Senior AI Platform Engineer…` |
-| letsgetrusty | `description` | MARKDOWN | live page JSON-LD: `has tags: False`, `**About the Role** We are hiring a **Backend Software Engineer…` |
 | japandev | `jobposting.description` | HTML | live job page JSON-LD: `has tags: True`, `<p><strong>Location requirement</strong></p>…` |
 | hn | `comment_text` | HTML | `hn/comments.json:6` `…REMOTE<p>We build warehous…` |
 | jobposting (manual page) | `description` | DETECT | any site's JSON-LD: the three live samples above show HTML, Markdown and plain text |
 | feed (manual feed) | item `<description>` | DETECT | same reader as rss (`manual.py:271`) |
 
-### 2.2 No description in the list payload: 2 kinds, verified detail routes
+Live-data quirks found in plan 03 execution, not handled in this chain (shown as escaped text; `raw`
+is kept, so a later normalizer change re-derives them on re-record): some arbeitnow and remoteok
+descriptions are partly HTML-escaped (`&lt;p&gt;` beside real tags); many remoteok descriptions carry
+mojibake (`â\x80\x94`); some fourdayweek Markdown contains raw HTML.
+
+### 2.2 No full description in the list payload: 3 kinds, verified detail routes
 
 | Kind | Live list evidence | Detail route | Built from | Live detail probe |
 |---|---|---|---|---|
 | workable | widget job keys: `application_url, city, code, country, created_at, department, education, employment_type, experience, function, industry, locations, published_on, shortcode, shortlink, state, telecommuting, title, url` | `https://apply.workable.com/api/v2/accounts/{key}/jobs/{shortcode}` | source key + `external_id` (= `shortcode`, `workable.py:167`) | `200 application/json`; keys include `description`, `requirements`, `benefits`; `description: <p></p><p>At Hugging Face…` |
 | yc | page `props.jobPostings` (`parse_yc_page`, `yc.py:90-120`): 40 jobs; keys `applyUrl, askUs, companyBatchName, companyLogoUrl, companyName, companyOneLiner, companyUrl, createdAt, ctaText, ctaUrl, equityRange, hiringManager, id, isIncomplete, lastActive, location, minExperience, minSchoolYear, prettyRole, role, roleSpecificType, salaryRange, skills, title, type, url, visa` | the job page | `_ORIGIN` + `raw["url"]` (`yc.py:31,165,174`; `raw` holds the site path) | `200 text/html`; one JSON-LD JobPosting; `description: <p><strong>WHO WE ARE</strong></p>…` (form DETECT) |
+| letsgetrusty | list page `ItemList` items carry only a 153-character `description` snippet ending `...` (plan 03 execution, live `?page=1`) | the job page `https://jobs.letsgetrusty.com?job=<id>` | the item's `url` held in `raw` | `200`; `jsonld.job_postings` returns one JobPosting with the same title and a 2,338-character `description` (form MARKDOWN); record time stores no snippet, so drafts carry `description=None` |
 
 ### 2.3 Lever's full description
 
 The recorded Lever fixture's job keys are `applyUrl, categories, country, createdAt, descriptionPlain,
-hostedUrl, id, text, workplaceType`, and `lists` is empty. A live probe of
+hostedUrl, id, text, workplaceType`, with no `lists` key. A live probe of
 `https://api.lever.co/v0/postings/spotify?mode=json&limit=1` returned `additional, additionalPlain,
 applyUrl, categories, country, createdAt, description, descriptionBody, descriptionBodyPlain,
 descriptionPlain, hostedUrl, id, lists, opening, openingPlain, text, workplaceType`; `lists` items
@@ -112,11 +117,16 @@ PLAIN | DETECT`. Built on the standard library's `html.parser`, already used by 
   items, `strong`/`b` → `**`, `em`/`i` → `*`, `a href` → `[text](href)` for `http(s)` hrefs only,
   `pre`/`code` → fenced or inline code. `script`, `style`, `img`, `iframe` and their content are
   dropped; every attribute but `href` is dropped; unknown tags keep their text. Text nodes are
-  Markdown-escaped (`\ * _ [ ] ` + "`" + ` <`, and `#` at a line start), so source text cannot form
-  markup.
+  Markdown-escaped (`\ * _ [ ] ` + "`" + ` <`, and at a line start `# > + = ~ -` and an ordered-list
+  marker; deep indentation removed), so source text cannot form a link, image, raw HTML, heading,
+  quote, list, thematic break or indented code. Code text is literal inside a fence longer than any
+  backtick run, always opened on its own line.
 - PLAIN: lines and paragraphs kept, text Markdown-escaped as above.
-- MARKDOWN: passed through, except that a link or image whose target is not `http(s)` is replaced by
-  its text and every image is dropped.
+- MARKDOWN: an allow-list. A titled-less inline link with an `http(s)` target is kept; any other
+  inline link becomes its text; every image is dropped; every other `[`, `]` and `<` is escaped (no
+  autolink, reference link or raw HTML can form). Other Markdown passes through.
+- Before any form: control characters (C0 but tab and newline, DEL, C1) and lone surrogates are
+  removed and line endings unified.
 - Greenhouse's escaped HTML is unescaped once with `html.unescape` by its adapter before
   `normalize(…, HTML)` (probe: the fixture's `&lt;p&gt;Trimmed job description.&lt;/p&gt;` becomes
   `<p>Trimmed job description.</p>`).
@@ -143,8 +153,9 @@ async def describe(sighting: Sighting, client: PoliteClient) -> str | None
 ```
 
 A `match` on `sighting.source.kind` with one `case` per `SourceKind` member, closed by
-`assert_never`, as `registry.py:72-110` does. The 17 §2.1 kinds return
-`<adapter>.description_from_raw(sighting.raw)` with no request. Workable and YC `GET` their §2.2 route
+`assert_never`, as `registry.py:72-110` does. The 16 §2.1 kinds return
+`<adapter>.description_from_raw(sighting.raw)` with no request. Workable, YC and LetsGetRusty `GET`
+their §2.2 route; LetsGetRusty reads its job page's JSON-LD like YC. Workable and YC `GET` their route
 through `client` (robots, spacing and User-Agent as today) and normalize: Workable joins
 `description`, `requirements` and `benefits` under `## Requirements` / `## Benefits`; YC reads the
 page's JSON-LD with `jsonld.job_postings` (`jsonld.py:114`) and normalizes its `description` with
@@ -168,9 +179,9 @@ CREATE TABLE cv (
 ) STRICT;
 ```
 
-- `record` writes `description` on insert, and on update with `COALESCE(?, description)`, the rule
-  already used for `country` and `remote` (`store.py:428-430`): a draft without a description keeps
-  the stored one. Existing rows keep `NULL` until a re-draft or the lazy path (§1.2) fills them.
+- `record` writes `description` on insert, and on update with `COALESCE(NULLIF(?, ''), description)`,
+  as `role_hint` does: a draft without a description (or with an empty one) keeps the stored one;
+  `set_description` rejects blank text. Existing rows keep `NULL` until a re-draft or the lazy path (§1.2) fills them.
 - New types in `ijob_core.model`: `Vote(StrEnum)` `UP | DOWN`; frozen slotted `Label(posting_id:
   PostingId, vote: Vote, note: str | None, labeled_at: datetime)`; `StoredCv(name: str, sha256: str,
   size: int, stored_at: datetime)`.
@@ -306,8 +317,8 @@ Tests and CI never touch the network or an LLM.
 |---|---|
 | `description.normalize` | table tests: each form; escaped and raw HTML; each mapped tag; dropped `script`/`style`/`img`; non-http `href`; Markdown escaping of text; MARKDOWN link and image filtering; DETECT both ways; whitespace; the 50,000-character cut; empty → `None` |
 | fixtures | each §2.1 kind's fixture gets one real description, captured live during execution and trimmed to its first ~2,000 characters at a tag boundary, so tests see each source's real shape; Lever is re-recorded with `description`, `lists`, `additional`; MyCareersFuture and Kalibrr with `description` (and `qualifications`) |
-| `description_from_raw` × 17 kinds | the fixture's draft carries the expected normalized description |
-| `details.describe` | a §2.1 kind makes no request; Workable and YC detail fixtures served with `httpx.MockTransport`; a response without the field raises `ParseError` |
+| `description_from_raw` × 16 kinds | the fixture's draft carries the expected normalized description |
+| `details.describe` | a §2.1 kind makes no request; Workable, YC and LetsGetRusty detail fixtures served with `httpx.MockTransport`; a response without the field raises `ParseError` |
 | store | migration 2 → 3 on a version-2 database; COALESCE keeps a stored description; label set, replace, clear; `labels(ids)`; CV row |
 | service | `MockTransport` and a temporary database, as `test_cli.py:96,131-133`; the lazy path fills a pre-migration row from `raw` |
 | CLI | `typer.testing.CliRunner` (`test_cli.py:25,133`): search id column, show, label, cv set/show, unknown source |

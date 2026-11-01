@@ -1,8 +1,8 @@
 ---
-status: approved
+status: done
 created: 2026-11-01
 depends-on: [01, 04]
-built-on: a9902751b191
+built-on: b175307f42cd
 ---
 
 # Service Layer Implementation Plan
@@ -155,3 +155,26 @@ They raise `InvalidValueError` subclasses or `SourcesError` instead of printing.
 - `uv run --locked pytest packages/ijob-app` passes, with every assertion in pre-existing `test_cli.py` tests unchanged.
 - The five gate commands in CLAUDE.md exit `0`.
 - `grep -n "asyncio.run\|typer" packages/ijob-app/src/ijob_app/service.py` finds nothing: the service neither prints nor drives its own loop.
+
+## Review findings
+
+- risk — `sources` commands' `use_cache=False` unguarded — `test_cli.py` — fixed: blocked XDG_CACHE_HOME + `sources list` exits 0, no cache created
+- risk — `store_cv` replaced cv.pdf before `set_cv`; a failed DB write left file and row out of step — `service.py` — fixed and verified: old bytes restored (or new file removed) when `set_cv` raises; a failed copy raises plain `OSError`, not `InvalidCvError`; `uv run --locked pytest test_cli.py test_service.py` → `133 passed in 1.22s`
+- test-mandate — no service tests for `stale`, `refused`, first-error-kept — fixed (test_service 35 → 42)
+- docstring-discipline — module docstring scope, `RefreshReport.due` wording — fixed
+- test hygiene — `_SEEN` ordering; 20 MB CV size tests; `test_report_is_immutable` tested nothing of ours — fixed (MAX_CV_BYTES patched to 64; test removed)
+- deferred nits — FIFO CV path; CV helpers in own module; three clock reads in `search`; blank-description `InvalidValueError` undocumented; `_error_text` UnknownSourceError branch; add-url refusal test
+- spec — test_cli.py not moved to conftest fixtures (~25 lines duplicated) — declined: conversion would thread fixtures through ~90 tests; conftest serves test_service and the TUI tests
+
+## Probe results
+
+- Behaviour preservation: HEAD test_cli.py (unchanged assertions) against the frozen plan-05 cli.py → `62 passed` (reviewer run).
+- Full gate after plan 05: `168 files already formatted`; `All checks passed!`; `Success: no issues found in 114 source files`; `1990 passed in 2.62s`.
+
+## Deviations
+
+- 2026-11-01 — Added `open_service(..., use_cache=True)`; `sources` commands pass False (they never opened the cache).
+- 2026-11-01 — Added `SourceCompanyError` and `Service.posting_sources(posting_id)` (not in the plan) so the CLI keeps its messages without touching the store.
+- 2026-11-01 — Test inputs changed: keep test uses `jobicy:engineering` (only kind with a refresh interval); filter test uses `companies`.
+- 2026-11-01 — `kept` lines print after the fetch; final stderr order unchanged.
+- 2026-11-01 — Per-task commits not made (CLAUDE.md).
