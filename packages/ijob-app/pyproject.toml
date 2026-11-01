@@ -10,6 +10,7 @@ requires-python = ">=3.14.10"
 license = "Apache-2.0"
 dependencies = [
     "typer>=0.27.3,<0.28",
+    "ijob-ai",
     "ijob-core",
     "ijob-sources",
     "textual>=8.2.8,<8.3",

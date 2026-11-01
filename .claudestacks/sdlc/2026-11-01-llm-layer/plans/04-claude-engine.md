@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-01
 depends-on: [03]
 built-on: cae3bcdf3b23
@@ -166,3 +166,24 @@ passes and the gate is green. Commit `test(ai): guard claude CLI cancellation`.
 
 - `uv run --locked pytest packages/ijob-ai` passes.
 - The gate exits 0.
+
+## Review findings
+
+Reviewer verdict: blocking none. DoD re-run green: ruff format/check on the four files 0, `mypy --strict .` 0 (161 files), plan 04 tests 41 passed (`test_timeout_kills_child` 6.01 s), `pytest packages/ijob-ai` 125 passed. Hard constraints confirmed against claude-agent-sdk 0.2.176 source: installed CLI only (configured path, else `which`); bundled binary never reached (`cli_path` always set); isolation options as planned; API keys blanked; minimum version 2.1.248; no real CLI or model in tests; model only from `ModelRef`. All findings open (no blocking set, so no fix round):
+
+- open 🟡 `claude_cli.py:79-85` a caller cancelling `check_version` leaves the `--version` child running unreaped; kill and wait in `try/finally` when `returncode` is None.
+- open ❓ `claude_engine.py:119-133` cache token counts are dropped from the meter and `Usage`; cost is unaffected.
+- open 🔵 `claude_cli.py:26` docstring reads like a caller precondition.
+- open 🔵 untested branches: spawn `OSError`, `_count`'s `bool` check, the model fallback, `_error_reason` fallbacks, `CLIConnectionError` mapping.
+- open 🔵 `_join_text` typed `tuple[object, ...]`; `finish_reason` hard-coded "stop"; `_request`/`request` names mixed in `ClaudeSyncEngine`.
+- open 🔵 `TaskOutputError` label "claude call" instead of a task name.
+- open 🔵 a test imports private `claude_agent_sdk._errors.MessageParseError`.
+- open 🔵 a test calls `prepare_environment()` without monkeypatch (leaks env).
+- open 🔵 small flake risk in the timeout test's 1 s budget.
+- open 🔵 additions beyond the plan: `request_prompt` joins and checks system parts; a stream with no `ResultMessage` raises `ProviderFailedError`; `CLIConnectionError` mapped via the `ClaudeSDKError` catch-all.
+
+## Deviations
+
+- 2026-11-01: Tasks end in "Commit …", but the instruction to execute did not ask for commits (CLAUDE.md: commit only when the user asks). The work is left uncommitted.
+- 2026-11-01: Tasks 1 and 2 were built while plan 03's last tasks were still in progress (disjoint files); Tasks 3 and 4 ran after plan 03's `run_call` existed, built by one coder.
+- 2026-11-01: `MessageParseError` is not exported by `claude_agent_sdk`; the engine maps it through the public `ClaudeSDKError` base instead of naming it.

@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-01
 built-on: cae3bcdf3b23
 ---
@@ -284,3 +284,34 @@ follows spec §3.5:
 
 - `uv run --locked pytest packages/ijob-ai` passes.
 - The five gate commands exit 0.
+
+## Review findings
+
+Reviewer verdict: blocking none. DoD re-run green: ruff format 0, ruff check 0, `mypy --strict .` 0 (161 files), `pytest packages/ijob-ai` 106 passed, `uv lock --check` 0. All findings open (no blocking set, so no fix round), except where noted:
+
+- open 🟡 `call.py:66` `provider` is passed separately from `lm.model`; a mismatch leaves the meter uncompleted and charges 0, bypassing the cap. Derive it from the LM or assert they agree.
+- open 🟡 `call.py:107` OpenRouter `completed` comes only from history; a timeout between pricing and `finalize()` charges 0 for a billed call (bounded at one call per timeout; within the plan's rule).
+- open 🟡 `call.py:111` `CostUnknownError` raised in `finally` replaces an in-flight `CancelledError` and is not chained from the failure.
+- open 🟡 `settings.py:21` `LlmSettings` accepts `concurrency<=0`, `timeout_s<=0`, `max_cost_usd<0` (plan 07's reader validates config values).
+- open 🟡 `settings.py:35` `models` is a mutable dict in a frozen dataclass.
+- open 🟡 `fakes.py:33,223`, `test_reference.py:48`, `test_settings.py:46,49`, `test_package.py:57,75` suppressions without a reason comment.
+- addressed by plan 05 Task 3: 🔵 `call.py:52` `TaskOutputError` task fixed to "model call" (run_call gains `task` there).
+- open 🔵 `call.py:58` `_translate` maps any unrecognised exception to "timed out"; check `TimeoutError` explicitly.
+- open 🔵 `call.py:107`, `registry.py:97` provider dispatch by `is`/else; use `match` + `assert_never`.
+- open 🔵 `call.py:113` no test for `from failure` chaining or for an OpenRouter `CostUnknownError`.
+- open 🔵 `budget.py:12` negative/NaN cap and negative charge accepted.
+- open 🔵 `registry.py:11` dspy imported at module top, before the cost-map flag is set; reviewer verified harmless (flag read at first price lookup).
+- open 🔵 `settings.py:36` money as bare `float` (plan mandates it); `settings.py:59` `TracingSettings` not `kw_only`.
+- open 🔵 `fakes.py:1` shared helper in the test tree (plan mandates it); `fakes.py:52` sync fake engine refuses rather than being scripted.
+- open 🔵 `test_call.py:227`, `test_meter.py:39`, `test_budget.py:37` `asyncio.gather` in tests where a `TaskGroup` fits.
+- open 🔵 `test_registry.py:72` the `.dspy_cache` absence assert cannot fail; the `dspy.cache.enable_*` asserts are the real guard.
+- open 🔵 `test_package.py:9` process-narration comment.
+
+## Deviations
+
+- 2026-11-01: Tasks end in "Commit …", but the instruction to execute did not ask for commits (CLAUDE.md: commit only when the user asks). The work is left uncommitted.
+- 2026-11-01: Task 1 `test_package_import_is_light` started with only `ijob_ai` in `LIGHT_MODULES`, because Tasks 2–3 create the other modules; Tasks 2–3 extended it to the full list the plan names.
+- 2026-11-01: Tasks 4 and 5 were built by one coder, because Task 4's cache test calls Task 5's `run_call` and Task 5's tests use Task 4's `fakes.py`.
+- 2026-11-01: Plan claim "recorded OpenRouter bodies served through lm15 `FakeTransport`" (plan Task 4/5). `FakeTransport` is sync-only, and `Predict.acall` needs an async transport; with it the 429 test passed only because the call died on `async with`. Built instead: `AsyncFakeTransport` in `fakes.py`, wrapping `FakeTransport`'s script and request record; the 429 test now raises a real `LMRateLimitError` with exactly one wire request.
+- 2026-11-01: `dspy._vendor.lm15` ships `py.typed`; a static import makes mypy resolve all of dspy and report `Name "dspy.LM" is not defined [name-defined]` (reproduced by the reviewer). `fakes.py` loads `dspy._vendor.lm15.testing`/`.transports` with `importlib`.
+- 2026-11-01: `run_call` has no `task` parameter in this plan, so `TaskOutputError` carries the label "model call" until plan 05 Task 3 adds `task`.

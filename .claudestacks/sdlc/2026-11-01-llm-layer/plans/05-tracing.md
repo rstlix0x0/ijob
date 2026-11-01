@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-01
 depends-on: [02, 03]
 built-on: cae3bcdf3b23
@@ -177,3 +177,27 @@ exporter wrapped in `operation_trace`:
 
 - `uv run --locked pytest packages/ijob-ai` passes.
 - The gate exits 0.
+
+## Review findings
+
+Reviewer verdict: blocking none. Full CLAUDE.md gate re-run from the worktree root: `uv sync` 0, `ruff format --check` 0, `ruff check --no-fix` 0, `mypy --strict .` 0 (161 files), `pytest` 0 (2330 passed, 40.7 s). Hard constraints checked: `set_tracer_provider` never called; `OTEL_SDK_DISABLED` popped before `TracerProvider(sampler=ALWAYS_ON)` is built; Langfuse export only with endpoint and both keys; tests use a recording adapter (no network); ijob-core imports no OTel or requests. All findings open (no blocking set, so no fix round):
+
+- open 🟡 `call.py:53` OpenRouter spans never carry `gen_ai.response.model` or tokens; plan 03's `_meter_openrouter` fills only `completed` and `cost_usd`, though the history entry has both. No OpenRouter span test.
+- open 🟡 `call.py:94` `ijob.prompt` comes only from history, so calls failing before a history entry (timeout, provider_unavailable, provider_failed) have no prompt; fall back to the `inputs` mapping. Also a 🟡 partial against Task 3's "In finally it sets … ijob.prompt".
+- open 🟡 `setup.py:255` an unreachable Langfuse makes the OTLP exporter log retry lines to stderr from its worker thread (reproduced with `-p no:logging`); this would corrupt a TUI. Latent until plan 08 calls `start_tracing`. Silence the `opentelemetry.exporter.otlp*` loggers and assert empty stderr.
+- open 🟡 `setup.py:231` no test that the global tracer provider stays a `ProxyTracerProvider` after `start_tracing`/`finish`.
+- open 🔵 `setup.py:110` the root span starts from the ambient context; pass an empty `Context()` so it always starts a new trace.
+- open 🔵 `setup.py:128` `finish()`/`start_tracing` can leak the open store if flush, shutdown or the exporter constructor raises.
+- open 🔵 `setup.py:142` a second `operation_trace` on one `Tracing` silently reuses the first root and name.
+- open 🔵 `attributes.py:12` two-way package dependency between `ijob_ai.tracing` and `ijob_ai.llm` (no module cycle).
+- open 🔵 `sqlite_exporter.py:35` docstring says "full screen"; "full disk" was meant.
+- open 🔵 `test_setup.py:236` the failure test sleeps through real OTLP backoff (~3.2 s) and does not check stderr.
+- open ❓ Task 3: should OpenRouter fill the meter's response model and tokens (see `call.py:53`)?
+- open 🔵 additions beyond the Files list, all justified: `current_operation_trace()` getter; call-site arguments in `test_registry.py`/`test_claude_engine.py`; `requests>=2.34.2,<3` in ijob-ai's pyproject plus `uv.lock`.
+
+## Deviations
+
+- 2026-11-01: Tasks end in "Commit …", but the instruction to execute did not ask for commits (CLAUDE.md: commit only when the user asks). The work is left uncommitted.
+- 2026-11-01: Plan Task 2 orders `finish()` as flush, then end the root. Built instead: end the root first, then `force_flush(timeout_millis=5000)`, then shutdown, prune, close — in the plan's order the root reaches Langfuse only at shutdown as a second POST. `test_langfuse_export_headers_and_path` (one request) guards it.
+- 2026-11-01: `ijob_ai.tracing.setup` imports `requests` directly, but plan 03 Task 1 did not declare it (only transitive via the OTLP exporter). Added `requests>=2.34.2,<3` to `packages/ijob-ai/pyproject.toml` and relocked (no new download; 2.34.2 was already locked).
+- 2026-11-01: Tasks 1 and 2 were built by one coder (Task 2 uses Task 1's exporter); Task 3 ran after plan 03's review. Task 3 also replaced plan 03's placeholder `TaskOutputError` task label with the real `task`.
