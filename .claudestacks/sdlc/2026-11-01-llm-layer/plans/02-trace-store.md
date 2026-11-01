@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-01
 built-on: cae3bcdf3b23
 ---
@@ -100,3 +100,22 @@ the gate is green. Commit `feat(core): prune trace store by size`.
 
 - `uv run --locked pytest packages/ijob-core` passes.
 - The gate exits 0.
+
+## Review findings
+
+Reviewer verdict: blocking none. DoD re-run green: ruff format, ruff check, mypy --strict, `pytest packages/ijob-core` 291 passed. All findings open (no blocking set, so no fix round):
+
+- open 🟡 `traces.py:115` `SpanRow` ids are bare `str`, `status` is a bare `str` for a closed set, and `attributes` is a mutable dict inside a frozen dataclass (unhashable).
+- open 🟡 `traces.py:394` no test for the prune path where the cap is below an empty database's size (`oldest is None: break`); the reviewer probed it correct (prune(0) on 20 traces → removed=20).
+- open 🔵 `traces.py:63` a span whose `gen_ai.request.model` is JSON null counts as a call.
+- open 🔵 `traces.py:238` a self-parented or cyclic span is unreachable from any root; `tree` returns `roots=()`.
+- open 🔵 `traces.py:313` a NaN cost is stored as `NaN` and read as NULL; pass `allow_nan=False`.
+- open 🔵 `traces.py:319` `INSERT OR IGNORE` also silently drops NOT NULL violations; the docstring says only duplicates are skipped. Use `ON CONFLICT (trace_id, span_id) DO NOTHING`.
+- open 🔵 `traces.py:423` `_migrate`/`_user_version` are copied verbatim from `store.py`.
+- open 🔵 `traces.py:13` the module docstring repeats the prune sentence.
+- open 🔵 addition: the public `SpanNode` and the negative-limit `InvalidValueError` in `summaries` are not in the plan's list.
+
+## Deviations
+
+- 2026-11-01: Tasks end in "Commit …", but the instruction to execute did not ask for commits (CLAUDE.md: commit only when the user asks). The work is left uncommitted.
+- 2026-11-01: Ran concurrently with plans 01 and 03. Coders used `uv run --no-sync` scoped checks; the workspace-wide gate runs once at the end of the run.

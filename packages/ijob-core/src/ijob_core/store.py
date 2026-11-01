@@ -8,7 +8,9 @@ postings a source's latest fetch still showed, and closes it. It also keeps the
 table of sources, the boards ijob collects from: seeded or added by the user,
 removable, and stamped with the time each was last fetched. It also keeps a
 posting's description, the user's vote on each posting and the one CV the user
-stored.
+stored. For the assessment tasks it keeps the profile read from that CV, the
+user's standing instructions, and the verdicts and scores already made, each
+keyed by what it was made from so a repeat call is a cache hit.
 
 The schema version lives in `PRAGMA user_version`; opening a database applies
 every migration newer than that version, each in one transaction.
@@ -31,14 +33,18 @@ from ijob_core.dedupe import canonical_url, fingerprint
 from ijob_core.errors import InvalidValueError
 from ijob_core.model import (
     ExternalId,
+    Instructions,
     Label,
     Posting,
     PostingId,
     RemoteScope,
+    ResumeProfile,
+    Score,
     Sighting,
     SightingDraft,
     SourceRef,
     StoredCv,
+    Verdict,
     Vote,
     parse_source_ref,
 )
@@ -99,7 +105,63 @@ _MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
         ) STRICT
         """,
     ),
+    (
+        """
+        CREATE TABLE cv_profile (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            cv_sha256 TEXT NOT NULL, profile TEXT NOT NULL,
+            profile_sha256 TEXT NOT NULL, model TEXT NOT NULL,
+            task_version TEXT NOT NULL, made_at TEXT NOT NULL
+        ) STRICT
+        """,
+        """
+        CREATE TABLE instructions (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            text TEXT NOT NULL, text_sha256 TEXT NOT NULL,
+            filters TEXT NOT NULL, rules TEXT NOT NULL, rules_sha256 TEXT NOT NULL,
+            model TEXT NOT NULL, task_version TEXT NOT NULL, set_at TEXT NOT NULL
+        ) STRICT
+        """,
+        """
+        CREATE TABLE verdicts (
+            posting_id INTEGER NOT NULL REFERENCES postings(id),
+            input_sha256 TEXT NOT NULL, rules_sha256 TEXT NOT NULL,
+            model TEXT NOT NULL, task_version TEXT NOT NULL,
+            keep INTEGER NOT NULL CHECK (keep IN (0, 1)), reason TEXT NOT NULL,
+            rule INTEGER, made_at TEXT NOT NULL,
+            PRIMARY KEY (posting_id, input_sha256, rules_sha256, model, task_version)
+        ) STRICT
+        """,
+        """
+        CREATE TABLE scores (
+            posting_id INTEGER NOT NULL REFERENCES postings(id),
+            input_sha256 TEXT NOT NULL, profile_sha256 TEXT NOT NULL,
+            model TEXT NOT NULL, task_version TEXT NOT NULL,
+            score INTEGER NOT NULL, reasons TEXT NOT NULL, made_at TEXT NOT NULL,
+            PRIMARY KEY (posting_id, input_sha256, profile_sha256, model, task_version)
+        ) STRICT
+        """,
+    ),
 )
+
+
+@dataclass(frozen=True, slots=True)
+class StoredProfile:
+    """The profile read from the CV, with what it was made from.
+
+    Attributes:
+        profile: The structured facts read from the CV.
+        cv_sha256: The SHA-256 of the CV the profile was read from.
+        model: The model that read the CV.
+        task_version: The version of the task that did so.
+        made_at: When the profile was made, timezone-aware.
+    """
+
+    profile: ResumeProfile
+    cv_sha256: str
+    model: str
+    task_version: str
+    made_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +223,13 @@ def _to_text(moment: datetime) -> str:
 def _from_text(text: str) -> datetime:
     """Read ISO-8601 text written by `_to_text` as an aware UTC datetime."""
     return datetime.fromisoformat(text).astimezone(UTC)
+
+
+def _stamp(field: str, moment: datetime) -> str:
+    """Render `moment` as `_to_text` does, rejecting a naive one by `field` name."""
+    if moment.utcoffset() is None:
+        raise InvalidValueError(field, "has no timezone")
+    return _to_text(moment)
 
 
 _SELECT_SOURCES: Final = (
@@ -784,6 +853,273 @@ class Store:
         return StoredCv(
             name=row[0], sha256=row[1], size=row[2], stored_at=_from_text(row[3])
         )
+
+    def set_cv_profile(
+        self,
+        profile: ResumeProfile,
+        *,
+        cv_sha256: str,
+        model: str,
+        task_version: str,
+        made_at: datetime,
+    ) -> None:
+        """Store the profile read from the CV, replacing the earlier one.
+
+        Args:
+            profile: The profile to keep.
+            cv_sha256: The SHA-256 of the CV it was read from.
+            model: The model that read the CV.
+            task_version: The version of the task that did so.
+            made_at: When the profile was made, timezone-aware.
+
+        Raises:
+            InvalidValueError: If `made_at` has no timezone.
+            sqlite3.Error: If the write fails.
+        """
+        stamp = _stamp("made_at", made_at)
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO cv_profile (id, cv_sha256, profile, "
+                "profile_sha256, model, task_version, made_at) "
+                "VALUES (1, ?, ?, ?, ?, ?, ?)",
+                (
+                    cv_sha256,
+                    profile.to_json(),
+                    profile.sha256(),
+                    model,
+                    task_version,
+                    stamp,
+                ),
+            )
+
+    def cv_profile(self) -> StoredProfile | None:
+        """Read the stored CV profile.
+
+        Returns:
+            The profile with what it was made from, or `None` if none was stored.
+        """
+        row = self._conn.execute(
+            "SELECT profile, cv_sha256, model, task_version, made_at "
+            "FROM cv_profile WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return StoredProfile(
+            profile=ResumeProfile.from_json(row[0]),
+            cv_sha256=row[1],
+            model=row[2],
+            task_version=row[3],
+            made_at=_from_text(row[4]),
+        )
+
+    def set_instructions(self, instructions: Instructions) -> None:
+        """Store the user's instructions, replacing the earlier ones.
+
+        Args:
+            instructions: The instructions to keep.
+
+        Raises:
+            sqlite3.Error: If the write fails.
+        """
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO instructions (id, text, text_sha256, "
+                "filters, rules, rules_sha256, model, task_version, set_at) "
+                "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    instructions.text,
+                    instructions.text_sha256,
+                    instructions.filters_json,
+                    json.dumps(instructions.rules),
+                    instructions.rules_sha256,
+                    instructions.model,
+                    instructions.task_version,
+                    _to_text(instructions.set_at),
+                ),
+            )
+
+    def instructions(self) -> Instructions | None:
+        """Read the stored instructions.
+
+        Returns:
+            The instructions, or `None` if none were stored.
+        """
+        row = self._conn.execute(
+            "SELECT text, filters, rules, model, task_version, set_at "
+            "FROM instructions WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return Instructions(
+            text=row[0],
+            filters_json=row[1],
+            rules=tuple(json.loads(row[2])),
+            model=row[3],
+            task_version=row[4],
+            set_at=_from_text(row[5]),
+        )
+
+    def clear_instructions(self) -> None:
+        """Remove the stored instructions; clearing with none stored is a no-op.
+
+        Raises:
+            sqlite3.Error: If the write fails.
+        """
+        with self._conn:
+            self._conn.execute("DELETE FROM instructions WHERE id = 1")
+
+    def verdict(
+        self,
+        posting_id: PostingId,
+        input_sha256: str,
+        rules_sha256: str,
+        model: str,
+        task_version: str,
+    ) -> Verdict | None:
+        """Read the verdict made from exactly these inputs.
+
+        Args:
+            posting_id: The posting judged.
+            input_sha256: The SHA-256 of the posting text the verdict read.
+            rules_sha256: The SHA-256 of the rules it applied.
+            model: The model that judged.
+            task_version: The version of the task that did so.
+
+        Returns:
+            The stored verdict, or `None` if any of the five key fields differs
+            from every stored verdict.
+        """
+        row = self._conn.execute(
+            "SELECT keep, reason, rule FROM verdicts WHERE posting_id = ? "
+            "AND input_sha256 = ? AND rules_sha256 = ? AND model = ? "
+            "AND task_version = ?",
+            (posting_id, input_sha256, rules_sha256, model, task_version),
+        ).fetchone()
+        if row is None:
+            return None
+        return Verdict(keep=bool(row[0]), reason=row[1], rule=row[2])
+
+    def put_verdict(  # noqa: PLR0913, PLR0917  # five key fields, verdict, time
+        self,
+        posting_id: PostingId,
+        input_sha256: str,
+        rules_sha256: str,
+        model: str,
+        task_version: str,
+        verdict: Verdict,
+        *,
+        made_at: datetime,
+    ) -> None:
+        """Store a verdict under its five key fields, replacing one under the same.
+
+        Args:
+            posting_id: The posting judged.
+            input_sha256: The SHA-256 of the posting text the verdict read.
+            rules_sha256: The SHA-256 of the rules it applied.
+            model: The model that judged.
+            task_version: The version of the task that did so.
+            verdict: The verdict to keep.
+            made_at: When it was made, timezone-aware.
+
+        Raises:
+            InvalidValueError: If `made_at` has no timezone.
+            sqlite3.IntegrityError: If the posting is unknown.
+            sqlite3.Error: If the write fails.
+        """
+        stamp = _stamp("made_at", made_at)
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO verdicts (posting_id, input_sha256, "
+                "rules_sha256, model, task_version, keep, reason, rule, made_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    posting_id,
+                    input_sha256,
+                    rules_sha256,
+                    model,
+                    task_version,
+                    int(verdict.keep),
+                    verdict.reason,
+                    verdict.rule,
+                    stamp,
+                ),
+            )
+
+    def score(
+        self,
+        posting_id: PostingId,
+        input_sha256: str,
+        profile_sha256: str,
+        model: str,
+        task_version: str,
+    ) -> Score | None:
+        """Read the score made from exactly these inputs.
+
+        Args:
+            posting_id: The posting scored.
+            input_sha256: The SHA-256 of the posting text the score read.
+            profile_sha256: The SHA-256 of the profile it was scored against.
+            model: The model that scored.
+            task_version: The version of the task that did so.
+
+        Returns:
+            The stored score, or `None` if any of the five key fields differs
+            from every stored score.
+        """
+        row = self._conn.execute(
+            "SELECT score, reasons FROM scores WHERE posting_id = ? "
+            "AND input_sha256 = ? AND profile_sha256 = ? AND model = ? "
+            "AND task_version = ?",
+            (posting_id, input_sha256, profile_sha256, model, task_version),
+        ).fetchone()
+        if row is None:
+            return None
+        return Score(score=row[0], reasons=tuple(json.loads(row[1])))
+
+    def put_score(  # noqa: PLR0913, PLR0917  # five key fields, score, time
+        self,
+        posting_id: PostingId,
+        input_sha256: str,
+        profile_sha256: str,
+        model: str,
+        task_version: str,
+        score: Score,
+        *,
+        made_at: datetime,
+    ) -> None:
+        """Store a score under its five key fields, replacing one under the same.
+
+        Args:
+            posting_id: The posting scored.
+            input_sha256: The SHA-256 of the posting text the score read.
+            profile_sha256: The SHA-256 of the profile it was scored against.
+            model: The model that scored.
+            task_version: The version of the task that did so.
+            score: The score to keep.
+            made_at: When it was made, timezone-aware.
+
+        Raises:
+            InvalidValueError: If `made_at` has no timezone.
+            sqlite3.IntegrityError: If the posting is unknown.
+            sqlite3.Error: If the write fails.
+        """
+        stamp = _stamp("made_at", made_at)
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO scores (posting_id, input_sha256, "
+                "profile_sha256, model, task_version, score, reasons, made_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    posting_id,
+                    input_sha256,
+                    profile_sha256,
+                    model,
+                    task_version,
+                    score.score,
+                    json.dumps(score.reasons),
+                    stamp,
+                ),
+            )
 
     def import_seeds(self, rows: Iterable[tuple[SourceRef, str]]) -> int:
         """Add seed sources that the table does not hold yet.

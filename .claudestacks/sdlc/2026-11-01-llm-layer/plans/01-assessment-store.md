@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-01
 built-on: cae3bcdf3b23
 ---
@@ -142,3 +142,23 @@ the gate is green. Commit `feat(core): add store migration 4 for assessments`.
 
 - `uv run --locked pytest packages/ijob-core` passes.
 - The five gate commands in CLAUDE.md exit 0.
+
+## Review findings
+
+Reviewer verdict: blocking none. DoD re-run green: ruff format, ruff check, mypy --strict, `pytest packages/ijob-core` 291 passed. All findings open (no blocking set, so no fix round):
+
+- open 🟡 `store.py:971` `verdict`/`put_verdict`/`score`/`put_score` take four `str` cache-key args in a row; a swap silently misses the cache. Suggest a `Sha256` NewType or a `VerdictKey`/`ScoreKey` dataclass.
+- open 🔵 `model.py:425` `_check_range` docstring says ints only, but the code rejects only `bool`; `Score(score=50.5, …)` builds.
+- open 🔵 `model.py:427` no test guards the `bool` rejection.
+- open 🔵 `model.py:536` no test for the `ResumeProfile.from_json` type-check branches.
+- open 🔵 `model.py:655` `Verdict(keep=False, rule=True)` builds; reject a `bool` rule.
+- open 🔵 `store.py:228` `_stamp` duplicates `model._check_aware`.
+- open 🔵 `store.py:857` `set_cv_profile` does not validate `cv_sha256` as 64 hex characters.
+- open 🔵 `store.py:895,941` `cv_profile()`/`instructions()` docstrings omit `Raises: InvalidValueError`.
+- open 🔵 drift: `Instructions.set_at` accepts any aware timezone (plan says UTC); the store returns UTC.
+- open 🔵 addition: `model`/`task_version` non-blank and ≤200 characters, and whitespace-only rules/reasons rejected — stricter than the plan.
+
+## Deviations
+
+- 2026-11-01: Tasks end in "Commit …", but the instruction to execute did not ask for commits (CLAUDE.md: commit only when the user asks). The work is left uncommitted.
+- 2026-11-01: Plans 01–03 ran concurrently in one worktree. Coders ran scoped checks with `uv run --no-sync` while plan 03 relocked. The orchestrator and the reviewer ran the ijob-core checks; the workspace-wide gate runs once at the end of the run.
