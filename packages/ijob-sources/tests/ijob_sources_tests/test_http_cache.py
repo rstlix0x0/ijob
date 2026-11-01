@@ -6,7 +6,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from ijob_sources.http_cache import SqliteHttpCache, default_cache_path
+from ijob_sources.http_cache import SqliteHttpCache
 from ijob_sources.polite_http import CachedResponse, PoliteClient
 
 _T = datetime(2026, 10, 1, 8, 0, tzinfo=UTC)
@@ -144,21 +144,6 @@ def test_used_at_normalised_to_utc(tmp_path: Path) -> None:
     later = datetime(2026, 10, 31, 16, 0, tzinfo=tokyo)
     with _open(path, later) as cache:
         assert cache.lookup(_URL) == _ENTRY
-
-
-def test_cache_path_xdg() -> None:
-    assert default_cache_path({"XDG_CACHE_HOME": "/xdg/cache"}) == Path(
-        "/xdg/cache/ijob/http.sqlite"
-    )
-
-
-def test_cache_path_falls_back_to_home(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    expected = tmp_path / ".cache" / "ijob" / "http.sqlite"
-    assert default_cache_path({}) == expected
-    assert default_cache_path({"XDG_CACHE_HOME": ""}) == expected
 
 
 def test_client_with_sqlite_cache(tmp_path: Path) -> None:

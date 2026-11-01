@@ -6,8 +6,9 @@ describes the company it was registered for. `parse_ashby` is pure and never
 lets anything but a `ParseError` escape. A job that cannot be read is logged at
 `WARNING` and counted in `SourceBatch.rejected`. A job whose id, title or
 address cannot be read is rejected; every other field (location, publication
-date, department, country, workplace type and pay) is optional, and one that
-cannot be read is left out while the job is kept.
+date, department, country, workplace type, pay and description) is optional,
+and one that cannot be read is left out while the job is kept.
+`description_from_raw` reads the description back out of a stored job.
 """
 
 import json
@@ -29,8 +30,10 @@ from ijob_core.model import (
 from ijob_core.money import Money, Period
 
 from ijob_sources.collect import SourceBatch
+from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError
 from ijob_sources.identity import check_identity
+from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -177,7 +180,32 @@ def _to_draft(job: object, key: SourceKey, company: str) -> SightingDraft:
         country=_country(job),
         remote=_remote(job),
         role_hint=_readable_text(job, "department") or None,
+        description=_description(job),
     )
+
+
+def description_from_raw(raw: str) -> str | None:
+    """Read the description out of a stored Ashby job.
+
+    Args:
+        raw: A job's payload as `SightingDraft.raw` holds it, a JSON object.
+
+    Returns:
+        The job's `descriptionHtml` as Markdown, or `None` when it has none.
+
+    Raises:
+        ParseError: `raw` is not a JSON object.
+    """
+    job = raw_object(raw)
+    return _description(job)
+
+
+def _description(job: dict[str, Any]) -> str | None:
+    """Return `descriptionHtml` as Markdown, else `None`."""
+    html_text = job.get("descriptionHtml")
+    if not isinstance(html_text, str):
+        return None
+    return normalize(html_text, TextForm.HTML)
 
 
 def _raw(job: dict[str, Any]) -> str:

@@ -9,9 +9,15 @@ from typing import Any
 import httpx
 import pytest
 from ijob_core.model import ExternalId, SourceKind, SourceRef, parse_source_key
+from ijob_core.store import RecordResult, Store
 from ijob_sources.collect import CollectResult, SourceBatch, collect
 from ijob_sources.errors import ParseError, SourceNotFoundError
-from ijob_sources.hn import HnWhoIsHiring, parse_comments, parse_thread
+from ijob_sources.hn import (
+    HnWhoIsHiring,
+    description_from_raw,
+    parse_comments,
+    parse_thread,
+)
 from ijob_sources.polite_http import PoliteClient
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "hn"
@@ -135,9 +141,11 @@ def test_draft_fields() -> None:
 
     assert draft.source == SourceRef(SourceKind.HN, _KEY)
     assert draft.external_id == ExternalId("900000101")
-    assert draft.company == "Acme Robotics"
-    assert draft.title == "Senior Backend Engineer"
-    assert draft.location == "Berlin"
+    assert draft.company == "NeuralFrame"
+    assert (
+        draft.title == "Senior Backend Engineer, Medical Data Pipeline (Python + Rust)"
+    )
+    assert draft.location == "REMOTE (US only, US time zones; no visa sponsorship)"
     assert draft.url == "https://news.ycombinator.com/item?id=900000101"
     assert draft.posted_at == datetime(2026, 10, 2, 9, 15, tzinfo=UTC)
     assert json.loads(draft.raw) == json.loads(_COMMENTS)["hits"][0]
@@ -147,7 +155,11 @@ def test_first_line_fields() -> None:
     drafts = parse_comments(_COMMENTS, _STORY, _KEY).drafts
 
     assert [(d.company, d.title, d.location) for d in drafts] == [
-        ("Acme Robotics", "Senior Backend Engineer", "Berlin"),
+        (
+            "NeuralFrame",
+            "Senior Backend Engineer, Medical Data Pipeline (Python + Rust)",
+            "REMOTE (US only, US time zones; no visa sponsorship)",
+        ),
         ("Globex Labs", "Platform Engineer", "Tokyo / Osaka"),
         ("Initech", "Staff Engineer", None),
     ]
@@ -346,3 +358,92 @@ def test_hn_source_satisfies_source_protocol() -> None:
     assert source.ref == SourceRef(SourceKind.HN, _KEY)
     assert result.failures == []
     assert len(result.batches[source.ref].drafts) == 3
+
+
+_NEURALFRAME_DESCRIPTION = (
+    "NeuralFrame | Senior Backend Engineer, Medical Data Pipeline (Python + "
+    "Rust) | REMOTE (US only, US time zones; no visa sponsorship) | Full-time "
+    "| $170k\N{EN DASH}$210k + 0.1%\N{EN DASH}0.25% equity\n"
+    "\n"
+    "We build software that hospitals, cancer registries and researchers use. "
+    "You'd own the pipeline that pulls data from hospital systems and "
+    "transforms it for analytics and research.\n"
+    "\n"
+    "Where Rust fits: part of our hospital data acquisition layer, the code "
+    "that talks to hospital systems, is written in Rust. You'd work on both "
+    "sides: Rust where performance and correctness matter most, async Python "
+    "for the rest of the pipeline. Rust experience is a strong plus. Whether "
+    "you learned it at work or on your own, we want to hear what you built "
+    "with it.\n"
+    "\n"
+    "Stack: Rust, async Python (mypy, pytest, ruff, uv), PostgreSQL and "
+    "MongoDB, Dagster, Terraform/OpenTofu, AWS (ECS/Fargate, RDS, Lambda, S3), "
+    "GitHub Actions.\n"
+    "\n"
+    "You'll need 5+ years building backend services or data pipelines in "
+    "production (retries, idempotency, schema design and migrations, "
+    "well-tested and typed code) and strong Python and SQL. No healthcare "
+    "background needed.\n"
+    "\n"
+    "Apply: "
+    "[https://wellfound.com/jobs/4829721-senior-backend-software-e...](https://"
+    "wellfound.com/jobs/4829721-senior-backend-software-engineer-medical-data-p"
+    "ipeline). In your note, tell us in a few sentences about one pipeline "
+    "failure you traced (what broke, how you found it, what you changed) and, "
+    "if you've written Rust, what you built with it."
+)
+
+
+def test_draft_carries_description() -> None:
+    draft = parse_comments(_COMMENTS, _STORY, _KEY).drafts[0]
+
+    assert draft.description == _NEURALFRAME_DESCRIPTION
+
+
+def test_description_from_raw_matches_draft() -> None:
+    for draft in parse_comments(_COMMENTS, _STORY, _KEY).drafts:
+        assert description_from_raw(draft.raw) == draft.description
+
+
+def test_description_is_read_as_html_with_entities_unescaped_once() -> None:
+    text = "Acme | R&amp;D Engineer | Oslo<p>Pay is 5 &lt; 6 &amp;amp; <i>more</i>"
+
+    (draft,) = parse_comments(_body(_comment(text)), _STORY, _KEY).drafts
+
+    assert draft.description == (
+        "Acme | R&D Engineer | Oslo\n\nPay is 5 \\< 6 &amp; *more*"
+    )
+
+
+def test_a_lone_surrogate_in_a_comment_does_not_stop_the_batch_being_stored(
+    tmp_path: Path,
+) -> None:
+    good = _comment("Acme | Engineer | Oslo<p>Fine job", objectID="1")
+    broken = _comment("Globex | Engineer | Oslo<p>Broken \ud83d emoji", objectID="2")
+
+    batch = parse_comments(_body(good, broken), _STORY, _KEY)
+    with Store.open(tmp_path / "ijob.sqlite") as store:
+        result = store.record(batch.drafts, seen_at=datetime(2026, 10, 3, tzinfo=UTC))
+        postings = store.postings(sources=[SourceRef(SourceKind.HN, _KEY)])
+
+    assert result == RecordResult(new=2, updated=0)
+    assert {p.company: p.description for p in postings} == {
+        "Acme": "Acme | Engineer | Oslo\n\nFine job",
+        "Globex": "Globex | Engineer | Oslo\n\nBroken emoji",
+    }
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["{}", '{"comment_text": null}', '{"comment_text": 5}', '{"comment_text": ""}'],
+)
+def test_description_missing_gives_none(
+    raw: str,
+) -> None:
+    assert description_from_raw(raw) is None
+
+
+@pytest.mark.parametrize("raw", ["[]", '"text"', "null", "not json"])
+def test_description_from_raw_refuses_a_raw_that_is_not_an_object(raw: str) -> None:
+    with pytest.raises(ParseError):
+        description_from_raw(raw)

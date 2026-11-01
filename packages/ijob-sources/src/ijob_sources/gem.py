@@ -6,8 +6,9 @@ describes the company it was registered for. `parse_gem` is pure and never lets
 anything but a `ParseError` escape. A job that cannot be read is logged at
 `WARNING` and counted in `SourceBatch.rejected`. A job whose id, title or
 address cannot be read is rejected; every other field (location, publication
-date, location type and department) is optional, and one that cannot be read
-is left out while the job is kept.
+date, location type, department and description) is optional, and one that
+cannot be read is left out while the job is kept. `description_from_raw` reads
+the description back out of a stored job.
 """
 
 import json
@@ -27,8 +28,10 @@ from ijob_core.model import (
 )
 
 from ijob_sources.collect import SourceBatch
+from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError
 from ijob_sources.identity import check_identity
+from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -171,7 +174,32 @@ def _to_draft(job: object, key: SourceKey, company: str) -> SightingDraft:
         country=parse_country(location) if location is not None else None,
         remote=_remote(job),
         role_hint=_role_hint(job),
+        description=_description(job),
     )
+
+
+def description_from_raw(raw: str) -> str | None:
+    """Read the description out of a stored Gem job.
+
+    Args:
+        raw: A job's payload as `SightingDraft.raw` holds it, a JSON object.
+
+    Returns:
+        The job's `content` as Markdown, or `None` when it has none.
+
+    Raises:
+        ParseError: `raw` is not a JSON object.
+    """
+    job = raw_object(raw)
+    return _description(job)
+
+
+def _description(job: dict[str, Any]) -> str | None:
+    """Return `content`, which is HTML, as Markdown, else `None`."""
+    content = job.get("content")
+    if not isinstance(content, str):
+        return None
+    return normalize(content, TextForm.HTML)
 
 
 def _remote(job: dict[str, Any]) -> RemoteScope | None:

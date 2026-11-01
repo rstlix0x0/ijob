@@ -22,7 +22,9 @@ from ijob_core.model import (
 )
 
 from ijob_sources.collect import SourceBatch
+from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError
+from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -151,6 +153,7 @@ def _to_draft(job: object, key: SourceKey) -> SightingDraft:
         url=_required_text(job, "url"),
         posted_at=_posted_at(job),
         raw=_raw(job),
+        description=_description(job),
     )
 
 
@@ -164,6 +167,34 @@ def _raw(job: dict[str, Any]) -> str:
         return json.dumps(job)
     except RecursionError as error:
         raise InvalidValueError("job", "is nested too deeply") from error
+
+
+def description_from_raw(raw: str) -> str | None:
+    """Read the description out of the stored payload of one Remote OK job.
+
+    Args:
+        raw: The JSON text of one job, as `SightingDraft.raw` holds it.
+
+    Returns:
+        The description as Markdown, or `None` when the job has no usable one.
+
+    Raises:
+        ParseError: `raw` is not a JSON object.
+    """
+    job = raw_object(raw)
+    return _description(job)
+
+
+def _description(job: dict[str, Any]) -> str | None:
+    """Return the `description` of the job as Markdown, read as HTML.
+
+    A description that is absent, not text or empty gives `None`; it never
+    rejects the job.
+    """
+    value = job.get("description")
+    if not isinstance(value, str):
+        return None
+    return normalize(value, TextForm.HTML)
 
 
 def _required_text(job: dict[str, Any], name: str) -> str:

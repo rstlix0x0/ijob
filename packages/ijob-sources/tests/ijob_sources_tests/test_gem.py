@@ -18,7 +18,7 @@ from ijob_core.model import (
 )
 from ijob_sources.collect import CollectResult, SourceBatch, collect
 from ijob_sources.errors import IdentityMismatchError, ParseError, SourceNotFoundError
-from ijob_sources.gem import GemBoard, parse_gem
+from ijob_sources.gem import GemBoard, description_from_raw, parse_gem
 from ijob_sources.polite_http import CachedResponse, ConditionalCache, PoliteClient
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "gem" / "retool_job_posts.json"
@@ -377,3 +377,77 @@ def test_gem_board_satisfies_source_protocol() -> None:
     assert board.ref == SourceRef(SourceKind.GEM, _KEY)
     assert result.failures == []
     assert len(result.batches[board.ref].drafts) == 3
+
+
+_EXPECTED_DESCRIPTION = (
+    "**ABOUT RETOOL**\n\n"
+    "Nearly every company in the world runs on custom software for "
+    "critical operations like tracking performance metrics, handling "
+    "support workflows, building admin dashboards, and countless processes "
+    "you might never have thought of. But most companies don't have the "
+    "resources to properly invest in these tools, leading to a lot of old, "
+    "clunky internal software, or worse, teams still stuck in manual and "
+    "spreadsheet workflows.\n\n"
+    "AI has changed who gets to build software. The definition of "
+    '"developer" now includes analysts, operators, and domain experts '
+    "creating solutions directly—and the tools they reach for are "
+    "multiplying by the week. That's both an opportunity and a challenge: "
+    "as more people build with more AI tools, the risk of shipping "
+    "ungoverned software into production grows just as fast.\n\n"
+    "At Retool, we're building the platform that makes all of it safe to "
+    "ship. Build with any AI tool you want, then deploy into one place "
+    "that connects to your real business data, enforces enterprise "
+    "policies automatically, and lets teams create once and reuse "
+    "everywhere with shared, trusted components. The cost of building "
+    "software has collapsed. The cost of governing it hasn't—and that's "
+    "the problem we solve."
+)
+
+
+def test_draft_carries_description() -> None:
+    draft = _parse(*_JOBS).drafts[0]
+
+    assert draft.description == _EXPECTED_DESCRIPTION
+
+
+def test_description_from_raw_matches_draft() -> None:
+    draft = _parse(*_JOBS).drafts[0]
+
+    assert description_from_raw(draft.raw) == draft.description
+
+
+def test_description_missing_gives_none() -> None:
+    batch = _parse(_without(_FIRST, "content"))
+
+    assert len(batch.drafts) == 1
+    assert batch.drafts[0].description is None
+    assert description_from_raw(batch.drafts[0].raw) is None
+
+
+@pytest.mark.parametrize("value", [None, 7, ["<p>x</p>"], {"html": "<p>x</p>"}])
+def test_description_not_text_gives_none(value: object) -> None:
+    job = {**_FIRST, "content": value}
+
+    draft = _parse(job).drafts[0]
+
+    assert draft.description is None
+
+
+def test_description_drops_a_lone_surrogate() -> None:
+    job = {**_FIRST, "content": "<p>a\ud800b</p>"}
+
+    draft = _parse(job).drafts[0]
+
+    assert draft.description == "ab"
+    assert description_from_raw(draft.raw) == "ab"
+
+
+@pytest.mark.parametrize("raw", ["[]", '"text"', "null"])
+def test_description_from_raw_non_object_raises_parse_error(raw: str) -> None:
+    with pytest.raises(ParseError):
+        description_from_raw(raw)
+
+
+def test_description_from_raw_not_json_raises_parse_error() -> None:
+    with pytest.raises(ParseError):
+        description_from_raw("{not json")

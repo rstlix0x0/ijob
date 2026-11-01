@@ -6,6 +6,9 @@
 `parse_mycareersfuture` is pure and never lets anything but a `ParseError`
 escape. A job that cannot be read is logged at `WARNING` and counted in
 `SourceBatch.rejected`. No salary is mapped, because the API gives no currency.
+The job's HTML `description` is normalized to Markdown. The parser and
+`description_from_raw`, which reads the `raw` a draft stores, both read it
+through one helper.
 """
 
 import json
@@ -25,7 +28,9 @@ from ijob_core.model import (
 )
 
 from ijob_sources.collect import SourceBatch
+from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError
+from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -143,6 +148,29 @@ def parse_mycareersfuture(body: bytes, key: SourceKey) -> MyCareersFuturePage:
     )
 
 
+def description_from_raw(raw: str) -> str | None:
+    """Read the normalized description out of a stored job.
+
+    Args:
+        raw: The `raw` text of a MyCareersFuture draft, the job object as JSON.
+
+    Returns:
+        The job's `description` as Markdown, or `None` when the job has no
+        text in that field or the text normalizes to nothing.
+
+    Raises:
+        ParseError: `raw` is not a JSON object.
+    """
+    job = raw_object(raw)
+    return _description(job)
+
+
+def _description(job: dict[str, Any]) -> str | None:
+    """Return the job's `description` as Markdown, or `None` without any."""
+    text = job.get("description")
+    return normalize(text, TextForm.HTML) if isinstance(text, str) else None
+
+
 def _next_href(payload: dict[str, Any]) -> str | None:
     """Return the address `_links.next` gives, or `None` when it gives none.
 
@@ -204,6 +232,7 @@ def _to_draft(job: object, key: SourceKey) -> SightingDraft:
         posted_at=_posted_at(metadata),
         raw=_raw(job),
         country=_SINGAPORE if _is_in_singapore(job) else None,
+        description=_description(job),
     )
 
 

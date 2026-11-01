@@ -19,7 +19,7 @@ from ijob_core.model import (
 from ijob_core.money import Money, Period
 from ijob_sources.collect import CollectResult, SourceBatch, collect
 from ijob_sources.errors import ParseError
-from ijob_sources.jobicy import JobicyBoard, parse_jobicy
+from ijob_sources.jobicy import JobicyBoard, description_from_raw, parse_jobicy
 from ijob_sources.polite_http import CachedResponse, PoliteClient
 
 _KEY = parse_source_key("engineering")
@@ -359,3 +359,102 @@ def test_jobicy_board_satisfies_source_protocol() -> None:
     assert board.ref == SourceRef(SourceKind.JOBICY, _KEY)
     assert result.failures == []
     assert len(result.batches[board.ref].drafts) == 5
+
+
+_DESCRIPTION = (
+    "### Company Description\n"
+    "\n"
+    "[ecosio](https://jobicy.com/company/ecosio) is a fast-growing, "
+    "innovative service company and a leading provider of B2B integration, "
+    "specialising in electronic data interchange (EDI), Web EDI and "
+    "e-invoicing. ecosio is part of Vertex, Inc., a leading global "
+    "provider of indirect tax solutions listed on Nasdaq (VERX).\n"
+    "\n"
+    "Our brand slogan is *Connections That Work* as we believe strong "
+    "connections are central to successful business relationships - both "
+    "external and internal. At ecosio, we hire individuals from all "
+    "backgrounds and are committed to creating an inclusive work "
+    "environment. We are technology lovers, set the highest standards for "
+    "our solutions, and put innovative ideas first.\n"
+    "\n"
+    "### Job Description\n"
+    "\n"
+    "**You'll connect with the role if you enjoy...**\n"
+    "\n"
+    "- Develop and maintain features for our web applications\n"
+    "- Take ownership of features, from ideation to deployment and ongoing "
+    "maintenance\n"
+    "- Write comprehensive unit tests to ensure code quality and "
+    "reliability\n"
+    "- Follow secure coding practices to protect our systems and user data\n"
+    "- Collaborate closely with product owners to translate requirements "
+    "into actionable features\n"
+    "- Build efficient systems that enhance the productivity of our "
+    "Onboarding & Operations team\n"
+    "- Work with Java / Spring in the backend and TypeScript / React in "
+    "the frontend\n"
+    "\n"
+    "Our current tech stack in the Web Application Team is:\n"
+    "\n"
+    "- Infrastructure: AWS, Kubernetes, ArgoCD\n"
+    "- Java frameworks: Spring, SpringBoot, Apache Camel\n"
+    "- Java libraries: JUnit\n"
+    "- TypeScript / JavaScript libraries: React, Material UI, Semantic UI, "
+    "React Final Form, TanStack Query, React Testing Library\n"
+    "- Data storage and querying: MongoDB, Cassandra, Redis, Elasticsearch\n"
+    "- Monitoring: Prometheus, Grafana\n"
+    "\n"
+    "### Qualifications"
+)
+
+
+def test_draft_carries_description() -> None:
+    draft = parse_jobicy(_PAGE1, _KEY).batch.drafts[0]
+
+    assert draft.description == _DESCRIPTION
+
+
+def test_description_from_raw_matches_draft() -> None:
+    draft = parse_jobicy(_PAGE1, _KEY).batch.drafts[0]
+
+    assert draft.description is not None
+    assert description_from_raw(draft.raw) == draft.description
+
+
+def test_description_missing_gives_none() -> None:
+    job = {name: value for name, value in _TEAMSNAP.items() if name != "jobDescription"}
+
+    draft = _only(job)
+
+    assert draft.description is None
+    assert description_from_raw(draft.raw) is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(None, id="null"),
+        pytest.param(7, id="number"),
+        pytest.param(["<p>text</p>"], id="list"),
+        pytest.param("", id="empty"),
+        pytest.param(" \n ", id="blank"),
+    ],
+)
+def test_description_without_usable_text_gives_none(value: object) -> None:
+    draft = _only({**_TEAMSNAP, "jobDescription": value})
+
+    assert draft.description is None
+    assert description_from_raw(draft.raw) is None
+
+
+def test_description_drops_a_lone_surrogate() -> None:
+    draft = _only({**_TEAMSNAP, "jobDescription": "a\ud800b"})
+
+    assert draft.description == "ab"
+    assert description_from_raw(draft.raw) == "ab"
+
+
+@pytest.mark.parametrize("raw", ["not json", "[]", '"text"', "null"])
+def test_description_from_raw_rejects_a_raw_that_is_no_object(raw: str) -> None:
+    with pytest.raises(ParseError):
+        description_from_raw(raw)

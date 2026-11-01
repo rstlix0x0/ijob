@@ -362,3 +362,10 @@ def test_collect_runs_the_source() -> None:
     assert result.failures == []
     batch = result.batches[SourceRef(SourceKind.LETSGETRUSTY, _KEY)]
     assert len(batch.drafts) == 6
+
+
+def test_drafts_carry_no_description() -> None:
+    drafts = _fetch(_fixture_site()).drafts
+
+    assert len(drafts) == 6
+    assert [draft.description for draft in drafts] == [None] * 6

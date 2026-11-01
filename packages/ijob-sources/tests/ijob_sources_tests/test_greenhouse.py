@@ -14,7 +14,7 @@ from ijob_core.model import ExternalId, SourceKind, SourceRef, parse_source_key
 from ijob_core.money import Money
 from ijob_sources.collect import CollectResult, SourceBatch, collect
 from ijob_sources.errors import IdentityMismatchError, ParseError, SourceNotFoundError
-from ijob_sources.greenhouse import GreenhouseBoard, parse_jobs
+from ijob_sources.greenhouse import GreenhouseBoard, description_from_raw, parse_jobs
 from ijob_sources.polite_http import CachedResponse, ConditionalCache, PoliteClient
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "greenhouse" / "tailscale_jobs.json"
@@ -511,3 +511,88 @@ def test_identity_rejects_a_board_name_that_merely_contains_the_company() -> Non
 
     with pytest.raises(IdentityMismatchError):
         _fetch(GreenhouseBoard(_KEY, company="Scale"), handler)
+
+
+_EXPECTED_DESCRIPTION = (
+    "Thank you for considering Tailscale. If this job description "
+    "resonates with you, please apply. *Frequently cited statistics show "
+    "that people who identify with historically marginalized groups are "
+    "likely to apply to jobs only if they meet 100% of the "
+    "qualifications.* *We encourage you to help us break that statistic!*\n\n"
+    "**About Tailscale**\n\n"
+    "Tailscale is making safe connection effortless by delivering software "
+    "that makes it easy to securely interconnect people and their devices, "
+    "no matter where they are. From hobbyists to multinational "
+    "corporations, teams of every size use Tailscale each day to protect "
+    "their networks, share access to internal tools, and more. We're "
+    "building a future for the Internet that's easy, sensible, and safe, "
+    "like it used to be. Founded in 2019 and fully distributed, we're "
+    "backed by Accel, CRV, Insight, Heavybit, and Uncork Capital.\n\n"
+    "### About the Role\n\n"
+    "We are looking for an Analytics Engineer who thrives in "
+    "high-complexity environments—someone excited to bring clarity to "
+    "chaos, untangle complex models, and lay down the foundation for "
+    "scalable solutions.\n\n"
+    "This is a hands-on, high-impact role for someone who isn\u2019t afraid to "
+    "address manual processes, viewing them as opportunities to build "
+    "scalable solutions that drive meaningful impact. You\u2019ll work closely "
+    "with stakeholders across the company to build reliable, trusted data "
+    "models that support reporting, analysis, and decision-making."
+)
+
+
+def test_draft_carries_description() -> None:
+    draft = parse_jobs(_BODY, _KEY).drafts[0]
+
+    assert draft.description == _EXPECTED_DESCRIPTION
+
+
+def test_description_from_raw_matches_draft() -> None:
+    draft = parse_jobs(_BODY, _KEY).drafts[0]
+
+    assert description_from_raw(draft.raw) == draft.description
+
+
+def test_description_missing_gives_none() -> None:
+    batch = parse_jobs(_body(_without(_FIRST, "content")), _KEY)
+
+    assert len(batch.drafts) == 1
+    assert batch.drafts[0].description is None
+    assert description_from_raw(batch.drafts[0].raw) is None
+
+
+@pytest.mark.parametrize("value", [None, 7, ["<p>x</p>"], {"html": "<p>x</p>"}])
+def test_description_not_text_gives_none(value: object) -> None:
+    job = {**_FIRST, "content": value}
+
+    draft = parse_jobs(_body(job), _KEY).drafts[0]
+
+    assert draft.description is None
+
+
+def test_description_drops_a_lone_surrogate() -> None:
+    job = {**_FIRST, "content": "<p>a\ud800b</p>"}
+
+    draft = parse_jobs(_body(job), _KEY).drafts[0]
+
+    assert draft.description == "ab"
+    assert description_from_raw(draft.raw) == "ab"
+
+
+@pytest.mark.parametrize("raw", ["[]", '"text"', "null"])
+def test_description_from_raw_non_object_raises_parse_error(raw: str) -> None:
+    with pytest.raises(ParseError):
+        description_from_raw(raw)
+
+
+def test_description_from_raw_not_json_raises_parse_error() -> None:
+    with pytest.raises(ParseError):
+        description_from_raw("{not json")
+
+
+def test_description_is_unescaped_once() -> None:
+    job = {**_FIRST, "content": "&lt;p&gt;R&amp;amp;D &amp;lt;b&amp;gt;&lt;/p&gt;"}
+
+    draft = parse_jobs(_body(job), _KEY).drafts[0]
+
+    assert draft.description == "R&D \\<b>"

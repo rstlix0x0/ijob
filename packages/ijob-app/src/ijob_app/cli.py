@@ -5,19 +5,37 @@
 transport and `app` uses the real network, and around a clock that tests can
 control. `main` runs `app`.
 
+Everything ijob keeps lives in one home directory, `$IJOB_HOME` or `~/.ijob`:
+`config.toml`, `ijob.db` and `cache/http.sqlite`. `ijob setup` creates it, owner
+access only, with a commented `config.toml` written only when absent and a
+migrated, seeded database, and prints each item as `created` or `already there`
+beside its path; it can be run again at any time and exits `1` when the home
+cannot be created. Every other command first requires the home to be a
+directory and otherwise exits `1` with `error: ijob home not found at <path>,
+run: ijob setup`, creating nothing. `--db` and `--config` replace the database
+and the config file inside the home.
+
 `ijob search` lists the open, filtered postings of the sources in the database's
 table. It validates every flag and the config file before it touches the cache,
 the database or the network, then opens the HTTP cache and the database and
 imports the bundled seed list. It skips a source fetched more recently than its
 kind's refresh interval, fetches the rest through one client backed by the
-cache, records what they show and prints the postings that pass the filters,
-with the sources that showed each. `--source` repeated limits
+cache, records what they show and prints the postings that pass the filters, one
+tab-separated line each: the posting id, the title (after a `? ` flag when its
+fields were parsed heuristically), company, location, the sources that showed
+it and its URL. `--source` repeated limits
 the run to the named sources; without it every source in the table is read.
 Problems with a source go to stderr, and so does a notice for each source whose
 last fetch is too old for its postings to show. The exit status is `0` when at
 least one chosen source was fetched or kept, `1` when every chosen source
 failed or the HTTP cache cannot be opened, and `2` for a flag, source reference
 or config file that cannot be used.
+
+`ijob tui` opens the terminal UI on the stored postings: the same filters as
+`search`, a detail pane, refresh, votes and notes, the sources table and the CV.
+It reads the config file and opens the database and HTTP cache before the screen
+appears, so it exits `2` for a config file that cannot be used and `1` when the
+cache cannot be opened. It takes `--db` and `--config`.
 
 `ijob sources` manages the database's table of sources. Each `sources` command
 imports the bundled seed list whenever it opens the database, which never
@@ -28,26 +46,36 @@ reference already in the table for another company, since the table keeps the
 company it first had. For those commands the exit status is `0` on success, `1`
 when a source fails its check or its fetch, and `2` for a reference, company or
 removal that cannot be acted on.
+
+`ijob show ID` prints one stored posting: title, company, one `name: value` line
+for each other field, the vote and note when it is labelled, then its
+description, which is fetched and stored the first time it is wanted. A
+description that cannot be had prints as `description unavailable: <reason>` and
+the exit status stays `0`. `ijob label ID up|down [--note TEXT]` sets or
+replaces the vote and prints the id, vote and note; `ijob label ID --clear`
+removes it. `ijob cv set PATH` stores a PDF as the CV and prints its name, size
+and SHA-256; `ijob cv show` prints the stored CV's name, size and stored time,
+or `no CV stored`. All of these take the posting ids `search` prints and the same
+`--db`. The exit status is `0` on success, `1` when the HTTP cache cannot be
+opened, and `2` for an unknown posting, a vote or note that cannot be recorded,
+a `label` call that gives both or neither of a vote and `--clear`, or a CV file
+that cannot be stored.
 """
 
 import asyncio
 import os
 import sqlite3
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Final
 
 import typer
-from ijob_core.dedupe import normalise_company
 from ijob_core.errors import InvalidValueError
-from ijob_core.filters import FilterSpec, keep
-from ijob_core.model import ExternalId, Posting, SourceRef, parse_source_ref
-from ijob_core.store import SourceOrigin, SourceRow, Store, default_db_path
-from ijob_sources.collect import CollectResult, Source, SourceFailure, collect
-from ijob_sources.detect import Resolution, resolve_url, verify_new_source
+from ijob_core.model import Posting, PostingId, SourceRef, Vote, parse_source_ref
+from ijob_sources.collect import SourceFailure
 from ijob_sources.errors import (
     FetchError,
     HttpStatusError,
@@ -57,29 +85,62 @@ from ijob_sources.errors import (
     SourceNotFoundError,
     SourcesError,
 )
-from ijob_sources.http_cache import SqliteHttpCache, default_cache_path
 from ijob_sources.polite_http import ConditionalCache, PoliteClient
-from ijob_sources.registry import HOST_INTERVALS, build_source, refresh_interval
-from ijob_sources.seeds import load_seeds
+from ijob_sources.registry import HOST_INTERVALS, refresh_interval
 
-from ijob_app.config import (
-    default_config_path,
-    load_filters,
-    parse_country_flag,
-    parse_min_salary,
-    parse_remote,
-    parse_since,
+from ijob_app.config import FilterFlags, read_filters
+from ijob_app.home import (
+    HomeError,
+    IjobHome,
+    require_home,
+    resolve_home,
+    setup_home,
 )
+from ijob_app.render import posting_fields
+from ijob_app.service import (
+    CacheUnavailableError,
+    ClientFactory,
+    InvalidCvError,
+    PostingDetail,
+    RefreshReport,
+    Service,
+    SourceCompanyError,
+    UnknownSourceError,
+    open_service,
+)
+from ijob_app.tui import IjobApp
 
 _EXIT_REFUSED: Final = 1
 _EXIT_BAD_ARGUMENT: Final = 2
 
-type _ClientFactory = Callable[[ConditionalCache | None], PoliteClient]
-
-_DB_HELP = (
-    "Database file. Default: $XDG_DATA_HOME/ijob/ijob.db, "
-    "or ~/.local/share/ijob/ijob.db."
+_DB_HELP: Final = (
+    "Database file. Default: ijob.db in the ijob home, $IJOB_HOME or ~/.ijob."
 )
+_CONFIG_HELP: Final = (
+    "Config file. Default: config.toml in the ijob home, $IJOB_HOME or ~/.ijob."
+)
+
+
+def _require_home() -> IjobHome:
+    """Locate the ijob home and check that it exists.
+
+    Every command but `setup` calls this first in its body, before any
+    filesystem access, so a missing home leaves nothing behind.
+
+    Returns:
+        The home named by the process environment.
+
+    Raises:
+        typer.Exit: With status 1 after printing `error: <reason>`, if the home
+            cannot be located or is not a directory.
+    """
+    try:
+        home = resolve_home(os.environ)
+        require_home(home)
+    except HomeError as error:
+        typer.echo(f"error: {error.reason}", err=True)
+        raise typer.Exit(code=_EXIT_REFUSED) from error
+    return home
 
 
 def _failure_line(failure: SourceFailure) -> str:
@@ -105,23 +166,6 @@ def _failure_line(failure: SourceFailure) -> str:
             return f"failed {ref}: {reason}"
         case error:
             return f"failed {ref}: {error}"
-
-
-async def _collect(
-    sources: list[Source], client_factory: _ClientFactory, cache: ConditionalCache
-) -> CollectResult:
-    """Fetch every source with one client, opened and closed on this event loop.
-
-    Args:
-        sources: The sources to fetch.
-        client_factory: Builds the client the requests go through.
-        cache: The HTTP cache the client revalidates responses against.
-
-    Returns:
-        What `collect` returned for the sources.
-    """
-    async with client_factory(cache) as client:
-        return await collect(sources, client)
 
 
 def _production_client(cache: ConditionalCache | None) -> PoliteClient:
@@ -184,137 +228,69 @@ def _read_company(text: str) -> str:
     return company
 
 
-@contextmanager
-def _seeded_store(db: Path | None) -> Iterator[Store]:
-    """Open the database with the bundled seed sources imported.
+def _error_text(error: InvalidValueError) -> str:
+    """Say why the service refused, as the command line reports it.
 
     Args:
-        db: The database file, or `None` for the default location.
-
-    Yields:
-        The open store, closed on exit.
-    """
-    with Store.open(db or default_db_path(os.environ)) as store:
-        store.import_seeds(load_seeds())
-        yield store
-
-
-@contextmanager
-def _open_cache(now: Callable[[], datetime]) -> Iterator[SqliteHttpCache]:
-    """Open the HTTP cache at its default location.
-
-    Args:
-        now: The wall clock the cache ages its entries by.
-
-    Yields:
-        The open cache, closed on exit.
-
-    Raises:
-        typer.Exit: With status 1 after printing the reason, if the cache file
-            cannot be opened.
-    """
-    path = default_cache_path(os.environ)
-    try:
-        cache = SqliteHttpCache.open(path, now=now)
-    except (OSError, sqlite3.Error) as error:
-        typer.echo(f"error: cannot open the HTTP cache {path}: {error}", err=True)
-        raise typer.Exit(code=_EXIT_REFUSED) from error
-    with cache:
-        yield cache
-
-
-def _new_row(ref: SourceRef, company: str, target_url: str | None) -> SourceRow:
-    """Describe a source about to be added, so the registry can build it."""
-    return SourceRow(
-        ref=ref,
-        company=company,
-        target_url=target_url,
-        origin=SourceOrigin.USER,
-        removed=False,
-        last_fetched_at=None,
-    )
-
-
-async def _verify(row: SourceRow, client_factory: _ClientFactory) -> None:
-    """Fetch a new source once, refusing it if it cannot be shown to be genuine.
-
-    Args:
-        row: The source about to be added.
-        client_factory: Builds the client the request goes through.
-
-    Raises:
-        InvalidValueError: The registry cannot build the source from the row.
-        SourcesError: The fetch or the identity check failed, or the fetch
-            yielded no drafts: the source lists no jobs, or every job it lists
-            was rejected.
-    """
-    source = build_source(row)
-    async with client_factory(None) as client:
-        await verify_new_source(source, client)
-
-
-async def _resolve(
-    url: str,
-    company: str,
-    client_factory: _ClientFactory,
-    admit: Callable[[SourceRef], None],
-) -> Resolution:
-    """Resolve a URL and make sure the source it names has been verified.
-
-    A resolution that carries a batch was read from the page itself and is
-    already checked; one that does not is a hiring-system board, which is
-    fetched once here, after `admit` has accepted its reference.
-
-    Args:
-        url: The URL the user pasted.
-        company: The company the source is registered for.
-        client_factory: Builds the client the requests go through.
-        admit: Called with the resolved reference before a board is fetched; it
-            raises to refuse the reference.
+        error: What the service raised.
 
     Returns:
-        The verified resolution.
+        The bare reason for the service's own refusals of a source or a CV, and
+        the full message for any other value error.
+    """
+    if isinstance(error, UnknownSourceError | SourceCompanyError | InvalidCvError):
+        return error.reason
+    return str(error)
+
+
+@contextmanager
+def _refusals() -> Iterator[None]:
+    """Turn what a service call refuses into a message and an exit status.
+
+    A cache that cannot be opened exits `1`, as it does for `search`; any other
+    value error exits `2`.
 
     Raises:
-        SourcesError: The URL is unusable, or the source fails its check.
+        typer.Exit: After printing `error: <reason>` to stderr.
     """
-    async with client_factory(None) as client:
-        resolution = await resolve_url(url, company=company, client=client)
-        admit(resolution.ref)
-        if resolution.batch is None:
-            source = build_source(_new_row(resolution.ref, company, None))
-            await verify_new_source(source, client)
-    return resolution
+    try:
+        yield
+    except CacheUnavailableError as error:
+        typer.echo(f"error: {error.reason}", err=True)
+        raise typer.Exit(code=_EXIT_REFUSED) from error
+    except InvalidValueError as error:
+        typer.echo(f"error: {_error_text(error)}", err=True)
+        raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
 
 
-def _refuse_other_company(db: Path | None, ref: SourceRef, company: str) -> None:
-    """Refuse a reference the table already holds for a different company.
+@contextmanager
+def _source_failures() -> Iterator[None]:
+    """Turn what adding a source raises into a message and an exit status.
 
-    The table keeps the company a reference first had, so adding it again under
-    another name would verify against the new name and then store the old one.
-    Companies are compared as `normalise_company` writes them.
-
-    Args:
-        db: The database file, or `None` for the default location.
-        ref: The source about to be added.
-        company: The company it is to be added for.
+    A value the service refuses exits `2`; a source that fails its check or its
+    fetch exits `1`.
 
     Raises:
-        typer.Exit: With status 2 after printing the reason, if `ref` is in the
-            table, removed or not, for a different company.
+        typer.Exit: After printing `error: <reason>` to stderr.
     """
-    with _seeded_store(db) as store:
-        row = store.source(ref)
-    if row is not None and normalise_company(row.company) != normalise_company(company):
-        typer.echo(f"error: {ref} is already a source for {row.company}", err=True)
-        raise typer.Exit(code=_EXIT_BAD_ARGUMENT)
+    try:
+        yield
+    except InvalidValueError as error:
+        typer.echo(f"error: {_error_text(error)}", err=True)
+        raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
+    except SourcesError as error:
+        typer.echo(f"error: {error}", err=True)
+        raise typer.Exit(code=_EXIT_REFUSED) from error
 
 
-def _sources_app(client_factory: _ClientFactory) -> typer.Typer:
+def _sources_app(
+    client_factory: ClientFactory, now: Callable[[], datetime]
+) -> typer.Typer:
     """Build the `sources` command group.
 
     Args:
         client_factory: Builds the client a verification fetch goes through.
+        now: The wall clock, returning timezone-aware times.
 
     Returns:
         The group, with `list`, `add`, `remove` and `add-url`.
@@ -323,13 +299,18 @@ def _sources_app(client_factory: _ClientFactory) -> typer.Typer:
         add_completion=False, help="List, add and remove job sources."
     )
 
+    # Opens the service for a command that never reads through the cache.
+    service_on = partial(
+        open_service, client_factory=client_factory, now=now, use_cache=False
+    )
+
     @sources.command("list")
     def list_sources(
         db: Annotated[Path | None, typer.Option(help=_DB_HELP)] = None,
     ) -> None:
         """Print every source: reference, company, origin and last fetch."""
-        with _seeded_store(db) as store:
-            rows = store.sources()
+        with service_on(_require_home(), db) as service:
+            rows = service.sources()
         for row in rows:
             fetched = row.last_fetched_at.isoformat() if row.last_fetched_at else "-"
             typer.echo(f"{row.ref}\t{row.company}\t{row.origin}\t{fetched}")
@@ -343,19 +324,11 @@ def _sources_app(client_factory: _ClientFactory) -> typer.Typer:
         db: Annotated[Path | None, typer.Option(help=_DB_HELP)] = None,
     ) -> None:
         """Verify a source with one fetch and add it."""
+        home = _require_home()
         source_ref = _read_ref(ref)
         name = _read_company(company)
-        _refuse_other_company(db, source_ref, name)
-        try:
-            asyncio.run(_verify(_new_row(source_ref, name, None), client_factory))
-        except InvalidValueError as error:
-            typer.echo(f"error: {error}", err=True)
-            raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
-        except SourcesError as error:
-            typer.echo(f"error: {error}", err=True)
-            raise typer.Exit(code=_EXIT_REFUSED) from error
-        with _seeded_store(db) as store:
-            store.add_source(source_ref, name)
+        with _source_failures(), service_on(home, db) as service:
+            asyncio.run(service.add_source(source_ref, name))
         typer.echo(f"added {source_ref}")
 
     @sources.command()
@@ -364,13 +337,14 @@ def _sources_app(client_factory: _ClientFactory) -> typer.Typer:
         db: Annotated[Path | None, typer.Option(help=_DB_HELP)] = None,
     ) -> None:
         """Remove a source; it stays removed when the seeds are imported again."""
+        home = _require_home()
         source_ref = _read_ref(ref)
-        with _seeded_store(db) as store:
-            row = store.source(source_ref)
-            if row is None or row.removed:
-                typer.echo(f"error: unknown source {source_ref}", err=True)
-                raise typer.Exit(code=_EXIT_BAD_ARGUMENT)
-            store.remove_source(source_ref)
+        try:
+            with service_on(home, db) as service:
+                service.remove_source(source_ref)
+        except UnknownSourceError as error:
+            typer.echo(f"error: {error.reason}", err=True)
+            raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
         typer.echo(f"removed {source_ref}")
 
     @sources.command("add-url")
@@ -382,237 +356,195 @@ def _sources_app(client_factory: _ClientFactory) -> typer.Typer:
         db: Annotated[Path | None, typer.Option(help=_DB_HELP)] = None,
     ) -> None:
         """Work out what a URL is, verify it and add it as a source."""
+        home = _require_home()
         name = _read_company(company)
-
-        def admit(ref: SourceRef) -> None:
-            _refuse_other_company(db, ref, name)
-
-        try:
-            resolution = asyncio.run(_resolve(url, name, client_factory, admit))
-        except SourcesError as error:
-            typer.echo(f"error: {error}", err=True)
-            raise typer.Exit(code=_EXIT_REFUSED) from error
-        with _seeded_store(db) as store:
-            store.add_source(resolution.ref, name, resolution.target_url)
-        typer.echo(f"added {resolution.ref}")
+        with _source_failures(), service_on(home, db) as service:
+            added = asyncio.run(service.add_url(url, name))
+        typer.echo(f"added {added.ref}")
 
     return sources
 
 
-@dataclass(frozen=True, slots=True)
-class _FilterFlags:
-    """The filter values given on the command line.
-
-    Attributes:
-        countries: The `--country` values; empty when none was given.
-        remotes: The `--remote` values; empty when none was given.
-        since: The `--since` value, or `None`.
-        companies: The `--company` values; empty when none was given.
-        min_salary: The `--min-salary` value, or `None`.
-        require_salary: The `--require-salary` or `--no-require-salary` choice,
-            or `None` when neither was given.
-    """
-
-    countries: tuple[str, ...]
-    remotes: tuple[str, ...]
-    since: str | None
-    companies: tuple[str, ...]
-    min_salary: str | None
-    require_salary: bool | None
-
-
-def _read_filters(config: Path | None, flags: _FilterFlags) -> FilterSpec:
-    """Build the search filters from the config file with the flags laid over it.
-
-    Args:
-        config: The config file the user named, or `None` for the default
-            location.
-        flags: The filter values from the command line; each one given replaces
-            the config's value.
-
-    Returns:
-        The filters.
-
-    Raises:
-        InvalidValueError: The config file or a flag value is unusable; a
-            blank `--company` is one.
-    """
-    path = config or default_config_path(os.environ)
-    spec = load_filters(path, explicit=config is not None)
-    if flags.countries:
-        spec = replace(
-            spec, countries=frozenset(map(parse_country_flag, flags.countries))
-        )
-    if flags.remotes:
-        spec = replace(spec, remote=frozenset(map(parse_remote, flags.remotes)))
-    if flags.since is not None:
-        spec = replace(spec, since=parse_since(flags.since))
-    if flags.companies:
-        if not all(name.strip() for name in flags.companies):
-            raise InvalidValueError("company", "must not be blank")
-        spec = replace(spec, companies=flags.companies)
-    if flags.min_salary is not None:
-        spec = replace(spec, min_salary=parse_min_salary(flags.min_salary))
-    if flags.require_salary is not None:
-        spec = replace(spec, require_salary=flags.require_salary)
-    return spec
-
-
-def _choose_sources(store: Store, refs: list[SourceRef]) -> list[SourceRow]:
-    """Pick the sources a search reads.
-
-    Args:
-        store: The open store.
-        refs: The sources the user named; empty means every source.
-
-    Returns:
-        The rows to read, in the order the user named them, or in `ref` order
-        when none was named.
-
-    Raises:
-        typer.Exit: With status 2 after printing a hint, if a named source has no
-            row or was removed.
-    """
-    rows = store.sources()
-    if not refs:
-        return rows
-    by_ref = {row.ref: row for row in rows}
-    for ref in refs:
-        if ref not in by_ref:
-            typer.echo(
-                f"error: unknown source {ref}; "
-                f"add it with: ijob sources add {ref} --company NAME",
-                err=True,
-            )
-            raise typer.Exit(code=_EXIT_BAD_ARGUMENT)
-    return [by_ref[ref] for ref in refs]
-
-
-def _split_by_interval(
-    rows: list[SourceRow], at: datetime
-) -> tuple[list[SourceRow], list[SourceRow]]:
-    """Separate the sources due for a fetch from those fetched recently enough.
-
-    A source that is kept is announced on stderr.
-
-    Args:
-        rows: The chosen sources.
-        at: The time to measure from.
-
-    Returns:
-        The sources to fetch and the sources to keep as they are, each in the
-        order of `rows`. A source is kept when its last fetch is less than its
-        kind's refresh interval before `at`.
-    """
-    due: list[SourceRow] = []
-    kept: list[SourceRow] = []
-    for row in rows:
-        interval = refresh_interval(row.ref.kind)
-        if row.last_fetched_at is not None and at - row.last_fetched_at < interval:
-            kept.append(row)
-            minutes = int(interval.total_seconds() // 60)
-            typer.echo(f"kept {row.ref}: fetched less than {minutes} min ago", err=True)
-        else:
-            due.append(row)
-    return due, kept
-
-
-def _build_sources(
-    store: Store, rows: list[SourceRow]
-) -> tuple[list[Source], dict[SourceRef, InvalidValueError]]:
-    """Build the adapter of each row, setting aside the rows the registry refuses.
-
-    Args:
-        store: The open store, which knows the jobs each source already showed.
-        rows: The sources to build.
-
-    Returns:
-        The adapters, and the reason each refused row could not be built.
-    """
-    sources: list[Source] = []
-    refused: dict[SourceRef, InvalidValueError] = {}
-    for row in rows:
-        try:
-            sources.append(build_source(row, known=store.external_ids(row.ref)))
-        except InvalidValueError as error:
-            refused[row.ref] = error
-    return sources, refused
-
-
-def _record(
-    store: Store, rows: list[SourceRow], result: CollectResult, seen_at: datetime
-) -> list[SourceRef]:
-    """Store what the fetched sources showed and note when each was fetched.
-
-    Both the postings and the fetch times are stamped with the one `seen_at`,
-    which is what keeps a source's postings open afterwards.
-
-    Args:
-        store: The open store.
-        rows: The sources that were due, in order.
-        result: What fetching them returned.
-        seen_at: When the fetch happened, timezone-aware.
-
-    Returns:
-        The sources that were fetched successfully, in the order of `rows`.
-    """
-    fetched = [row.ref for row in rows if row.ref in result.batches]
-    batches = [result.batches[ref] for ref in fetched]
-    still_listed: list[tuple[SourceRef, ExternalId]] = [
-        (ref, external_id)
-        for ref, batch in zip(fetched, batches, strict=True)
-        for external_id in batch.still_listed
-    ]
-    store.record(
-        (draft for batch in batches for draft in batch.drafts),
-        seen_at=seen_at,
-        still_listed=still_listed,
-    )
-    for ref in fetched:
-        store.mark_fetched(ref, seen_at)
-    return fetched
-
-
-def _report_problems(
-    rows: list[SourceRow],
-    result: CollectResult,
-    refused: dict[SourceRef, InvalidValueError],
-) -> None:
-    """Print, per source in order, why it failed or how many jobs it dropped."""
-    failures = {failure.ref: failure for failure in result.failures}
-    for row in rows:
+def _report(report: RefreshReport) -> None:
+    """Print the sources a refresh kept, then its problems, then its stale sources."""
+    for row in report.kept:
+        minutes = int(refresh_interval(row.ref.kind).total_seconds() // 60)
+        typer.echo(f"kept {row.ref}: fetched less than {minutes} min ago", err=True)
+    failures = {failure.ref: failure for failure in report.failures}
+    for row in report.due:
         ref = row.ref
-        if ref in refused:
-            typer.echo(f"failed {ref}: {refused[ref]}", err=True)
+        if ref in report.refused:
+            typer.echo(f"failed {ref}: {report.refused[ref]}", err=True)
         elif ref in failures:
             typer.echo(_failure_line(failures[ref]), err=True)
-        elif (rejected := result.batches[ref].rejected) > 0:
+        elif (rejected := report.rejected.get(ref, 0)) > 0:
             typer.echo(f"{ref}: skipped {rejected} invalid jobs", err=True)
-
-
-def _report_stale(store: Store, rows: list[SourceRow], at: datetime) -> None:
-    """Print a notice for each chosen source whose postings are hidden as too old."""
-    chosen = {row.ref for row in rows}
-    for row in store.stale_sources(now=at):
-        if row.ref in chosen and row.last_fetched_at is not None:
+    for row in report.stale:
+        if row.last_fetched_at is not None:
             day = row.last_fetched_at.date().isoformat()
             typer.echo(
                 f"stale {row.ref}: last fetched {day}, postings hidden", err=True
             )
 
 
-def _posting_line(store: Store, posting: Posting) -> str:
-    """Format a posting: title, company, location, sources and URL, tab-separated."""
-    refs = ",".join(str(ref) for ref in store.posting_sources(posting.id))
+def _posting_line(service: Service, posting: Posting) -> str:
+    """Format a posting: id, title, company, location, sources and URL, tab-separated.
+
+    The `? ` flag of a low-confidence posting leads the title, after the id.
+    """
+    refs = ",".join(str(ref) for ref in service.posting_sources(posting.id))
     flag = "? " if posting.low_confidence else ""
     return (
-        f"{flag}{posting.title}\t{posting.company}\t{posting.location or '-'}"
-        f"\t{refs}\t{posting.url}"
+        f"{posting.id}\t{flag}{posting.title}\t{posting.company}"
+        f"\t{posting.location or '-'}\t{refs}\t{posting.url}"
     )
 
 
+def _cv_app(client_factory: ClientFactory, now: Callable[[], datetime]) -> typer.Typer:
+    """Build the `cv` command group.
+
+    Args:
+        client_factory: Builds the client the service holds; neither command
+            makes a request.
+        now: The wall clock, returning timezone-aware times.
+
+    Returns:
+        The group, with `set` and `show`.
+    """
+    cv = typer.Typer(add_completion=False, help="Store and show your CV.")
+
+    # Opens the service for a command that never reads through the cache.
+    service_on = partial(
+        open_service, client_factory=client_factory, now=now, use_cache=False
+    )
+
+    @cv.command("set")
+    def set_cv(
+        path: Annotated[Path, typer.Argument(help="The CV, a PDF of at most 20 MB.")],
+        db: Annotated[Path | None, typer.Option(help=_DB_HELP)] = None,
+    ) -> None:
+        """Keep a copy of your CV beside the database and record it."""
+        home = _require_home()
+        try:
+            with _refusals(), service_on(home, db) as service:
+                stored = service.store_cv(path)
+        except OSError as error:
+            typer.echo(f"error: cannot store the CV: {error}", err=True)
+            raise typer.Exit(code=_EXIT_REFUSED) from error
+        typer.echo(f"{stored.name}\t{stored.size}\t{stored.sha256}")
+
+    @cv.command("show")
+    def show_cv(
+        db: Annotated[Path | None, typer.Option(help=_DB_HELP)] = None,
+    ) -> None:
+        """Print the stored CV's name, size and the time it was stored."""
+        with service_on(_require_home(), db) as service:
+            stored = service.cv()
+        if stored is None:
+            typer.echo("no CV stored")
+        else:
+            typer.echo(f"{stored.name}\t{stored.size}\t{stored.stored_at.isoformat()}")
+
+    return cv
+
+
+def _detail_lines(detail: PostingDetail) -> list[str]:
+    """Lay a posting's detail out as `show` prints it.
+
+    Args:
+        detail: The posting with its sources, label and description.
+
+    Returns:
+        The title, company and one `name: value` line per other field, with
+        `label` and `note` only when the posting is labelled, then a blank line
+        and the description or `description unavailable: <reason>`.
+    """
+    posting = detail.posting
+    lines = [
+        posting.title,
+        posting.company,
+        *(f"{name}: {value}" for name, value in posting_fields(detail)),
+        f"url: {posting.url}",
+    ]
+    if detail.label is not None:
+        lines.append(f"label: {detail.label.vote}")
+        if detail.label.note is not None:
+            lines.append(f"note: {detail.label.note}")
+    lines.append("")
+    if detail.description is not None:
+        lines.append(detail.description)
+    else:
+        reason = detail.unavailable_reason or "no description published"
+        lines.append(f"description unavailable: {reason}")
+    return lines
+
+
+def _posting_commands(
+    app: typer.Typer, client_factory: ClientFactory, now: Callable[[], datetime]
+) -> None:
+    """Add the `show` and `label` commands, which act on one stored posting.
+
+    Args:
+        app: The application to add the commands to.
+        client_factory: Builds the client a description fetch goes through.
+        now: The wall clock, returning timezone-aware times.
+    """
+
+    def service_on(home: IjobHome, db: Path | None) -> AbstractContextManager[Service]:
+        """Open the service with the HTTP cache, which description fetches use."""
+        return open_service(home, db, client_factory, now=now)
+
+    @app.command()
+    def show(
+        posting_id: Annotated[
+            int, typer.Argument(metavar="ID", help="Posting id, as `search` prints it.")
+        ],
+        db: Annotated[Path | None, typer.Option(help=_DB_HELP)] = None,
+    ) -> None:
+        """Print a posting's details and its description."""
+        home = _require_home()
+        with _refusals(), service_on(home, db) as service:
+            detail = asyncio.run(service.detail(PostingId(posting_id)))
+        for line in _detail_lines(detail):
+            typer.echo(line)
+
+    @app.command()
+    def label(
+        posting_id: Annotated[
+            int, typer.Argument(metavar="ID", help="Posting id, as `search` prints it.")
+        ],
+        vote: Annotated[
+            Vote | None, typer.Argument(help="Your verdict: up or down.")
+        ] = None,
+        *,
+        note: Annotated[str | None, typer.Option(help="Why you voted so.")] = None,
+        clear: Annotated[
+            bool, typer.Option("--clear", help="Remove the posting's vote.")
+        ] = False,
+        db: Annotated[Path | None, typer.Option(help=_DB_HELP)] = None,
+    ) -> None:
+        """Set, replace or clear your vote on a posting."""
+        home = _require_home()
+        if (vote is None) == (not clear) or (clear and note is not None):
+            typer.echo(
+                "error: give a vote (up or down) with an optional --note, "
+                "or --clear alone",
+                err=True,
+            )
+            raise typer.Exit(code=_EXIT_BAD_ARGUMENT)
+        identifier = PostingId(posting_id)
+        with _refusals(), service_on(home, db) as service:
+            if vote is None:
+                service.clear_label(identifier)
+                typer.echo(f"{identifier}\tcleared")
+                return
+            detail = asyncio.run(service.label(identifier, vote, note))
+        if detail.label is not None:
+            typer.echo(f"{identifier}\t{detail.label.vote}\t{detail.label.note or '-'}")
+
+
 def make_app(
-    client_factory: _ClientFactory, *, now: Callable[[], datetime] = _utc_now
+    client_factory: ClientFactory, *, now: Callable[[], datetime] = _utc_now
 ) -> typer.Typer:
     """Build the `ijob` application.
 
@@ -623,14 +555,37 @@ def make_app(
         now: The wall clock, returning timezone-aware times.
 
     Returns:
-        The application, with its `search` command and `sources` group.
+        The application, with its `setup`, `search`, `show`, `label` and `tui`
+        commands and its `sources` and `cv` groups.
     """
     app = typer.Typer(add_completion=False, help="Collect and list job postings.")
-    app.add_typer(_sources_app(client_factory), name="sources")
+    app.add_typer(_sources_app(client_factory, now), name="sources")
+    app.add_typer(_cv_app(client_factory, now), name="cv")
+    _posting_commands(app, client_factory, now)
 
     @app.callback()
     def _root() -> None:
         """Collect and list job postings."""
+
+    @app.command()
+    def setup() -> None:
+        """Create the ijob home with its config, database and cache directory."""
+        try:
+            items = setup_home(resolve_home(os.environ))
+        except HomeError as error:
+            typer.echo(f"error: {error.reason}", err=True)
+            raise typer.Exit(code=_EXIT_REFUSED) from error
+        except (OSError, sqlite3.Error) as error:
+            typer.echo(f"error: cannot set up the ijob home: {error}", err=True)
+            raise typer.Exit(code=_EXIT_REFUSED) from error
+        for item in items:
+            typer.echo(f"{item.outcome}\t{item.path}")
+            if item.exposed_mode is not None:
+                typer.echo(
+                    f"warning: {item.path} has mode {item.exposed_mode:04o}, so "
+                    f"other users can read it; run: chmod 700 {item.path}",
+                    err=True,
+                )
 
     @app.command()
     def search(  # noqa: PLR0913, PLR0917 - one parameter per command-line option
@@ -671,14 +626,15 @@ def make_app(
         db: Annotated[Path | None, typer.Option(help=_DB_HELP)] = None,
         config: Annotated[
             Path | None,
-            typer.Option(
-                help="Config file. Default: $XDG_CONFIG_HOME/ijob/config.toml, "
-                "or ~/.config/ijob/config.toml."
-            ),
+            typer.Option(help=_CONFIG_HELP),
         ] = None,
     ) -> None:
-        """Fetch the sources, record their jobs and list the open, filtered ones."""
-        flags = _FilterFlags(
+        """Fetch the sources, record their jobs and list the open, filtered ones.
+
+        Each line starts with the posting's id, which `show` and `label` take.
+        """
+        home = _require_home()
+        flags = FilterFlags(
             countries=tuple(country or ()),
             remotes=tuple(remote or ()),
             since=since,
@@ -687,27 +643,42 @@ def make_app(
             require_salary=require_salary,
         )
         try:
-            spec = _read_filters(config, flags)
+            spec = read_filters(config, flags, default=home.config)
             refs = list(dict.fromkeys(map(parse_source_ref, source or [])))
         except InvalidValueError as error:
             typer.echo(f"error: {error}", err=True)
             raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
 
-        with _open_cache(now) as cache, _seeded_store(db) as store:
-            rows = _choose_sources(store, refs)
-            due, kept = _split_by_interval(rows, now())
-            sources, refused = _build_sources(store, due)
-            result = asyncio.run(_collect(sources, client_factory, cache))
-            seen_at = now()
-            fetched = _record(store, due, result, seen_at)
-            _report_problems(due, result, refused)
-            _report_stale(store, rows, seen_at)
-            postings = store.open_postings(now=seen_at, sources=refs or None)
-            for posting in postings:
-                if keep(posting, spec, now=seen_at):
-                    typer.echo(_posting_line(store, posting))
-        if due and not fetched and not kept:
+        try:
+            with open_service(home, db, client_factory, now=now) as service:
+                report = asyncio.run(service.refresh(refs))
+                _report(report)
+                for posting in service.open_postings(spec, refs):
+                    typer.echo(_posting_line(service, posting))
+        except CacheUnavailableError as error:
+            typer.echo(f"error: {error.reason}", err=True)
+            raise typer.Exit(code=_EXIT_REFUSED) from error
+        except UnknownSourceError as error:
+            typer.echo(f"error: {error.reason}", err=True)
+            raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
+        if report.due and not report.fetched and not report.kept:
             raise typer.Exit(code=_EXIT_REFUSED)
+
+    @app.command()
+    def tui(
+        db: Annotated[Path | None, typer.Option(help=_DB_HELP)] = None,
+        config: Annotated[
+            Path | None,
+            typer.Option(help=_CONFIG_HELP),
+        ] = None,
+    ) -> None:
+        """Open the terminal UI on the stored postings."""
+        home = _require_home()
+        with (
+            _refusals(),
+            open_service(home, db, client_factory, now=now) as service,
+        ):
+            IjobApp(service, config, default_config=home.config).run()
 
     return app
 

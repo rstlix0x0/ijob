@@ -5,10 +5,12 @@ body to `parse_lever`, and checks that the postings belong to the company the
 site was registered for. `parse_lever` is pure and never lets anything but a
 `ParseError` escape. A posting whose id, title or address cannot be read is
 logged at `WARNING` and counted in `SourceBatch.rejected`. Every other field
-(location, department, country, creation time and workplace type) is optional,
-and one that cannot be read is left out while the posting is kept.
+(location, department, country, creation time, workplace type and description)
+is optional, and one that cannot be read is left out while the posting is kept.
+`description_from_raw` reads the description back out of a stored posting.
 """
 
+import html
 import json
 import logging
 from datetime import UTC, datetime, timedelta
@@ -26,8 +28,10 @@ from ijob_core.model import (
 )
 
 from ijob_sources.collect import SourceBatch
+from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError
 from ijob_sources.identity import check_identity
+from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -81,7 +85,7 @@ class LeverSite:
             self.ref,
             self._company,
             names=(),
-            texts=_descriptions(jobs),
+            texts=_identity_texts(jobs),
             count=len(jobs),
         )
         return batch
@@ -122,7 +126,7 @@ def _load_jobs(body: bytes) -> list[Any]:
     return payload
 
 
-def _descriptions(jobs: list[Any]) -> list[str]:
+def _identity_texts(jobs: list[Any]) -> list[str]:
     """Collect the plain-text description of every listed posting that has one."""
     return [
         text
@@ -183,7 +187,53 @@ def _to_draft(job: object, key: SourceKey, company: str) -> SightingDraft:
         country=_country(job),
         remote=_remote(job),
         role_hint=_readable_text(categories, "department") or None,
+        description=_description(job),
     )
+
+
+def description_from_raw(raw: str) -> str | None:
+    """Read the description out of a stored Lever posting.
+
+    Args:
+        raw: A posting's payload as `SightingDraft.raw` holds it, a JSON object.
+
+    Returns:
+        The posting's `description`, its `lists` and its `additional` text as
+        Markdown, or `None` when it has none of them.
+
+    Raises:
+        ParseError: `raw` is not a JSON object.
+    """
+    job = raw_object(raw)
+    return _description(job)
+
+
+def _description(job: dict[str, Any]) -> str | None:
+    """Return the posting's text as Markdown, else `None`.
+
+    Lever splits the text over `description`, the `lists` items (each a
+    heading `text` and an HTML `content`) and `additional`. They are joined in
+    that order into one HTML document, with each list heading as an `<h2>`
+    whose text is escaped so that it stays text.
+    """
+    parts: list[str] = []
+    description = job.get("description")
+    if isinstance(description, str):
+        parts.append(description)
+    lists = job.get("lists")
+    for item in lists if isinstance(lists, list) else ():
+        if not isinstance(item, dict):
+            continue
+        heading = item.get("text")
+        if isinstance(heading, str):
+            parts.append(f"<h2>{html.escape(heading)}</h2>")
+        content = item.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+    additional = job.get("additional")
+    if isinstance(additional, str):
+        parts.append(additional)
+    return normalize("\n".join(parts), TextForm.HTML)
 
 
 def _raw(job: dict[str, Any]) -> str:

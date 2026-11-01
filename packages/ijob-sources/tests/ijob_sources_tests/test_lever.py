@@ -18,7 +18,7 @@ from ijob_core.model import (
 )
 from ijob_sources.collect import CollectResult, SourceBatch, collect
 from ijob_sources.errors import IdentityMismatchError, ParseError, SourceNotFoundError
-from ijob_sources.lever import LeverSite, parse_lever
+from ijob_sources.lever import LeverSite, description_from_raw, parse_lever
 from ijob_sources.polite_http import CachedResponse, PoliteClient
 
 _KEY = parse_source_key("spotify")
@@ -406,3 +406,158 @@ def test_lever_site_satisfies_source_protocol() -> None:
     assert site.ref == SourceRef(SourceKind.LEVER, _KEY)
     assert result.failures == []
     assert len(result.batches[site.ref].drafts) == 3
+
+
+_EXPECTED_DESCRIPTION = (
+    "Spotify Technology is our business-to-business software team, helping "
+    "organizations improve how they build and deliver software. Our "
+    "products, including Backstage Portal, Confidence, and Xirp, support "
+    "developers and AI-powered systems as they navigate increasingly "
+    "complex engineering environments.\n\n"
+    "As an Account Executive on our Commercial team, you will drive new "
+    "business for Spotify Technology. You'll focus on companies with fewer "
+    "than 1,000 employees, where sales cycles typically run from weeks to "
+    "a few months and success depends on a repeatable, scalable sales "
+    "motion. You'll manage a high volume of opportunities, work with one "
+    "or a small group of decision-makers (often a hands-on engineering "
+    "leader or CTO), and move deals efficiently from the first "
+    "conversation to close. You'll also help shape the playbook that "
+    "enables our commercial business to grow.\n\n"
+    "You'll collaborate with Sales Engineering, Marketing, Product, and "
+    "Customer Success to create a seamless customer experience. Your "
+    "ability to quickly understand customers' technical needs and connect "
+    "them to clear business value will be key to your success.\n\n"
+    "## What You'll Do\n\n"
+    "• Identify and pursue new business opportunities with companies of "
+    "fewer than 1,000 employees. While significant inbound demand supports "
+    "the pipeline, top performers will exceed targets by treating this as "
+    "a “Hunter” role in addition to converting inbound demand.\n\n"
+    "• Own the full sales cycle, from prospecting and discovery through "
+    "demos, proposals, negotiations, and close.\n\n"
+    "• Manage a high-velocity pipeline across multiple opportunities, "
+    "keeping deals moving with clear next steps and maintaining accurate "
+    "pipeline and forecast data in the CRM.\n\n"
+    "• Achieve and exceed quarterly and annual revenue targets.\n\n"
+    "## Who You Are\n\n"
+    "• You have 4+ years of experience in a quota-carrying sales role, "
+    "including 2+ years in a revenue-closing role, ideally in SaaS, "
+    "developer platforms, or cloud services.\n\n"
+    "• You have a proven track record of achieving and exceeding targets "
+    "in a fast-paced, high-volume B2B environment, ideally selling to "
+    "small and medium-sized businesses (SMB) or mid-market companies.\n\n"
+    "• You are skilled at managing fast sales cycles efficiently while "
+    "maintaining a thoughtful and effective discovery process.\n\n"
+    "The United States base range for this position is $87,069-$124,385 "
+    "plus equity. The benefits available for this position include health "
+    "insurance, six month paid parental leave, 401(k) retirement plan, "
+    "monthly meal allowance, 23 paid days off, 13 paid flexible holidays, "
+    "paid sick leave. These ranges may be modified in the future."
+)
+
+
+def test_draft_carries_description() -> None:
+    draft = parse_lever(_BODY, _KEY, _COMPANY).drafts[0]
+
+    assert draft.description == _EXPECTED_DESCRIPTION
+
+
+def test_description_from_raw_matches_draft() -> None:
+    draft = parse_lever(_BODY, _KEY, _COMPANY).drafts[0]
+
+    assert description_from_raw(draft.raw) == draft.description
+
+
+def test_description_missing_gives_none() -> None:
+    batch = parse_lever(
+        _body(_without(_FIRST, "description", "lists", "additional")), _KEY, _COMPANY
+    )
+
+    assert len(batch.drafts) == 1
+    assert batch.drafts[0].description is None
+    assert description_from_raw(batch.drafts[0].raw) is None
+
+
+@pytest.mark.parametrize("value", [None, 7, ["<p>x</p>"], {"html": "<p>x</p>"}])
+def test_description_not_text_gives_none(value: object) -> None:
+    job = {**_without(_FIRST, "lists", "additional"), "description": value}
+
+    draft = parse_lever(_body(job), _KEY, _COMPANY).drafts[0]
+
+    assert draft.description is None
+
+
+def test_description_drops_a_lone_surrogate() -> None:
+    job = {**_without(_FIRST, "lists", "additional"), "description": "<p>a\ud800b</p>"}
+
+    draft = parse_lever(_body(job), _KEY, _COMPANY).drafts[0]
+
+    assert draft.description == "ab"
+    assert description_from_raw(draft.raw) == "ab"
+
+
+@pytest.mark.parametrize("raw", ["[]", '"text"', "null"])
+def test_description_from_raw_non_object_raises_parse_error(raw: str) -> None:
+    with pytest.raises(ParseError):
+        description_from_raw(raw)
+
+
+def test_description_from_raw_not_json_raises_parse_error() -> None:
+    with pytest.raises(ParseError):
+        description_from_raw("{not json")
+
+
+def test_lever_description_includes_lists_and_additional() -> None:
+    description = parse_lever(_BODY, _KEY, _COMPANY).drafts[0].description
+
+    assert description is not None
+    markers = [
+        "Spotify Technology is our business-to-business software team",
+        "## What You'll Do",
+        "Own the full sales cycle",
+        "## Who You Are",
+        "You have 4+ years of experience",
+        "The United States base range for this position",
+    ]
+    positions = [description.index(marker) for marker in markers]
+    assert positions == sorted(positions)
+
+
+def test_lever_list_heading_is_escaped() -> None:
+    job = {
+        **_FIRST,
+        "description": "<p>Intro</p>",
+        "lists": [{"text": "R&D <b>Team</b>", "content": "<p>Body</p>"}],
+        "additional": "",
+    }
+
+    draft = parse_lever(_body(job), _KEY, _COMPANY).drafts[0]
+
+    assert draft.description == "Intro\n\n## R&D \\<b>Team\\</b>\n\nBody"
+
+
+def test_lever_unreadable_list_items_are_skipped() -> None:
+    job = {
+        **_without(_FIRST, "additional"),
+        "description": "<p>Intro</p>",
+        "lists": [
+            "not an object",
+            {"text": 7, "content": "<p>Kept</p>"},
+            {"text": "Heading only", "content": None},
+            {"text": "Duties"},
+        ],
+    }
+
+    draft = parse_lever(_body(job), _KEY, _COMPANY).drafts[0]
+
+    assert draft.description == "Intro\n\nKept\n\n## Heading only\n\n## Duties"
+
+
+@pytest.mark.parametrize("lists", [None, "text", {"text": "Duties"}])
+def test_lever_lists_not_a_list_is_ignored(lists: object) -> None:
+    job = {
+        **_without(_FIRST, "additional"),
+        "description": "<p>Intro</p>",
+        "lists": lists,
+    }
+
+    assert parse_lever(_body(job), _KEY, _COMPANY).drafts[0].description == "Intro"

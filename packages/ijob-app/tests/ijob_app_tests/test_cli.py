@@ -3,6 +3,7 @@ import json
 import re
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -11,14 +12,19 @@ import pytest
 import typer
 from ijob_app import cli
 from ijob_app.cli import app, make_app
+from ijob_core.countries import parse_country
 from ijob_core.model import (
     ExternalId,
+    RemoteScope,
+    SightingDraft,
     SourceKind,
     SourceRef,
     parse_source_key,
     parse_source_ref,
 )
+from ijob_core.money import Money, Period
 from ijob_core.store import Store
+from ijob_sources.greenhouse import description_from_raw
 from ijob_sources.manual import manual_key
 from ijob_sources.polite_http import ConditionalCache, PoliteClient
 from ijob_sources.registry import HOST_INTERVALS
@@ -102,13 +108,18 @@ def _factory(
     return client_factory
 
 
+def _home(tmp_path: Path) -> Path:
+    """The ijob home the tests use, under `tmp_path`."""
+    return tmp_path / "home"
+
+
 def _env(tmp_path: Path) -> dict[str, str]:
-    """Point every XDG directory under `tmp_path`, so no real user data leaks in."""
-    return {
-        "XDG_CACHE_HOME": str(tmp_path / "cache"),
-        "XDG_CONFIG_HOME": str(tmp_path / "config"),
-        "XDG_DATA_HOME": str(tmp_path / "data"),
-    }
+    """Create an ijob home under `tmp_path` and point `IJOB_HOME` at it.
+
+    No real user data leaks in, and a command finds the home it requires.
+    """
+    _home(tmp_path).mkdir(exist_ok=True)
+    return {"IJOB_HOME": str(_home(tmp_path))}
 
 
 def _ticking(start: datetime) -> Callable[[], datetime]:
@@ -145,16 +156,25 @@ def _add_source(tmp_path: Path, ref: str, company: str) -> None:
         store.add_source(parse_source_ref(ref), company)
 
 
-def _line(job: dict[str, Any], sources: str = "greenhouse:tailscale") -> str:
-    """The `search` line for a job of the Tailscale fixture."""
+def _ids(tmp_path: Path) -> dict[str, int]:
+    """Map the URL of every stored posting in the `tmp_path` database to its id."""
+    with Store.open(tmp_path / "ijob.db") as store:
+        refs = [row.ref for row in store.sources()]
+        return {posting.url: posting.id for posting in store.postings(sources=refs)}
+
+
+def _line(
+    job: dict[str, Any], ids: dict[str, int], sources: str = "greenhouse:tailscale"
+) -> str:
+    """The `search` line for a job of the Tailscale fixture, given the stored ids."""
     return (
-        f"{job['title']}\t{job['company_name']}\t{job['location']['name']}"
-        f"\t{sources}\t{job['absolute_url']}"
+        f"{ids[job['absolute_url']]}\t{job['title']}\t{job['company_name']}"
+        f"\t{job['location']['name']}\t{sources}\t{job['absolute_url']}"
     )
 
 
 def _titles(result: Result) -> list[str]:
-    return sorted(line.split("\t")[0] for line in result.stdout.splitlines())
+    return sorted(line.split("\t")[1] for line in result.stdout.splitlines())
 
 
 def test_search_prints_postings(tmp_path: Path) -> None:
@@ -162,7 +182,21 @@ def test_search_prints_postings(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert result.stderr == ""
-    assert sorted(result.stdout.splitlines()) == sorted(_line(job) for job in _JOBS)
+    ids = _ids(tmp_path)
+    assert sorted(result.stdout.splitlines()) == sorted(
+        _line(job, ids) for job in _JOBS
+    )
+
+
+def test_search_lines_start_with_posting_id(tmp_path: Path) -> None:
+    result = _search(_serving(), tmp_path, *_TAILSCALE)
+
+    stored = set(_ids(tmp_path).values())
+    firsts = [line.split("\t")[0] for line in result.stdout.splitlines()]
+    assert result.exit_code == 0
+    assert len(firsts) == len(_JOBS)
+    assert all(first.isdecimal() for first in firsts)
+    assert {int(first) for first in firsts} == stored
 
 
 def test_one_stamp_marks_the_fetch_and_the_sightings(tmp_path: Path) -> None:
@@ -192,10 +226,11 @@ def test_absent_location_prints_a_dash(tmp_path: Path) -> None:
 
     result = _search(handler, tmp_path, *_TAILSCALE)
 
+    [posting_id] = _ids(tmp_path).values()
     assert result.stdout.splitlines() == [
         (
-            f"{job['title']}\t{job['company_name']}\t-\tgreenhouse:tailscale"
-            f"\t{job['absolute_url']}"
+            f"{posting_id}\t{job['title']}\t{job['company_name']}\t-"
+            f"\tgreenhouse:tailscale\t{job['absolute_url']}"
         )
     ]
 
@@ -476,7 +511,7 @@ def _web(
 
 
 def _run(handler: _Handler, tmp_path: Path, *args: str, db: bool = True) -> Result:
-    """Run `ijob <args>` against a `tmp_path` database with the XDG dirs isolated."""
+    """Run `ijob <args>` against a `tmp_path` database with the ijob home isolated."""
     app: typer.Typer = make_app(_factory(handler))
     argv = [*args, "--db", str(tmp_path / "ijob.db")] if db else list(args)
     return CliRunner().invoke(app, argv, env=_env(tmp_path))
@@ -634,10 +669,8 @@ def test_production_client_paces_workable_hosts(
 
 
 def test_unusable_cache_exits_1_without_opening_the_db(tmp_path: Path) -> None:
-    blocker = tmp_path / "file"
-    blocker.write_text("not a directory", encoding="utf-8")
     requests: list[httpx.Request] = []
-    env = {**_env(tmp_path), "XDG_CACHE_HOME": str(blocker / "cache")}
+    env = _blocked_cache_env(tmp_path)
     app: typer.Typer = make_app(_factory(_serving(requests=requests)), now=lambda: _T0)
 
     result = CliRunner().invoke(
@@ -647,7 +680,7 @@ def test_unusable_cache_exits_1_without_opening_the_db(tmp_path: Path) -> None:
     assert result.exit_code == 1
     assert result.stdout == ""
     [line] = result.stderr.splitlines()
-    cache_path = blocker / "cache" / "ijob" / "http.sqlite"
+    cache_path = _home(tmp_path) / "cache" / "http.sqlite"
     assert line.startswith(f"error: cannot open the HTTP cache {cache_path}: ")
     assert "Traceback" not in result.stderr
     assert requests == []
@@ -927,7 +960,10 @@ def test_search_without_source_reads_every_row(tmp_path: Path) -> None:
     result = _search(handler, tmp_path)
 
     assert result.exit_code == 0
-    assert sorted(result.stdout.splitlines()) == sorted(_line(job) for job in _JOBS)
+    ids = _ids(tmp_path)
+    assert sorted(result.stdout.splitlines()) == sorted(
+        _line(job, ids) for job in _JOBS
+    )
     assert len(requests) >= 100
     assert any(
         line.startswith("not found: greenhouse:") for line in result.stderr.splitlines()
@@ -956,8 +992,8 @@ def test_filters_from_config_and_flags(tmp_path: Path) -> None:
 
 def test_filters_from_default_config_location(tmp_path: Path) -> None:
     _add_source(tmp_path, "lever:acme", "Acme")
-    path = tmp_path / "config" / "ijob" / "config.toml"
-    path.parent.mkdir(parents=True)
+    path = _home(tmp_path) / "config.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('[filters]\ncountries = ["DE"]\n', encoding="utf-8")
 
     result = _search(_lever_only(_ACME_JOBS), tmp_path, "--source", "lever:acme")
@@ -1106,8 +1142,9 @@ def test_cross_source_posting_lists_both_refs(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0
+    ids = _ids(tmp_path)
     assert sorted(result.stdout.splitlines()) == sorted(
-        _line(job, "greenhouse:tailscale,greenhouse:tailscale2") for job in _JOBS
+        _line(job, ids, "greenhouse:tailscale,greenhouse:tailscale2") for job in _JOBS
     )
 
 
@@ -1128,9 +1165,33 @@ def test_low_confidence_prefix(tmp_path: Path) -> None:
     lines = result.stdout.splitlines()
     assert result.exit_code == 0
     assert lines
-    assert all(line.startswith("? ") for line in lines)
+    assert all(line.split("\t")[1].startswith("? ") for line in lines)
     assert any("Senior Backend Engineer" in line for line in lines)
     assert all("\thn:whoishiring\t" in line for line in lines)
+
+
+def test_search_low_confidence_flag_follows_id(tmp_path: Path) -> None:
+    threads = (_FIXTURES / "hn" / "threads.json").read_bytes()
+    comments = (_FIXTURES / "hn" / "comments.json").read_bytes()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text=_ALLOWING_ROBOTS)
+        if request.url.path.endswith("/search_by_date"):
+            return httpx.Response(200, content=threads)
+        return httpx.Response(200, content=comments)
+
+    result = _search(handler, tmp_path, "--source", "hn:whoishiring")
+
+    ids = set(_ids(tmp_path).values())
+    lines = result.stdout.splitlines()
+    assert result.exit_code == 0
+    assert lines
+    for line in lines:
+        identifier, flagged = line.split("\t")[:2]
+        assert int(identifier) in ids
+        assert flagged.startswith("? ")
+        assert line.startswith(f"{identifier}\t? ")
 
 
 def test_conditional_cache_used(tmp_path: Path) -> None:
@@ -1152,7 +1213,7 @@ def test_conditional_cache_used(tmp_path: Path) -> None:
     assert validators == [None, '"v1"']
     assert len(second.stdout.splitlines()) == len(_JOBS)
     assert second.stdout == first.stdout
-    assert (tmp_path / "cache" / "ijob" / "http.sqlite").exists()
+    assert (_home(tmp_path) / "cache" / "http.sqlite").exists()
 
 
 def test_search_with_every_source_removed_exits_0(tmp_path: Path) -> None:
@@ -1165,3 +1226,382 @@ def test_search_with_every_source_removed_exits_0(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert result.stdout == ""
+
+
+def _posting_id(tmp_path: Path, job: dict[str, Any]) -> int:
+    """The stored id of a job of the Tailscale fixture."""
+    return _ids(tmp_path)[job["absolute_url"]]
+
+
+def _show(handler: _Handler, tmp_path: Path, posting_id: int) -> Result:
+    return _run(handler, tmp_path, "show", str(posting_id))
+
+
+def test_show_prints_metadata_and_description(tmp_path: Path) -> None:
+    job = _JOBS[0]
+    assert _search(_serving(), tmp_path, *_TAILSCALE).exit_code == 0
+    description = description_from_raw(json.dumps(job))
+    assert description
+
+    result = _show(_serving(), tmp_path, _posting_id(tmp_path, job))
+
+    lines = result.stdout.splitlines()
+    assert result.exit_code == 0
+    assert result.stderr == ""
+    assert lines[:2] == [job["title"], job["company_name"]]
+    assert f"url: {job['absolute_url']}" in lines
+    assert "sources: greenhouse:tailscale" in lines
+    assert description in result.stdout
+    assert result.stdout.index(job["absolute_url"]) < result.stdout.index(description)
+    assert "label:" not in result.stdout
+    assert "description unavailable" not in result.stdout
+
+
+_SEEN = datetime(2026, 10, 31, 12, 0, tzinfo=UTC)
+
+
+def _seed_workable(tmp_path: Path) -> int:
+    """Store a Workable posting that has no description yet; return its id."""
+    ref = parse_source_ref("workable:acme")
+    draft = SightingDraft(
+        source=ref,
+        external_id=ExternalId("ABC123"),
+        title="Platform Engineer",
+        company="Acme",
+        location="Remote",
+        url="https://apply.workable.com/acme/j/ABC123/",
+        posted_at=None,
+        raw=json.dumps({"shortcode": "ABC123"}),
+    )
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.record([draft], seen_at=_SEEN)
+        [posting] = store.postings(sources=[ref])
+        return posting.id
+
+
+def _workable(status: int) -> _Handler:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text=_ALLOWING_ROBOTS)
+        if request.url.host == "apply.workable.com":
+            return httpx.Response(status, text="oops")
+        return httpx.Response(404)
+
+    return handler
+
+
+def test_show_unavailable_description(tmp_path: Path) -> None:
+    posting_id = _seed_workable(tmp_path)
+
+    result = _show(_workable(500), tmp_path, posting_id)
+
+    lines = result.stdout.splitlines()
+    assert result.exit_code == 0
+    assert lines[0] == "Platform Engineer"
+    assert lines[-1].startswith("description unavailable: ")
+    assert "500" in lines[-1]
+
+
+def test_show_unknown_posting(tmp_path: Path) -> None:
+    result = _show(_serving(), tmp_path, 999)
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr.splitlines() == ["error: invalid posting: no posting 999"]
+
+
+def _searched_id(tmp_path: Path) -> int:
+    """Run a Tailscale search and return the id of its first job's posting."""
+    assert _search(_serving(), tmp_path, *_TAILSCALE).exit_code == 0
+    return _posting_id(tmp_path, _JOBS[0])
+
+
+def test_label_up_with_note(tmp_path: Path) -> None:
+    posting_id = _searched_id(tmp_path)
+
+    result = _run(
+        _serving(), tmp_path, "label", str(posting_id), "up", "--note", "Go + payments"
+    )
+    shown = _show(_serving(), tmp_path, posting_id)
+
+    assert result.exit_code == 0
+    assert result.stdout.splitlines() == [f"{posting_id}\tup\tGo + payments"]
+    assert "label: up" in shown.stdout.splitlines()
+    assert "note: Go + payments" in shown.stdout.splitlines()
+
+
+def test_label_replace_and_clear(tmp_path: Path) -> None:
+    posting_id = _searched_id(tmp_path)
+    identifier = str(posting_id)
+    _run(_serving(), tmp_path, "label", identifier, "up", "--note", "Go")
+
+    replaced = _run(_serving(), tmp_path, "label", identifier, "down")
+    after_replace = _show(_serving(), tmp_path, posting_id).stdout.splitlines()
+    cleared = _run(_serving(), tmp_path, "label", identifier, "--clear")
+    after_clear = _show(_serving(), tmp_path, posting_id).stdout.splitlines()
+
+    assert replaced.exit_code == 0
+    assert replaced.stdout.splitlines() == [f"{posting_id}\tdown\t-"]
+    assert "label: down" in after_replace
+    assert not any(line.startswith("note:") for line in after_replace)
+    assert cleared.exit_code == 0
+    assert cleared.stdout.splitlines() == [f"{posting_id}\tcleared"]
+    assert not any(line.startswith(("label:", "note:")) for line in after_clear)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param([], id="neither"),
+        pytest.param(["up", "--clear"], id="vote-and-clear"),
+        pytest.param(["--clear", "--note", "why"], id="note-and-clear"),
+        pytest.param(["--note", "why"], id="note-alone"),
+        pytest.param(["sideways"], id="bad-vote"),
+    ],
+)
+def test_label_usage_errors(tmp_path: Path, args: list[str]) -> None:
+    posting_id = _searched_id(tmp_path)
+
+    result = _run(_serving(), tmp_path, "label", str(posting_id), *args)
+    shown = _show(_serving(), tmp_path, posting_id)
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr != ""
+    assert "label:" not in shown.stdout
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param([], id="neither"),
+        pytest.param(["up", "--clear"], id="vote-and-clear"),
+        pytest.param(["--clear", "--note", "why"], id="note-and-clear"),
+        pytest.param(["--note", "why"], id="note-alone"),
+    ],
+)
+def test_label_usage_errors_say_what_to_give(tmp_path: Path, args: list[str]) -> None:
+    posting_id = _searched_id(tmp_path)
+
+    result = _run(_serving(), tmp_path, "label", str(posting_id), *args)
+
+    assert result.stderr.splitlines() == [
+        "error: give a vote (up or down) with an optional --note, or --clear alone"
+    ]
+
+
+def test_label_blank_note_exits_2(tmp_path: Path) -> None:
+    posting_id = _searched_id(tmp_path)
+
+    result = _run(_serving(), tmp_path, "label", str(posting_id), "up", "--note", " ")
+
+    assert result.exit_code == 2
+    assert result.stderr.splitlines() == ["error: invalid note: is blank"]
+
+
+@pytest.mark.parametrize("args", [["up"], ["--clear"]])
+def test_label_unknown_posting(tmp_path: Path, args: list[str]) -> None:
+    result = _run(_serving(), tmp_path, "label", "999", *args)
+
+    assert result.exit_code == 2
+    assert result.stderr.splitlines() == ["error: invalid posting: no posting 999"]
+
+
+def _pdf(tmp_path: Path, name: str = "resume.pdf") -> Path:
+    """Write a made-up PDF: the signature is all the check reads."""
+    path = tmp_path / name
+    path.write_bytes(b"%PDF-1.4\n% made up for the test\n")
+    return path
+
+
+def test_cv_set_then_show(tmp_path: Path) -> None:
+    file = _pdf(tmp_path)
+    size = file.stat().st_size
+
+    stored = _run(_serving(), tmp_path, "cv", "set", str(file))
+    shown = _run(_serving(), tmp_path, "cv", "show")
+
+    assert stored.exit_code == 0
+    name, stored_size, sha256 = stored.stdout.strip().split("\t")
+    assert (name, int(stored_size)) == ("resume.pdf", size)
+    assert re.fullmatch(r"[0-9a-f]{64}", sha256)
+    assert shown.exit_code == 0
+    name, shown_size, stored_at = shown.stdout.strip().split("\t")
+    assert (name, int(shown_size)) == ("resume.pdf", size)
+    assert stored_at.startswith("20")
+
+
+def test_cv_show_none(tmp_path: Path) -> None:
+    result = _run(_serving(), tmp_path, "cv", "show")
+
+    assert result.exit_code == 0
+    assert result.stdout.splitlines() == ["no CV stored"]
+
+
+@pytest.mark.parametrize(
+    ("content", "reason"),
+    [
+        pytest.param("not a pdf", "is not a PDF", id="text-file"),
+        pytest.param(None, "cannot read", id="missing-file"),
+    ],
+)
+def test_cv_set_rejects_non_pdf(
+    tmp_path: Path, content: str | None, reason: str
+) -> None:
+    file = tmp_path / "notes.txt"
+    if content is not None:
+        file.write_text(content, encoding="utf-8")
+
+    result = _run(_serving(), tmp_path, "cv", "set", str(file))
+    shown = _run(_serving(), tmp_path, "cv", "show")
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    [line] = result.stderr.splitlines()
+    assert line.startswith("error: ")
+    assert reason in line
+    assert shown.stdout.splitlines() == ["no CV stored"]
+
+
+def test_cv_set_copy_failure_exits_1(tmp_path: Path) -> None:
+    file = _pdf(tmp_path)
+    (tmp_path / "cv.pdf").mkdir()
+
+    result = _run(_serving(), tmp_path, "cv", "set", str(file))
+    shown = _run(_serving(), tmp_path, "cv", "show")
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    [line] = result.stderr.splitlines()
+    assert line.startswith("error: cannot store the CV: ")
+    assert shown.stdout.splitlines() == ["no CV stored"]
+
+
+def test_non_pdf_cv_is_reported_as_the_bare_reason(tmp_path: Path) -> None:
+    file = tmp_path / "notes.txt"
+    file.write_text("not a pdf", encoding="utf-8")
+
+    result = _run(_serving(), tmp_path, "cv", "set", str(file))
+
+    assert result.exit_code == 2
+    assert result.stderr.splitlines() == [
+        f"error: {file} is not a PDF: it does not start with %PDF-"
+    ]
+
+
+def _blocked_cache_env(tmp_path: Path) -> dict[str, str]:
+    """The test environment with a cache directory that cannot be created."""
+    env = _env(tmp_path)
+    (_home(tmp_path) / "cache").write_text("not a directory", encoding="utf-8")
+    return env
+
+
+def test_sources_list_does_not_touch_the_http_cache(tmp_path: Path) -> None:
+    env = _blocked_cache_env(tmp_path)
+    app: typer.Typer = make_app(_factory(_serving()), now=lambda: _T0)
+
+    result = CliRunner().invoke(
+        app, ["sources", "list", "--db", str(tmp_path / "ijob.db")], env=env
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout != ""
+    assert result.stderr == ""
+    assert (_home(tmp_path) / "cache").is_file()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(["show", "1"], id="show"),
+        pytest.param(["label", "1", "up"], id="label"),
+    ],
+)
+def test_unusable_cache_exits_1_for_show_and_label(
+    tmp_path: Path, args: list[str]
+) -> None:
+    env = _blocked_cache_env(tmp_path)
+    app: typer.Typer = make_app(_factory(_serving()), now=lambda: _T0)
+
+    result = CliRunner().invoke(
+        app, [*args, "--db", str(tmp_path / "ijob.db")], env=env
+    )
+
+    cache_path = _home(tmp_path) / "cache" / "http.sqlite"
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    [line] = result.stderr.splitlines()
+    assert line.startswith(f"error: cannot open the HTTP cache {cache_path}: ")
+    assert not (tmp_path / "ijob.db").exists()
+
+
+def _seed_priced(tmp_path: Path, *, with_metadata: bool = True) -> int:
+    """Store a posting that carries every detail `show` prints; return its id."""
+    ref = parse_source_ref("workable:acme")
+    draft = SightingDraft(
+        source=ref,
+        external_id=ExternalId("PRICED"),
+        title="Staff Engineer",
+        company="Acme",
+        location="Berlin, Germany" if with_metadata else None,
+        url="https://apply.workable.com/acme/j/PRICED/",
+        posted_at=datetime(2026, 10, 20, 8, 30, tzinfo=UTC) if with_metadata else None,
+        raw=json.dumps({"shortcode": "PRICED"}),
+        salaries=(
+            (
+                Money(Decimal(120000), Decimal(150000), "USD", Period.YEAR),
+                Money(Decimal(120000), None, "USD", None),
+                Money(None, Decimal(150000), "EUR", Period.MONTH),
+            )
+            if with_metadata
+            else ()
+        ),
+        country=parse_country("Germany") if with_metadata else None,
+        remote=RemoteScope.COUNTRY if with_metadata else None,
+        description="Build the platform.",
+    )
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.record([draft], seen_at=_SEEN)
+        [posting] = store.postings(sources=[ref])
+        return posting.id
+
+
+def test_show_prints_location_salary_country_remote_and_posted(
+    tmp_path: Path,
+) -> None:
+    posting_id = _seed_priced(tmp_path)
+
+    result = _show(_workable(500), tmp_path, posting_id)
+
+    assert result.exit_code == 0
+    assert result.stdout.splitlines() == [
+        "Staff Engineer",
+        "Acme",
+        "location: Berlin, Germany",
+        "salary: 120000-150000 USD/year",
+        "salary: from 120000 USD",
+        "salary: up to 150000 EUR/month",
+        "country: DE",
+        "remote: country",
+        "posted: 2026-10-20",
+        "sources: workable:acme",
+        "url: https://apply.workable.com/acme/j/PRICED/",
+        "",
+        "Build the platform.",
+    ]
+
+
+def test_show_prints_a_dash_for_absent_metadata(tmp_path: Path) -> None:
+    posting_id = _seed_priced(tmp_path, with_metadata=False)
+
+    result = _show(_workable(500), tmp_path, posting_id)
+
+    assert result.stdout.splitlines()[2:9] == [
+        "location: -",
+        "salary: -",
+        "country: -",
+        "remote: -",
+        "posted: -",
+        "sources: workable:acme",
+        "url: https://apply.workable.com/acme/j/PRICED/",
+    ]

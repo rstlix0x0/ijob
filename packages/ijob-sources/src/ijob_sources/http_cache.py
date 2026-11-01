@@ -7,7 +7,7 @@ for 30 days when it is opened, so the file stays bounded. It satisfies the
 """
 
 import sqlite3
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from contextlib import ExitStack, closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -24,21 +24,6 @@ _CREATE_TABLE: Final = """
         used_at TEXT
     ) STRICT
 """
-
-
-def default_cache_path(environ: Mapping[str, str]) -> Path:
-    """Locate the cache file when the caller names none.
-
-    Args:
-        environ: The process environment.
-
-    Returns:
-        `$XDG_CACHE_HOME/ijob/http.sqlite`, or `~/.cache/ijob/http.sqlite` when
-        `XDG_CACHE_HOME` is unset or empty.
-    """
-    cache_home = environ.get("XDG_CACHE_HOME")
-    base = Path(cache_home) if cache_home else Path.home() / ".cache"
-    return base / "ijob" / "http.sqlite"
 
 
 def _to_text(moment: datetime) -> str:

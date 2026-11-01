@@ -5,8 +5,13 @@ user's file layered over it key by key, so a file that sets only `countries`
 keeps the default role patterns. The `parse_*` functions read one flag value
 each. Every bad value raises `InvalidValueError` naming the key or flag.
 
-The config file is `$XDG_CONFIG_HOME/ijob/config.toml`, or
-`~/.config/ijob/config.toml` when `XDG_CONFIG_HOME` is unset or empty. Its
+`FilterFlags` holds the filter values a front end collected as text.
+`read_filters` lays the flags it was given over the config file's filters;
+`spec_from_flags` sets every flag-able field from the flags, so an empty value
+removes that filter, and `flags_from_spec` writes a spec back as the text a
+user would type.
+
+The config file is `config.toml` in the ijob home (see `ijob_app.home`). Its
 filter settings are:
 
 ```toml
@@ -30,7 +35,8 @@ exclude = ['\bsales\b']
 
 import re
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from importlib.resources import files
@@ -65,19 +71,26 @@ _MIN_SALARY_KEYS: Final = frozenset({"amount", "currency", "period"})
 type _Table = dict[str, object]
 
 
-def default_config_path(environ: Mapping[str, str]) -> Path:
-    """Locate the config file when the caller names none.
+@dataclass(frozen=True, slots=True)
+class FilterFlags:
+    """The filter values a front end collected as text.
 
-    Args:
-        environ: The process environment.
-
-    Returns:
-        `$XDG_CONFIG_HOME/ijob/config.toml`, or `~/.config/ijob/config.toml`
-        when `XDG_CONFIG_HOME` is unset or empty.
+    Attributes:
+        countries: The country values; empty when none was given.
+        remotes: The remote-scope values; empty when none was given.
+        since: The age limit, or `None`.
+        companies: The company values; empty when none was given.
+        min_salary: The salary threshold as `AMOUNT:CURRENCY:PERIOD`, or `None`.
+        require_salary: Whether a posting without a salary is dropped, or
+            `None` when no choice was made.
     """
-    config_home = environ.get("XDG_CONFIG_HOME")
-    base = Path(config_home) if config_home else Path.home() / ".config"
-    return base / "ijob" / "config.toml"
+
+    countries: tuple[str, ...] = ()
+    remotes: tuple[str, ...] = ()
+    since: str | None = None
+    companies: tuple[str, ...] = ()
+    min_salary: str | None = None
+    require_salary: bool | None = None
 
 
 def load_filters(path: Path, *, explicit: bool) -> FilterSpec:
@@ -103,6 +116,99 @@ def load_filters(path: Path, *, explicit: bool) -> FilterSpec:
     elif explicit:
         raise InvalidValueError("config", f"{path} does not exist")
     return _build_spec(config)
+
+
+def read_filters(
+    config: Path | None, flags: FilterFlags, *, default: Path | None = None
+) -> FilterSpec:
+    """Build the search filters from the config file with the flags laid over it.
+
+    Args:
+        config: The config file the user named, or `None` to use `default`.
+        flags: The filter values given; each one given replaces the config's
+            value, and one left empty keeps it.
+        default: The file to read when `config` is `None`; it is skipped if it
+            does not exist. With neither given, only the packaged defaults
+            apply.
+
+    Returns:
+        The filters.
+
+    Raises:
+        InvalidValueError: The config file or a flag value is unusable; a
+            blank company is one.
+    """
+    path = config or default
+    if path is None:
+        spec = _build_spec(_read_default())
+    else:
+        spec = load_filters(path, explicit=config is not None)
+    if flags.countries:
+        spec = replace(spec, countries=_country_codes(flags.countries))
+    if flags.remotes:
+        spec = replace(spec, remote=frozenset(map(parse_remote, flags.remotes)))
+    if flags.since is not None:
+        spec = replace(spec, since=parse_since(flags.since))
+    if flags.companies:
+        spec = replace(spec, companies=_company_names(flags.companies))
+    if flags.min_salary is not None:
+        spec = replace(spec, min_salary=parse_min_salary(flags.min_salary))
+    if flags.require_salary is not None:
+        spec = replace(spec, require_salary=flags.require_salary)
+    return spec
+
+
+def spec_from_flags(base: FilterSpec, flags: FilterFlags) -> FilterSpec:
+    """Set every filter a user can type from the flags.
+
+    Unlike `read_filters`, a flag left empty removes its filter instead of
+    keeping the base's, so a front end can show the filters as inputs and let
+    the user clear one.
+
+    Args:
+        base: The spec whose role patterns are kept.
+        flags: The values for the country, remote, age, company, salary
+            threshold and salary-required filters.
+
+    Returns:
+        `base` with those filters replaced by the flags' values.
+
+    Raises:
+        InvalidValueError: A flag value is unusable; a blank company is one.
+    """
+    return replace(
+        base,
+        countries=_country_codes(flags.countries),
+        remote=frozenset(map(parse_remote, flags.remotes)),
+        since=None if flags.since is None else parse_since(flags.since),
+        companies=_company_names(flags.companies),
+        min_salary=(
+            None if flags.min_salary is None else parse_min_salary(flags.min_salary)
+        ),
+        require_salary=bool(flags.require_salary),
+    )
+
+
+def flags_from_spec(spec: FilterSpec) -> FilterFlags:
+    """Write a spec's user-typable filters as the text a user would type.
+
+    Args:
+        spec: The filters to render.
+
+    Returns:
+        Flags that `spec_from_flags` turns back into the same filters. The age
+        is whole days as `<n>d`, otherwise hours as `<n>h`, so a sub-hour
+        remainder is dropped. A salary threshold with no minimum or no period
+        has no text form and is left out.
+    """
+    return FilterFlags(
+        countries=tuple(sorted(spec.countries)),
+        remotes=tuple(sorted(scope.value for scope in spec.remote)),
+        since=None if spec.since is None else _since_text(spec.since),
+        companies=spec.companies,
+        min_salary=_min_salary_text(spec.min_salary),
+        require_salary=spec.require_salary,
+    )
 
 
 def parse_since(text: str, *, field: str = "--since") -> timedelta:
@@ -194,6 +300,32 @@ def parse_country_flag(text: str, *, field: str = "--country") -> CountryCode:
     if code is None:
         raise InvalidValueError(field, f"{text!r} is not a country")
     return code
+
+
+def _country_codes(values: Sequence[str]) -> frozenset[CountryCode]:
+    """Read country flag values."""
+    return frozenset(map(parse_country_flag, values))
+
+
+def _company_names(values: Sequence[str]) -> tuple[str, ...]:
+    """Require company flag values to be non-blank."""
+    if not all(name.strip() for name in values):
+        raise InvalidValueError("company", "must not be blank")
+    return tuple(values)
+
+
+def _since_text(age: timedelta) -> str:
+    """Write an age as `<n>d` for whole days, else as `<n>h`."""
+    if age % timedelta(days=1) == timedelta(0):
+        return f"{age // timedelta(days=1)}d"
+    return f"{age // timedelta(hours=1)}h"
+
+
+def _min_salary_text(money: Money | None) -> str | None:
+    """Write a salary threshold as `AMOUNT:CURRENCY:PERIOD`, or `None` for none."""
+    if money is None or money.min is None or money.period is None:
+        return None
+    return f"{money.min:f}:{money.currency}:{money.period}"
 
 
 def _threshold(amount: Decimal, currency: str, period: str, field: str) -> Money:

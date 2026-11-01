@@ -6,7 +6,10 @@ a `KalibrrPage`. `parse_kalibrr` is pure and never lets anything but a
 `ParseError` escape. A job that cannot be read is logged at `WARNING` and
 counted in `SourceBatch.rejected`. Pages overlap, so a job whose id the same
 fetch already saw, whether it was drafted or rejected, is neither a draft nor a
-rejection the second time.
+rejection the second time. The job's `description` and `qualifications`, both
+HTML, are joined and normalized to Markdown. The parser and
+`description_from_raw`, which reads the `raw` a draft stores, both read them
+through one helper.
 """
 
 import json
@@ -29,7 +32,9 @@ from ijob_core.model import (
 from ijob_core.money import Money, Period
 
 from ijob_sources.collect import SourceBatch
+from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError
+from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -173,6 +178,38 @@ def parse_kalibrr(body: bytes, key: SourceKey) -> KalibrrPage:
     )
 
 
+def description_from_raw(raw: str) -> str | None:
+    """Read the normalized description out of a stored job.
+
+    Args:
+        raw: The `raw` text of a Kalibrr draft, the job object as JSON.
+
+    Returns:
+        The job's `description` followed by its `qualifications`, as Markdown.
+        A field that is missing or not text is left out; `None` when neither
+        gives any text.
+
+    Raises:
+        ParseError: `raw` is not a JSON object.
+    """
+    job = raw_object(raw)
+    return _description(job)
+
+
+def _description(job: dict[str, Any]) -> str | None:
+    """Return `description` then `qualifications` as one Markdown text.
+
+    The two HTML fragments are joined into one document before they are
+    normalized. A field that is missing or not text is left out.
+    """
+    parts = [
+        text
+        for name in ("description", "qualifications")
+        if isinstance(text := job.get(name), str)
+    ]
+    return normalize("\n".join(parts), TextForm.HTML) if parts else None
+
+
 def _raw_id(job: dict[str, Any]) -> int | None:
     """Return the job's `id` when it is an integer, else `None`."""
     job_id = job.get("id")
@@ -213,6 +250,7 @@ def _to_draft(job: object, key: SourceKey) -> SightingDraft:
         raw=_raw(job),
         salaries=() if salary is None else (salary,),
         country=country,
+        description=_description(job),
     )
 
 

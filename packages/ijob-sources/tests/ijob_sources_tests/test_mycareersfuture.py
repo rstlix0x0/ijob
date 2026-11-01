@@ -11,7 +11,11 @@ import pytest
 from ijob_core.model import ExternalId, SourceKind, SourceRef, parse_source_key
 from ijob_sources.collect import CollectResult, SourceBatch, collect
 from ijob_sources.errors import ParseError
-from ijob_sources.mycareersfuture import MyCareersFutureBoard, parse_mycareersfuture
+from ijob_sources.mycareersfuture import (
+    MyCareersFutureBoard,
+    description_from_raw,
+    parse_mycareersfuture,
+)
 from ijob_sources.polite_http import PoliteClient
 
 _FIXTURES = resources.files("ijob_sources_tests.fixtures.mycareersfuture")
@@ -292,3 +296,80 @@ def test_mycareersfuture_board_satisfies_source_protocol() -> None:
     assert board.ref == SourceRef(SourceKind.MYCAREERSFUTURE, _KEY)
     assert result.failures == []
     assert len(result.batches[board.ref].drafts) == 4
+
+
+_EXPECTED_DESCRIPTION = (
+    "**Location:** Central (Hybrid)\n"
+    "\n"
+    "**What You'll Be Doing**\n"
+    "\n"
+    "- Design, develop, and maintain scalable, high-performance "
+    "full-stack applications .\n"
+    "- Take ownership of features throughout the entire software "
+    "development lifecycle, from requirements gathering and "
+    "solution design to implementation, testing, deployment, and "
+    "post-production support.\n"
+    "- Drive continuous improvements in software engineering "
+    "practices, development workflows, CI/CD pipelines, and "
+    "automation initiatives.\n"
+    "- Conduct code reviews and provide constructive feedback to "
+    "ensure high standards of code quality, maintainability, and "
+    "performance.\n"
+    "- Collaborate with product managers, designers, and "
+    "cross-functional teams to deliver innovative and user-centric "
+    "solutions.\n"
+    "- Support client integrations, troubleshoot technical issues, "
+    "and provide timely resolution to production challenges.\n"
+    "- Identify opportunities to improve application reliability, "
+    "scalability, security, and development efficiency.\n"
+    "- Ensure adherence to engineering best practices, coding "
+    "standards, Agile methodologies, and established software "
+    "delivery processes.\n"
+    "\n"
+    "**What We're Looking For**\n"
+    "\n"
+    "- Min. 1-7 years of experience designing, building, and "
+    "deploying enterprise-scale full-stack applications.\n"
+    "- Hands-on experience with modern front-end frameworks such "
+    "as React, Next.js, Angular, or Vue.js.\n"
+    "- Strong proficiency in one or more programming languages, "
+    "including Golang, Java, Python, or Node.js.\n"
+    "- Hands-on experience with cloud platforms such as AWS or "
+    "Azure, including deploying and supporting cloud-native "
+    "applications.\n"
+    "- Familiarity with CI/CD pipelines, DevOps practices, and "
+    "modern software deployment methodologies.\n"
+    "- Experience working with IAC such as Terraform would be "
+    "greatly advantageous"
+)
+
+
+def test_draft_carries_description() -> None:
+    draft = parse_mycareersfuture(_PAGE0, _KEY).batch.drafts[0]
+
+    assert draft.description == _EXPECTED_DESCRIPTION
+
+
+def test_description_from_raw_matches_draft() -> None:
+    draft = parse_mycareersfuture(_PAGE0, _KEY).batch.drafts[0]
+
+    assert description_from_raw(draft.raw) == draft.description
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{}, {"description": None}, {"description": 5}, {"description": ""}],
+    ids=["absent", "null", "non-text", "empty"],
+)
+def test_description_missing_gives_none(change: dict[str, Any]) -> None:
+    job = {k: v for k, v in _JOBS[0].items() if k != "description"} | change
+    draft = parse_mycareersfuture(_page([job]), _KEY).batch.drafts[0]
+
+    assert draft.description is None
+    assert description_from_raw(draft.raw) is None
+
+
+@pytest.mark.parametrize("raw", ["<html>", "[]", "null", '"text"'])
+def test_description_from_raw_rejects_non_object(raw: str) -> None:
+    with pytest.raises(ParseError):
+        description_from_raw(raw)

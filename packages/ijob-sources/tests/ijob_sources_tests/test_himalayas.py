@@ -20,7 +20,11 @@ from ijob_core.model import (
 from ijob_core.money import Money, Period
 from ijob_sources.collect import CollectResult, SourceBatch, collect
 from ijob_sources.errors import ParseError
-from ijob_sources.himalayas import HimalayasBoard, parse_himalayas
+from ijob_sources.himalayas import (
+    HimalayasBoard,
+    description_from_raw,
+    parse_himalayas,
+)
 from ijob_sources.polite_http import CachedResponse, PoliteClient
 
 _KEY = parse_source_key("all")
@@ -385,3 +389,97 @@ def _robots_then(handler: _Handler) -> _Handler:
         return handler(request)
 
     return wrapped
+
+
+_DESCRIPTION = (
+    "[ALTEN](https://himalayas.app/companies/alten) Mexico is a subsidiary "
+    "of [ALTEN](https://himalayas.app/companies/alten) Group. "
+    "[ALTEN](https://himalayas.app/companies/alten) group has been a "
+    "leader in engineering and information technology for more than 30 "
+    "years and operates in 30 countries across Europe, North America, "
+    "Asia, Africa, and the Middle East and employs more than 46,000 "
+    "people, 88% of whom are engineers.\n"
+    "\n"
+    "We are looking for Systems Requirements Engineer MED:\n"
+    "\n"
+    "**Intermediate System Requirements Engineer \u2013 Infotainment "
+    "Subsystem**\n"
+    "Acts as the key liaison between **Design & Release Engineers (DREs)** "
+    "and **System Architects**, ensuring that technical and regulatory "
+    "needs are translated into clear, specific, and actionable "
+    "requirements for the design, development, validation, and release of "
+    "vehicle electrical and electronic components.\n"
+    "\n"
+    "Utilizes **Requirements Engineering methodologies** to elicit, "
+    "analyze, document, and maintain system requirements. Experienced in "
+    "specialized tools such as **IBM DOORS** for requirements management, "
+    "**IBM Engineering Workflow Management (RTC)** for workflow control, "
+    "and **JIRA** for issue tracking.\n"
+    "\n"
+    "Collaborates closely in system design and development, actively "
+    "participating in the **Software Development Life Cycle (SDLC)**. "
+    "Applies analytical methods such as **DFMEA** to ensure the quality "
+    "and reliability of the infotainment system, including the integration "
+    "of advanced technologies such as **Apple CarPlay** and **Android "
+    "Auto**.\n"
+    "\n"
+    "### Activities:\n"
+    "\n"
+    "### 1\\. Requirements Definition & Management\n"
+    "\n"
+    "  - Write, update, and maintain technical requirements for the "
+    "**Infotainment subsystem** (and Cabin Thermal & Safety, as "
+    "applicable) throughout production phases."
+)
+
+
+def test_draft_carries_description() -> None:
+    draft = parse_himalayas(_PAGE1, _KEY).batch.drafts[0]
+
+    assert draft.description == _DESCRIPTION
+
+
+def test_description_from_raw_matches_draft() -> None:
+    draft = parse_himalayas(_PAGE1, _KEY).batch.drafts[0]
+
+    assert draft.description is not None
+    assert description_from_raw(draft.raw) == draft.description
+
+
+def test_description_missing_gives_none() -> None:
+    job = {name: value for name, value in _SRI_LANKA.items() if name != "description"}
+
+    draft = _only(job)
+
+    assert draft.description is None
+    assert description_from_raw(draft.raw) is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(None, id="null"),
+        pytest.param(7, id="number"),
+        pytest.param(["<p>text</p>"], id="list"),
+        pytest.param("", id="empty"),
+        pytest.param(" \n ", id="blank"),
+    ],
+)
+def test_description_without_usable_text_gives_none(value: object) -> None:
+    draft = _only({**_SRI_LANKA, "description": value})
+
+    assert draft.description is None
+    assert description_from_raw(draft.raw) is None
+
+
+def test_description_drops_a_lone_surrogate() -> None:
+    draft = _only({**_SRI_LANKA, "description": "a\ud800b"})
+
+    assert draft.description == "ab"
+    assert description_from_raw(draft.raw) == "ab"
+
+
+@pytest.mark.parametrize("raw", ["not json", "[]", '"text"', "null"])
+def test_description_from_raw_rejects_a_raw_that_is_no_object(raw: str) -> None:
+    with pytest.raises(ParseError):
+        description_from_raw(raw)

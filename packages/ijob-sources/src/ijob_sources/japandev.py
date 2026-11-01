@@ -8,6 +8,7 @@ fetch, costs one plain request for its page, whose `JobPosting` JSON-LD block
 `read_job_posting` turns into a draft. A job that cannot be fetched or read is
 logged at `WARNING` and counted in `SourceBatch.rejected`; the rest of the
 batch survives. Nothing but the sitemap and the job pages is requested.
+`description_from_raw` reads a draft's description back out of its `raw` text.
 """
 
 import json
@@ -26,8 +27,10 @@ from ijob_core.model import (
 )
 
 from ijob_sources.collect import SourceBatch
+from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError, SourcesError
 from ijob_sources.jsonld import job_postings, read_job_posting
+from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -196,6 +199,7 @@ def _to_draft(html_text: str, url: str, slug: str, key: SourceKey) -> SightingDr
         salaries=fields.salaries,
         country=fields.country,
         remote=fields.remote,
+        description=_description(posting.get("description")),
     )
 
 
@@ -209,3 +213,35 @@ def _raw(url: str, posting: object) -> str:
         return json.dumps({"item": url, "jobposting": posting})
     except RecursionError as error:
         raise InvalidValueError("jobposting", "is nested too deeply") from error
+
+
+def description_from_raw(raw: str) -> str | None:
+    """Read the description out of the `raw` text of a Japan Dev draft.
+
+    Args:
+        raw: The `raw` text of a draft: the sitemap URL and the page's
+            `JobPosting` object, as a JSON object with `item` and `jobposting`.
+
+    Returns:
+        The posting's `description` as Markdown, or `None` when it is missing,
+        is not text, or is blank.
+
+    Raises:
+        ParseError: `raw` is not a JSON object.
+    """
+    payload = raw_object(raw)
+    posting = payload.get("jobposting")
+    return _description(
+        posting.get("description") if isinstance(posting, dict) else None
+    )
+
+
+def _description(value: object) -> str | None:
+    """Normalize a posting's HTML description.
+
+    Returns:
+        The Markdown text, or `None` when `value` is not text or is blank.
+    """
+    if not isinstance(value, str):
+        return None
+    return normalize(value, TextForm.HTML)

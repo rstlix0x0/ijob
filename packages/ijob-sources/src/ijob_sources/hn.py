@@ -6,7 +6,8 @@ each top-level comment into a draft. Companies write the first line of a
 comment by convention as `Company | Title | Location | ...`, so every draft is
 marked `low_confidence`. A comment whose first line has fewer than two fields,
 or whose draft is invalid, is logged at `WARNING` and counted in
-`SourceBatch.rejected`.
+`SourceBatch.rejected`. The whole comment is the draft's description;
+`description_from_raw` reads it back out of the draft's `raw` text.
 """
 
 import html
@@ -26,7 +27,9 @@ from ijob_core.model import (
 )
 
 from ijob_sources.collect import SourceBatch
+from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError
+from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -226,6 +229,7 @@ def _to_draft(hit: object, key: SourceKey) -> SightingDraft:
         posted_at=_created_at(hit),
         raw=_raw(hit),
         low_confidence=True,
+        description=_description(hit.get("comment_text")),
     )
 
 
@@ -274,3 +278,31 @@ def _raw(hit: dict[str, Any]) -> str:
         return json.dumps(hit)
     except RecursionError as error:
         raise InvalidValueError("comment", "is nested too deeply") from error
+
+
+def description_from_raw(raw: str) -> str | None:
+    """Read the description out of the `raw` text of a Hacker News draft.
+
+    Args:
+        raw: The `raw` text of a draft: the Algolia comment hit as JSON.
+
+    Returns:
+        The comment's `comment_text` as Markdown, or `None` when it is
+        missing, is not text, or is blank.
+
+    Raises:
+        ParseError: `raw` is not a JSON object.
+    """
+    hit = raw_object(raw)
+    return _description(hit.get("comment_text"))
+
+
+def _description(value: object) -> str | None:
+    """Normalize a comment's HTML text.
+
+    Returns:
+        The Markdown text, or `None` when `value` is not text or is blank.
+    """
+    if not isinstance(value, str):
+        return None
+    return normalize(value, TextForm.HTML)
