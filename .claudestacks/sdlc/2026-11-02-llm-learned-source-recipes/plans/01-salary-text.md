@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-02
 built-on: 6ee2c2bd4580
 ---
@@ -103,3 +103,18 @@ passes and the CLAUDE.md gate is green. Commit `feat(sources): read salary text 
 
 - `uv run --locked pytest packages/ijob-sources` passes.
 - The gate exits 0.
+
+## Review findings
+
+- fixed — `salary_text.py:172` `1.000.5` read as 1000.5; a `.` decimal after `.` thousands now gives None. `uv run --locked pytest packages/ijob-sources` → `1635 passed`.
+- fixed — `salary_text.py:127` a `+` only counted at the end of the text; a `+` right after an amount now gives min only (`$100k+ per year`, `$100,000+ USD`), and the text-ending rule stays for `$20/hr+`. Same run as above.
+- fixed — `salary_text.py:98` docstring wording ("a lone `.`", "`min` before `or more`") now matches the code.
+- fixed — `salary_text.py:54` digit runs inside words counted as amounts (`H1B visa, $120k` → 1–120000; `$50k/yr + 401k` → 50000–401000). Now digits joined to preceding letters are skipped unless the letters are a known code (`USD50,000` still reads), and `401(k)`, `403(b)` and `457(b)`, with or without parentheses, are skipped unless a currency symbol comes right before them (`$401k` still reads 401000). `uv run --locked pytest packages/ijob-sources` → `1654 passed`.
+- open — no test pins earliest-symbol-wins among €/£/₹, earliest-period-word-wins, or `k` followed by a letter not multiplying.
+
+## Deviations
+
+- 2026-11-02 — The board row was not clean at start (another chain, `2026-11-01-llm-layer`, reads `spec disproven by plan 07`); this chain's row was clean.
+- 2026-11-02 — The coder chose these where the rule text is silent: several currency symbols → earliest in the text; several period words → earliest; a code is a whole uppercase letter run (`USD50` matches, `NOKIA` does not); thousands separators may mix when each is followed by three digits; a `.` decimal must be the last separator and must not follow a `.` thousands separator.
+- 2026-11-02 — Plans 01 and 02 were reviewed together by one reviewer over the combined diff, not one review per batch. The task-briefer ledger and briefs were skipped: the coders read the plan's task section directly.
+- 2026-11-02 — Not committed: the instruction to execute did not ask for commits.
