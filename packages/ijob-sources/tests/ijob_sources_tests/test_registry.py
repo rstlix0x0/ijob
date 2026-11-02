@@ -240,7 +240,7 @@ def test_every_other_kind_has_no_refresh_interval(kind: SourceKind) -> None:
 
 
 def test_workable_host_is_paced_at_three_seconds() -> None:
-    assert HOST_INTERVALS == {"apply.workable.com": 3.0}
+    assert HOST_INTERVALS["apply.workable.com"] == 3.0
 
 
 def test_known_ids_reach_a_detail_feed() -> None:

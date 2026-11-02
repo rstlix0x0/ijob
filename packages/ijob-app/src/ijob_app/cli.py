@@ -171,6 +171,7 @@ from ijob_sources.polite_http import ConditionalCache, PoliteClient
 from ijob_sources.public_host import HostResolver, system_resolver
 from ijob_sources.registry import HOST_INTERVALS, refresh_interval
 
+from ijob_app.cli_extract import extract_command, unread_note
 from ijob_app.cli_llm import (
     CONFIG_HELP,
     DB_HELP,
@@ -183,6 +184,7 @@ from ijob_app.cli_llm import (
     stop_exits,
     traces_app,
 )
+from ijob_app.cli_progress import ProgressLine, fetch_progress_text
 from ijob_app.cli_recipes import learn_page, reanalyze_command
 from ijob_app.config import (
     FilterFlags,
@@ -495,6 +497,7 @@ def _sources_app(
         read_ref=_read_ref,
         is_interactive=is_interactive,
     )
+    extract_command(sources, open_session=recipe_session, read_ref=_read_ref)
 
     return sources
 
@@ -571,10 +574,20 @@ def _posting_line(service: Service, posting: Posting) -> str:
 
 
 async def _collect_search(
-    service: Service, layers: FilterLayers, refs: list[SourceRef]
+    service: Service,
+    layers: FilterLayers,
+    refs: list[SourceRef],
+    progress: ProgressLine,
 ) -> list[SearchItem]:
-    """Gather every item of a search."""
-    return [item async for item in service.search(layers, refs)]
+    """Gather every item of a search, showing how many the judge has read."""
+    items: list[SearchItem] = []
+    kept = 0
+    async for item in service.search(layers, refs):
+        items.append(item)
+        if item.verdict is not None:
+            kept += item.verdict.keep
+            progress.show_live(f"judging jobs: {len(items)} read, {kept} kept")
+    return items
 
 
 def _print_search(
@@ -600,8 +613,12 @@ def _print_search(
     Returns:
         Whether the judging ended on a stop that makes the command exit `1`.
     """
-    with llm_failures():
-        items = asyncio.run(_collect_search(service, layers, refs))
+    progress = ProgressLine(sys.stderr)
+    try:
+        with llm_failures():
+            items = asyncio.run(_collect_search(service, layers, refs, progress))
+    finally:
+        progress.close()
     report = service.last_report
     if report is None:
         for item in items:
@@ -927,7 +944,7 @@ def _root() -> None:
     _silence_source_logs()
 
 
-def make_app(
+def make_app(  # noqa: PLR0915  # one registration per command
     client_factory: ClientFactory,
     *,
     now: Callable[[], datetime] = _utc_now,
@@ -1078,9 +1095,22 @@ def make_app(
                 ) as service,
                 _print_rejections(enabled=verbose),
             ):
-                report = asyncio.run(service.refresh(refs))
+                progress = ProgressLine(sys.stderr)
+                try:
+                    report = asyncio.run(
+                        service.refresh(
+                            refs,
+                            on_progress=lambda now: progress.show_live(
+                                fetch_progress_text(now)
+                            ),
+                        )
+                    )
+                finally:
+                    progress.close()
                 _report(report)
                 halted = _print_search(service, layers, refs, show_dropped=dropped)
+                if note := unread_note(service.unread_count(refs)):
+                    typer.echo(note, err=True)
         except CacheUnavailableError as error:
             typer.echo(f"error: {error.reason}", err=True)
             raise typer.Exit(code=_EXIT_REFUSED) from error

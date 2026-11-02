@@ -72,6 +72,7 @@ from ijob_sources.seeds import load_seeds
 
 from ijob_app import recipe_ops
 from ijob_app.config import FilterLayers, effective_filters
+from ijob_app.extract_ops import ExtractProgress, ExtractReport, extract_operation
 from ijob_app.home import IjobHome
 from ijob_app.llm_ops import (
     JudgeStatus,
@@ -98,6 +99,21 @@ type ClientFactory = Callable[[ConditionalCache | None], PoliteClient]
 MAX_CV_BYTES: Final = 20_000_000
 _PDF_MAGIC: Final = b"%PDF-"
 _CV_FILE_NAME: Final = "cv.pdf"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FetchProgress:
+    """How far fetching the sources has got.
+
+    Attributes:
+        total: The sources being fetched.
+        done: The sources that have ended, failed ones included.
+        failed: The sources that failed.
+    """
+
+    total: int
+    done: int
+    failed: int
 
 
 class UnknownSourceError(InvalidValueError):
@@ -393,7 +409,12 @@ class Service:
         self._llm_runtime: LlmRuntime | None = None
         self.last_report: OperationReport | None = None
 
-    async def refresh(self, refs: Sequence[SourceRef]) -> RefreshReport:
+    async def refresh(
+        self,
+        refs: Sequence[SourceRef],
+        *,
+        on_progress: Callable[[FetchProgress], None] | None = None,
+    ) -> RefreshReport:
         """Fetch the chosen sources that are due and record what they show.
 
         The clock is read twice: once to split the sources by interval before
@@ -402,6 +423,8 @@ class Service:
 
         Args:
             refs: The sources to read; empty means every source in the table.
+            on_progress: Called once before the first fetch and as each source
+                ends.
 
         Returns:
             What was fetched, kept, rejected, refused and found stale.
@@ -413,7 +436,7 @@ class Service:
         rows = self._choose_sources(refs)
         due, kept = _split_by_interval(rows, self._now())
         sources, refused = self._build_sources(due)
-        result = await self._collect(sources)
+        result = await self._collect(sources, on_progress)
         seen_at = self._now()
         fetched = self._record(due, result, seen_at)
         return RefreshReport(
@@ -429,6 +452,39 @@ class Service:
             refused=refused,
             stale=self._stale(rows, seen_at),
         )
+
+    async def search_postings(
+        self, layers: FilterLayers, refs: Sequence[SourceRef]
+    ) -> list[Posting]:
+        """List the postings a search goes through, before any judging.
+
+        The read runs off the event loop on its own connection, as a large store
+        takes seconds to read and a screen must not freeze meanwhile.
+
+        Args:
+            layers: The filters the config file and the flags set.
+            refs: The sources to read; empty means every source.
+
+        Returns:
+            The open postings that pass the layers and the stored instructions.
+
+        Raises:
+            UnknownSourceError: A named source has no row or was removed.
+            InvalidValueError: A filter in the stored instructions is unusable.
+            sqlite3.Error: A store read failed.
+        """
+        stored = self._store.instructions()
+        layer = None if stored is None else json.loads(stored.filters_json)
+        spec, _ = effective_filters(layers, layer)
+        self._choose_sources(refs)
+        at = self._now()
+
+        def read() -> list[Posting]:
+            with Store.open(self._db_path) as store:
+                postings = store.open_postings(now=at, sources=refs or None)
+            return [posting for posting in postings if keep(posting, spec, now=at)]
+
+        return await asyncio.to_thread(read)
 
     def open_postings(
         self, spec: FilterSpec, refs: Sequence[SourceRef]
@@ -451,7 +507,11 @@ class Service:
         return [posting for posting in postings if keep(posting, spec, now=at)]
 
     async def search(
-        self, layers: FilterLayers, refs: Sequence[SourceRef]
+        self,
+        layers: FilterLayers,
+        refs: Sequence[SourceRef],
+        *,
+        listed: Sequence[Posting] | None = None,
     ) -> AsyncIterator[SearchItem]:
         """List the open postings that pass the filters, judged by the user's rules.
 
@@ -469,6 +529,8 @@ class Service:
             layers: The filters the packaged config, the user's file and the
                 flags set.
             refs: The sources to read; empty means every source.
+            listed: What `search_postings` already returned for these filters,
+                so they are not read twice.
 
         Yields:
             One item per posting.
@@ -486,9 +548,9 @@ class Service:
         """
         self.last_report = None
         stored = self._store.instructions()
-        layer = None if stored is None else json.loads(stored.filters_json)
-        spec, _ = effective_filters(layers, layer)
-        postings = self.open_postings(spec, refs)
+        postings = (
+            await self.search_postings(layers, refs) if listed is None else listed
+        )
         if stored is None or not stored.rules:
             for posting in postings:
                 yield SearchItem(
@@ -1068,6 +1130,61 @@ class Service:
         recipe_ops.accept_recipe(self._store, proposal, at=self._now())
         return self._require_source(proposal.ref)
 
+    def unread_count(self, refs: Sequence[SourceRef]) -> int:
+        """Count the skipped items of some sources that no model has read yet.
+
+        Args:
+            refs: The sources to count; empty means every source.
+
+        Returns:
+            The number of pending items.
+
+        Raises:
+            UnknownSourceError: A named source has no row or was removed.
+            sqlite3.Error: The store cannot be read.
+        """
+        rows = self._choose_sources(refs)
+        return len(self._store.pending_skipped([row.ref for row in rows]))
+
+    async def extract_skipped(
+        self,
+        refs: Sequence[SourceRef],
+        *,
+        on_progress: Callable[[ExtractProgress], None] | None = None,
+    ) -> ExtractReport:
+        """Read the skipped jobs of some sources with the `job_extract` model.
+
+        Each job read becomes a low-confidence posting of its source. An item
+        that was read, as a job or not, is never sent again; one that could not
+        be read stays pending.
+
+        Args:
+            refs: The sources to read; empty means every source.
+            on_progress: Called once before the first call and after each item.
+
+        Returns:
+            What was added, set aside and left unread, and what it cost.
+
+        Raises:
+            UnknownSourceError: A named source has no row or was removed.
+            MissingModelError: No model is set for the `job_extract` task; no
+                call is made.
+            ProviderUnavailableError: The provider cannot be used.
+            InvalidValueError: The config file is unusable.
+            sqlite3.Error: The store cannot be read or written.
+        """
+        rows = self._choose_sources(refs)
+        pending = self._store.pending_skipped([row.ref for row in rows])
+        report = await extract_operation(
+            self._runtime(),
+            self._store,
+            pending,
+            now=self._now(),
+            on_progress=on_progress,
+        )
+        self._keep_report(report.report)
+        return report
+
     def posting_sources(self, posting_id: PostingId) -> list[SourceRef]:
         """List the sources that have shown a posting.
 
@@ -1242,7 +1359,11 @@ class Service:
             client.guard_requests(public_host_guard(self._resolver))
         return client
 
-    async def _collect(self, sources: list[Source]) -> CollectResult:
+    async def _collect(
+        self,
+        sources: list[Source],
+        on_progress: Callable[[FetchProgress], None] | None = None,
+    ) -> CollectResult:
         """Fetch every source with clients opened and closed on this loop.
 
         The recipe sources go through a client that refuses non-public
@@ -1251,6 +1372,8 @@ class Service:
 
         Args:
             sources: The sources to fetch.
+            on_progress: Called once before the first fetch and as each source
+                ends. It is not called when there is no source.
 
         Returns:
             What `collect` returned for the sources, merged.
@@ -1259,15 +1382,29 @@ class Service:
         others = [
             source for source in sources if source.ref.kind is not SourceKind.RECIPE
         ]
+        done = 0
+        failed = 0
+
+        def source_done(source_failed: bool) -> None:  # noqa: FBT001
+            nonlocal done, failed
+            done += 1
+            failed += source_failed
+            if on_progress is not None:
+                on_progress(FetchProgress(total=len(sources), done=done, failed=failed))
+
+        if on_progress is not None and sources:
+            on_progress(FetchProgress(total=len(sources), done=0, failed=0))
         async with self._client(self._cache) as client:
             if not recipes:
-                return await collect(others, client)
+                return await collect(others, client, on_done=source_done)
             async with (
                 self._client(self._cache, public_only=True) as guarded,
                 asyncio.TaskGroup() as group,
             ):
-                plain = group.create_task(collect(others, client))
-                checked = group.create_task(collect(recipes, guarded))
+                plain = group.create_task(collect(others, client, on_done=source_done))
+                checked = group.create_task(
+                    collect(recipes, guarded, on_done=source_done)
+                )
         first, second = plain.result(), checked.result()
         return CollectResult(
             batches={**first.batches, **second.batches},
@@ -1297,6 +1434,17 @@ class Service:
             for ref, batch in zip(fetched, batches, strict=True)
             for external_id in batch.still_listed
         ]
+        for ref, batch in zip(fetched, batches, strict=True):
+            # A skipped item a model already read as a job stays listed, so its
+            # posting is not closed while the source still shows the item.
+            still_listed.extend(
+                (ref, external_id)
+                for external_id in self._store.add_skipped(
+                    ref,
+                    ((item.text, item.url, item.reason) for item in batch.skipped),
+                    seen_at=seen_at,
+                )
+            )
         self._store.record(
             (draft for batch in batches for draft in batch.drafts),
             seen_at=seen_at,

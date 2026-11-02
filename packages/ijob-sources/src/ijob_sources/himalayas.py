@@ -27,9 +27,10 @@ from ijob_core.model import (
 )
 from ijob_core.money import Money, Period
 
-from ijob_sources.collect import SourceBatch
+from ijob_sources.collect import SkippedItem, SourceBatch, skipped_item
 from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError
+from ijob_sources.item_url import url_of
 from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
 
@@ -91,16 +92,18 @@ class HimalayasBoard:
         """
         drafts: list[SightingDraft] = []
         rejected = 0
+        skipped: list[SkippedItem] = []
         url = _FIRST_URL
         for page_number in range(_MAX_PAGES):
             response = await client.get(url, conditional=page_number == 0)
             page = parse_himalayas(response.content, self._key)
             drafts.extend(page.batch.drafts)
             rejected += page.batch.rejected
+            skipped.extend(page.batch.skipped)
             if page.next_cursor is None:
                 break
             url = f"{_FIRST_URL}&cursor={quote(page.next_cursor, safe='')}"
-        return SourceBatch(drafts=drafts, rejected=rejected)
+        return SourceBatch(drafts=drafts, rejected=rejected, skipped=tuple(skipped))
 
 
 def parse_himalayas(body: bytes, key: SourceKey) -> HimalayasPage:
@@ -135,11 +138,13 @@ def parse_himalayas(body: bytes, key: SourceKey) -> HimalayasPage:
 
     drafts: list[SightingDraft] = []
     rejected = 0
+    skipped: list[SkippedItem] = []
     for index, job in enumerate(jobs):
         try:
             drafts.append(_to_draft(job, key))
         except InvalidValueError as error:
             rejected += 1
+            skipped.append(skipped_item(job, url_of(job, "applicationLink"), error))
             _LOGGER.warning(
                 "rejected himalayas job %s from %s: %s",
                 _job_label(job, index),
@@ -147,7 +152,7 @@ def parse_himalayas(body: bytes, key: SourceKey) -> HimalayasPage:
                 error,
             )
     return HimalayasPage(
-        batch=SourceBatch(drafts=drafts, rejected=rejected),
+        batch=SourceBatch(drafts=drafts, rejected=rejected, skipped=tuple(skipped)),
         next_cursor=cursor or None,
     )
 

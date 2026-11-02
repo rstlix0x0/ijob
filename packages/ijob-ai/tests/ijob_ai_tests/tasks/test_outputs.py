@@ -41,7 +41,7 @@ def test_score_and_verdict_edges() -> None:
     with pytest.raises(ValidationError):
         ScoreOut(score=50, reasons=[])
     with pytest.raises(ValidationError):
-        ScoreOut(score=50, reasons=["a"] * 6)
+        ScoreOut(score=50, reasons=[])
     with pytest.raises(ValidationError):
         ScoreOut(score=50, reasons=["a" * 201])
     assert VerdictOut(keep=True, reason="r" * 200, rule=None).rule is None
@@ -176,3 +176,9 @@ def test_source_recipe_out_needs_exactly_one() -> None:
         SourceRecipeOut()
     assert SourceRecipeOut(recipe=recipe).json_url is None
     assert SourceRecipeOut(json_url="https://jobs.example.test/api").recipe is None
+
+
+def test_a_score_with_too_many_reasons_keeps_the_first_five() -> None:
+    answer = ScoreOut(score=48, reasons=[str(n) for n in range(6)])
+
+    assert answer.reasons == ["0", "1", "2", "3", "4"]

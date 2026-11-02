@@ -30,11 +30,13 @@ from ijob_core.money import Money, Period
 from ijob_core.store import (
     _MIGRATIONS,
     RecordResult,
+    SkippedStatus,
     SourceOrigin,
     SourceRow,
     Store,
     StoredProfile,
     _Outcome,
+    skipped_item_id,
 )
 
 _A = SourceRef(SourceKind.GREENHOUSE, parse_source_key("alpha"))
@@ -46,7 +48,7 @@ _T1_TEXT = "2026-10-01T08:00:00.000000+00:00"
 _T2_TEXT = "2026-10-02T09:30:15.250000+00:00"
 _ALL_TABLES = (
     "cv,cv_profile,instructions,labels,postings,scores,sightings,"
-    "source_recipes,sources,verdicts"
+    "skipped_items,source_recipes,sources,verdicts"
 )
 
 
@@ -88,11 +90,11 @@ def _draft(
     return SightingDraft(source=source, external_id=ExternalId(external_id), **values)
 
 
-def test_fresh_database_is_version_5(tmp_path: Path) -> None:
+def test_fresh_database_is_version_6(tmp_path: Path) -> None:
     path = tmp_path / "ijob.db"
     with Store.open(path):
         pass
-    assert _scalar(path, "PRAGMA user_version") == 5
+    assert _scalar(path, "PRAGMA user_version") == 6
     tables = _scalar(
         path,
         "SELECT group_concat(name) FROM "
@@ -121,7 +123,7 @@ def test_open_is_idempotent(tmp_path: Path) -> None:
         )
     with Store.open(path):
         pass
-    assert _scalar(path, "PRAGMA user_version") == 5
+    assert _scalar(path, "PRAGMA user_version") == 6
     assert _scalar(path, "SELECT count(*) FROM postings") == 1
 
 
@@ -387,7 +389,7 @@ def test_version_1_database_migrates_and_keeps_rows(tmp_path: Path) -> None:
         conn.execute("PRAGMA user_version = 1")
     with Store.open(path) as store:
         postings = store.postings(sources=[_A])
-    assert _scalar(path, "PRAGMA user_version") == 5
+    assert _scalar(path, "PRAGMA user_version") == 6
     assert len(postings) == 1
     posting = postings[0]
     assert (posting.title, posting.company) == ("Engineer", "Acme")
@@ -898,7 +900,7 @@ def test_migration_3_on_version_2_database(tmp_path: Path) -> None:
     _version_2_database(path)
     with Store.open(path) as store:
         (posting,) = store.postings(sources=[_A])
-    assert _scalar(path, "PRAGMA user_version") == 5
+    assert _scalar(path, "PRAGMA user_version") == 6
     assert posting.title == "Engineer"
     assert posting.description is None
     tables = _scalar(
@@ -1119,7 +1121,7 @@ def test_migration_4_creates_tables(tmp_path: Path) -> None:
         cv = store.cv()
         assert store.cv_profile() is None
         assert store.instructions() is None
-    assert _scalar(path, "PRAGMA user_version") == 5
+    assert _scalar(path, "PRAGMA user_version") == 6
     assert posting is not None
     assert posting.title == "Engineer"
     assert cv == StoredCv("cv.pdf", "ab" * 32, 10, _T1)
@@ -1148,7 +1150,7 @@ def test_migration_5_adds_source_recipes(tmp_path: Path) -> None:
     fresh = tmp_path / "fresh.db"
     with Store.open(fresh):
         pass
-    assert _scalar(fresh, "PRAGMA user_version") == 5
+    assert _scalar(fresh, "PRAGMA user_version") == 6
     assert _rows(fresh, "PRAGMA table_info(source_recipes)") == [
         (0, "ref", "TEXT", 1, None, 1),
         (1, "recipe", "TEXT", 1, None, 0),
@@ -1165,7 +1167,7 @@ def test_migration_5_adds_source_recipes(tmp_path: Path) -> None:
     with Store.open(upgraded) as store:
         row = store.source(_A)
         assert store.recipe(_A) is None
-    assert _scalar(upgraded, "PRAGMA user_version") == 5
+    assert _scalar(upgraded, "PRAGMA user_version") == 6
     assert _rows(upgraded, "PRAGMA table_info(source_recipes)") == _rows(
         fresh, "PRAGMA table_info(source_recipes)"
     )
@@ -1478,3 +1480,39 @@ def test_put_rejects_naive_time(tmp_path: Path) -> None:
             store.put_score(
                 posting_id, *_SCORE_KEY, Score(score=5, reasons=("x",)), made_at=naive
             )
+
+
+def test_skipped_items_are_kept_once_and_listed_while_pending(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.add_skipped(_A, [("one", "https://x.test/1", "no title")], seen_at=_T1)
+        store.add_skipped(_A, [("one", None, "other reason")], seen_at=_T2)
+        store.add_skipped(_B, [("two", None, "no url")], seen_at=_T2)
+        rows = store.pending_skipped([_A])
+        assert store.pending_skipped([]) == []
+
+    assert [(r.item_id, r.text, r.url, r.reason) for r in rows] == [
+        (skipped_item_id("one"), "one", "https://x.test/1", "no title")
+    ]
+    assert rows[0].status is SkippedStatus.PENDING
+    assert rows[0].seen_at == _T1
+
+
+def test_marked_skipped_items_leave_the_pending_list(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.add_skipped(_A, [("one", None, "r"), ("two", None, "r")], seen_at=_T1)
+        store.mark_skipped(_A, skipped_item_id("one"), SkippedStatus.NOT_JOB)
+        store.mark_skipped(
+            _A, skipped_item_id("two"), SkippedStatus.JOB, external_id=ExternalId("e")
+        )
+        pending = store.pending_skipped([_A])
+        again = store.add_skipped(
+            _A, [("one", None, "r"), ("two", None, "r")], seen_at=_T2
+        )
+
+    assert pending == []
+    assert again == [ExternalId("e")]
+
+
+def test_marking_a_job_needs_an_external_id(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store, pytest.raises(InvalidValueError):
+        store.mark_skipped(_A, skipped_item_id("one"), SkippedStatus.JOB)

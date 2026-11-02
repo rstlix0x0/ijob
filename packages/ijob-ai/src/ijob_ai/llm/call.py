@@ -8,7 +8,7 @@ import asyncio
 import json
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from typing import Any, Final, assert_never
+from typing import Any, Final, assert_never, override
 
 import dspy
 from dspy.utils.exceptions import AdapterParseError, LMError
@@ -34,6 +34,26 @@ _PARSE_REASON = "the answer did not match the expected fields"
 _CHAT: Final = "chat"
 _MAX_TEXT_BYTES: Final = 16 * 1024
 _TRUNCATED: Final = "[truncated]"
+
+
+class _ForgivingJSONAdapter(dspy.JSONAdapter):  # type: ignore[misc]  # dspy exports it untyped
+    """The JSON adapter, also reading an answer written in `[[ ## field ## ]]` sections.
+
+    A model asked for JSON sometimes answers correctly in DSPy's section form.
+    """
+
+    @override
+    def parse(self, signature: Any, completion: str) -> dict[str, Any]:
+        """Read a completion as JSON, or else as sections.
+
+        Raises:
+            AdapterParseError: The completion is neither.
+        """
+        try:
+            parsed: dict[str, Any] = super().parse(signature, completion)
+        except AdapterParseError:
+            parsed = dspy.ChatAdapter().parse(signature, completion)
+        return parsed
 
 
 def _openrouter_cost(entry: Mapping[str, Any]) -> float | None:
@@ -239,7 +259,8 @@ async def run_call(  # noqa: PLR0913  # the call's whole contract, one argument 
 ) -> dspy.Prediction:
     """Run a predictor on a copy of the LM, charge its cost and translate failures.
 
-    The call runs with the JSON adapter, under a timeout, with a fresh meter.
+    The call runs with the JSON adapter, which also accepts an answer written
+    in `[[ ## field ## ]]` sections, under a timeout, with a fresh meter.
     Whether the call parsed or not, its metered cost is charged to the budget;
     a call that failed before any answer is charged nothing. The caller checks
     `Budget.try_start` before calling.
@@ -300,7 +321,7 @@ async def run_call(  # noqa: PLR0913  # the call's whole contract, one argument 
     ):
         try:
             async with asyncio.timeout(timeout_s):
-                with dspy.context(lm=attempt, adapter=dspy.JSONAdapter()):
+                with dspy.context(lm=attempt, adapter=_ForgivingJSONAdapter()):
                     prediction = await predict.acall(**inputs)
         except (AdapterParseError, LMError, TimeoutError) as error:
             failure = error

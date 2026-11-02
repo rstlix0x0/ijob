@@ -206,13 +206,12 @@ class PoliteClient:
             now: The wall clock an HTTP-date `Retry-After` is measured against.
             sleep: Waits for the given number of seconds.
             min_interval: Seconds between the start of two requests to one host.
-                A host's robots.txt `Crawl-delay` or `host_intervals` entry
-                raises it for that host, never lowers it.
+                A host's robots.txt `Crawl-delay` can only raise it.
             cache: Where conditional requests keep and find responses; without
                 one, `get` never sends a validator.
-            host_intervals: Minimum seconds between the start of two requests
-                to a host, keyed by netloc and matched case-insensitively; a
-                host absent from it has no override.
+            host_intervals: Seconds between the start of two requests to a host,
+                in place of `min_interval`, keyed by netloc and matched
+                case-insensitively; a host absent from it uses `min_interval`.
         """
         self._clock = clock
         self._now = now
@@ -517,9 +516,8 @@ class PoliteClient:
             last_start = self._pacing.last_start(host)
             if last_start is not None:
                 interval = max(
-                    self._min_interval,
+                    self._host_intervals.get(host, self._min_interval),
                     self._robots.crawl_delay(url) or 0.0,
-                    self._host_intervals.get(host, 0.0),
                 )
                 wait = interval - (self._clock() - last_start)
                 if wait > 0:
@@ -533,20 +531,22 @@ class PoliteClient:
                         )
                         raise
             self._pacing.record(host, self._clock())
-            try:
-                if max_bytes is None:
-                    return await self._http.get(
-                        url, headers=headers, follow_redirects=follow_redirects
-                    )
-                return await self._get_limited(
-                    url,
-                    headers=headers,
-                    follow_redirects=follow_redirects,
-                    max_bytes=max_bytes,
-                    keep_prefix=keep_prefix,
+        # Only the starts are spaced: the lock is released before sending, so
+        # a slow answer does not hold up the next request to the host.
+        try:
+            if max_bytes is None:
+                return await self._http.get(
+                    url, headers=headers, follow_redirects=follow_redirects
                 )
-            except (httpx.RequestError, httpx.InvalidURL, UnicodeError) as error:
-                raise FetchError(url, str(error) or type(error).__name__) from error
+            return await self._get_limited(
+                url,
+                headers=headers,
+                follow_redirects=follow_redirects,
+                max_bytes=max_bytes,
+                keep_prefix=keep_prefix,
+            )
+        except (httpx.RequestError, httpx.InvalidURL, UnicodeError) as error:
+            raise FetchError(url, str(error) or type(error).__name__) from error
 
     async def _get_limited(
         self,

@@ -20,14 +20,50 @@ The adapter contract:
 """
 
 import asyncio
-from collections.abc import Iterable
+import json
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Final, Protocol
 
 from ijob_core.model import ExternalId, SightingDraft, SourceRef
 
 from ijob_sources.errors import SourcesError
 from ijob_sources.polite_http import PoliteClient
+
+_MAX_SKIPPED_TEXT: Final = 20_000
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SkippedItem:
+    """A job a parser could not read, kept so a model can read it later.
+
+    Attributes:
+        text: The item as the source gave it, cut to a bounded length.
+        url: The item's address, when one can be read from it.
+        reason: Why the parser could not read it.
+    """
+
+    text: str
+    url: str | None
+    reason: str
+
+
+def skipped_item(raw: object, url: str | None, error: Exception) -> SkippedItem:
+    """Build the record of a job a parser dropped.
+
+    Args:
+        raw: The item as the source gave it; anything but text becomes JSON.
+        url: The item's address, when one can be read from it.
+        error: Why the parser could not read it.
+
+    Returns:
+        The record, with its text cut to a bounded length.
+    """
+    try:
+        text = raw if isinstance(raw, str) else json.dumps(raw, default=str)
+    except (RecursionError, TypeError, ValueError):
+        text = f"<unreadable {type(raw).__name__}>"
+    return SkippedItem(text=text[:_MAX_SKIPPED_TEXT], url=url, reason=str(error))
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,11 +75,13 @@ class SourceBatch:
         rejected: How many jobs the adapter dropped because they were unusable.
         still_listed: The ids of known jobs the source still lists but the
             adapter did not re-fetch, so they carry no draft.
+        skipped: The dropped jobs, for those the adapter could keep.
     """
 
     drafts: list[SightingDraft]
     rejected: int
     still_listed: tuple[ExternalId, ...] = ()
+    skipped: tuple[SkippedItem, ...] = ()
 
 
 class Source(Protocol):
@@ -96,12 +134,18 @@ class CollectResult:
     failures: list[SourceFailure]
 
 
-async def collect(sources: Iterable[Source], client: PoliteClient) -> CollectResult:
+async def collect(
+    sources: Iterable[Source],
+    client: PoliteClient,
+    *,
+    on_done: Callable[[bool], None] | None = None,
+) -> CollectResult:
     """Fetch every source concurrently and keep going past source failures.
 
     Args:
         sources: The sources to fetch.
         client: The client each source makes its requests through.
+        on_done: Called as each source ends, with whether it failed.
 
     Returns:
         The batches of the sources that succeeded and the failures of the rest.
@@ -114,10 +158,14 @@ async def collect(sources: Iterable[Source], client: PoliteClient) -> CollectRes
     failures: list[SourceFailure] = []
 
     async def run(source: Source) -> None:
+        failed = False
         try:
             batches[source.ref] = await source.fetch(client)
         except SourcesError as error:
             failures.append(SourceFailure(source.ref, error))
+            failed = True
+        if on_done is not None:
+            on_done(failed)
 
     async with asyncio.TaskGroup() as group:
         for source in sources:

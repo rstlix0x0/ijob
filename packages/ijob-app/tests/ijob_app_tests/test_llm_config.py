@@ -204,6 +204,7 @@ _NEW_KEYS = (
     "judge",
     "scorer",
     "source_recipe",
+    "job_extract",
     "[llm]",
     "max_cost_usd",
     "concurrency",

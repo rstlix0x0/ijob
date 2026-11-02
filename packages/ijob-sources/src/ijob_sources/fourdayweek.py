@@ -25,9 +25,10 @@ from ijob_core.model import (
     SourceRef,
 )
 
-from ijob_sources.collect import SourceBatch
+from ijob_sources.collect import SkippedItem, SourceBatch, skipped_item
 from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError
+from ijob_sources.item_url import url_of
 from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
 
@@ -87,16 +88,18 @@ class FourDayWeekBoard:
         """
         drafts: list[SightingDraft] = []
         rejected = 0
+        skipped: list[SkippedItem] = []
         url = _FIRST_PAGE_URL
         for fetched in range(_MAX_PAGES):
             response = await client.get(url, conditional=fetched == 0)
             page = parse_fourdayweek(response.content, self._key)
             drafts.extend(page.batch.drafts)
             rejected += page.batch.rejected
+            skipped.extend(page.batch.skipped)
             if page.next_page is None:
                 break
             url = f"{_FIRST_PAGE_URL}&page={page.next_page}"
-        return SourceBatch(drafts=drafts, rejected=rejected)
+        return SourceBatch(drafts=drafts, rejected=rejected, skipped=tuple(skipped))
 
 
 def parse_fourdayweek(body: bytes, key: SourceKey) -> FourDayWeekPage:
@@ -138,11 +141,13 @@ def parse_fourdayweek(body: bytes, key: SourceKey) -> FourDayWeekPage:
 
     drafts: list[SightingDraft] = []
     rejected = 0
+    skipped: list[SkippedItem] = []
     for index, job in enumerate(jobs):
         try:
             drafts.append(_to_draft(job, key))
         except InvalidValueError as error:
             rejected += 1
+            skipped.append(skipped_item(job, url_of(job, "url"), error))
             _LOGGER.warning(
                 "rejected 4dayweek job %s from %s: %s",
                 _job_label(job, index),
@@ -150,7 +155,7 @@ def parse_fourdayweek(body: bytes, key: SourceKey) -> FourDayWeekPage:
                 error,
             )
     return FourDayWeekPage(
-        batch=SourceBatch(drafts=drafts, rejected=rejected),
+        batch=SourceBatch(drafts=drafts, rejected=rejected, skipped=tuple(skipped)),
         next_page=page + 1 if has_more else None,
     )
 

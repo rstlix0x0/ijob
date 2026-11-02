@@ -21,9 +21,10 @@ from ijob_core.model import (
     SourceRef,
 )
 
-from ijob_sources.collect import SourceBatch
+from ijob_sources.collect import SkippedItem, SourceBatch, skipped_item
 from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError
+from ijob_sources.item_url import url_of
 from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
 
@@ -93,19 +94,21 @@ def parse_remoteok(body: bytes, key: SourceKey) -> SourceBatch:
 
     drafts: list[SightingDraft] = []
     rejected = 0
+    skipped: list[SkippedItem] = []
     first = 1 if payload and _is_notice(payload[0]) else 0
     for index, job in enumerate(payload[first:], start=first):
         try:
             drafts.append(_to_draft(job, key))
         except InvalidValueError as error:
             rejected += 1
+            skipped.append(skipped_item(job, url_of(job, "url"), error))
             _LOGGER.warning(
                 "rejected remoteok job %s from %s: %s",
                 _job_label(job, index),
                 key,
                 error,
             )
-    return SourceBatch(drafts=drafts, rejected=rejected)
+    return SourceBatch(drafts=drafts, rejected=rejected, skipped=tuple(skipped))
 
 
 def _is_notice(element: object) -> bool:

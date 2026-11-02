@@ -28,10 +28,11 @@ from ijob_core.model import (
 )
 from ijob_core.money import Money
 
-from ijob_sources.collect import SourceBatch
+from ijob_sources.collect import SkippedItem, SourceBatch, skipped_item
 from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError
 from ijob_sources.identity import check_identity
+from ijob_sources.item_url import url_of
 from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
 
@@ -138,6 +139,7 @@ def _read(body: bytes, key: SourceKey) -> _Listing:
     names: list[str] = []
     texts: list[str] = []
     rejected = 0
+    skipped: list[SkippedItem] = []
     for index, job in enumerate(jobs):
         names.append(_string(job, "company_name"))
         texts.append(_string(job, "content"))
@@ -145,6 +147,7 @@ def _read(body: bytes, key: SourceKey) -> _Listing:
             drafts.append(_to_draft(job, key))
         except InvalidValueError as error:
             rejected += 1
+            skipped.append(skipped_item(job, url_of(job, "absolute_url"), error))
             _LOGGER.warning(
                 "rejected greenhouse job %s from %s: %s",
                 _job_label(job, index),
@@ -152,7 +155,10 @@ def _read(body: bytes, key: SourceKey) -> _Listing:
                 error,
             )
     return _Listing(
-        SourceBatch(drafts=drafts, rejected=rejected), len(jobs), names, texts
+        SourceBatch(drafts=drafts, rejected=rejected, skipped=tuple(skipped)),
+        len(jobs),
+        names,
+        texts,
     )
 
 

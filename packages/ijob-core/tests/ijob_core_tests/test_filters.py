@@ -71,9 +71,9 @@ def test_role_hint_matching_include_keeps() -> None:
     assert keep(posting, spec, now=_NOW)
 
 
-def test_role_no_include_match_without_hint_passes() -> None:
+def test_role_no_include_match_without_hint_drops() -> None:
     spec = FilterSpec(include=(_ENGINEER,))
-    assert keep(_posting(title="Platform Lead", role_hint=None), spec, now=_NOW)
+    assert not keep(_posting(title="Platform Lead", role_hint=None), spec, now=_NOW)
 
 
 def test_role_hint_without_match_drops() -> None:

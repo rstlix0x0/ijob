@@ -12,6 +12,7 @@ from pathlib import Path
 import httpx
 import pytest
 from ijob_app.cli import make_app
+from ijob_app.config import FilterLayers
 from ijob_app.home import IjobHome
 from ijob_app.llm_ops import LlmOptions
 from ijob_app.service import ClientFactory, Service, open_service
@@ -808,6 +809,7 @@ def test_table_shows_posting_text_literally(
                 draft(STRIPE, "1", fields["title"]),
                 company=fields["company"],
                 location=fields["location"],
+                role_hint="Software Engineer",
             )
         ]
     )
@@ -864,13 +866,15 @@ def test_burst_of_filter_changes_reloads_once(
     async def run() -> tuple[int, int, int, int, list[str]]:
         with opener(_no_requests([])) as service:
             reads: list[int] = []
-            original = service.open_postings
+            original = service.search_postings
 
-            def counting(spec: FilterSpec, refs: Sequence[SourceRef]) -> list[Posting]:
+            async def counting(
+                layers: FilterLayers, refs: Sequence[SourceRef]
+            ) -> list[Posting]:
                 reads.append(1)
-                return original(spec, refs)
+                return await original(layers, refs)
 
-            monkeypatch.setattr(service, "open_postings", counting)
+            monkeypatch.setattr(service, "search_postings", counting)
             app = IjobApp(service, None)
             async with app.run_test() as pilot:
                 await pilot.pause(_PAST_DEBOUNCE)
@@ -1072,6 +1076,31 @@ def test_verdicts_stream_into_rows(
     assert len(engines.engine.requests) == 3
     assert "judged 3" in status
     assert status.endswith(f"cost $0.0030 of ${COST_CAP:.2f}")
+
+
+def test_jobs_list_at_once_while_the_judge_works(
+    llm_opener: LlmOpener,
+    seed: Seeder,
+    store_instructions: InstructionStorer,
+    home: IjobHome,
+) -> None:
+    seed_three(seed)
+    store_instructions()
+    engine = FakeAsyncEngine([_KEEP], delay_s=60)
+    engines = FakeEngines(engine)
+
+    async def run() -> tuple[list[str], list[str], str]:
+        with llm_opener(engines) as service:
+            app = IjobApp(service, None, default_config=home.config)
+            async with app.run_test() as pilot, asyncio.timeout(10):
+                while not engine.requests:
+                    await pilot.pause(0.01)
+                return titles(app), _verdict_cells(app), _status(app)
+
+    listed, cells, status = asyncio.run(run())
+    assert len(listed) == 3
+    assert cells == ["judging…", "judging…", "judging…"]
+    assert status.startswith("judging")
 
 
 def test_v_toggles_dropped_rows(

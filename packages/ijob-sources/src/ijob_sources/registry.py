@@ -37,9 +37,14 @@ from ijob_sources.workable import WorkableAccount
 from ijob_sources.yc import YcJobs
 
 HOST_INTERVALS: Final[Mapping[str, float]] = MappingProxyType(
-    {"apply.workable.com": 3.0}
+    {
+        "apply.workable.com": 3.0,
+        "boards-api.greenhouse.io": 0.2,
+        "api.ashbyhq.com": 0.2,
+        "api.lever.co": 0.2,
+    }
 )
-"""Minimum seconds between requests to a host, as `PoliteClient` takes them."""
+"""Seconds between the starts of requests to a host, as `PoliteClient` takes them."""
 
 _JOBICY_INTERVAL: Final = timedelta(hours=1)
 _NO_INTERVAL: Final = timedelta(0)

@@ -550,13 +550,44 @@ def test_crawl_delay_above_override_wins() -> None:
     assert fake_time.waits == [3.0, 3.0]
 
 
-def test_override_below_min_interval_does_not_lower_it() -> None:
+def test_override_below_min_interval_lowers_it() -> None:
     fake_time = _FakeTime()
     client = _spaced_client(
         _Site(httpx.Response(200)), fake_time, {"apply.workable.com": 0.5}
     )
     asyncio.run(_get_each(client, _WORKABLE, _WORKABLE))
-    assert fake_time.waits == [1.0, 1.0]
+    assert fake_time.waits == [0.5, 0.5]
+
+
+def test_requests_to_one_host_overlap() -> None:
+    both_arrived = asyncio.Event()
+    arrived: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404, request=request)
+        arrived.append(request.url.path)
+        if len(arrived) == 2:
+            both_arrived.set()
+        await asyncio.wait_for(both_arrived.wait(), timeout=2)
+        return httpx.Response(200, text="body", request=request)
+
+    async def run() -> list[str]:
+        fake_time = _FakeTime()
+        async with (
+            PoliteClient(
+                transport=httpx.MockTransport(handler),
+                clock=fake_time.clock,
+                now=lambda: _NOW,
+                sleep=fake_time.sleep,
+            ) as client,
+            asyncio.TaskGroup() as group,
+        ):
+            first = group.create_task(client.get("https://a.example.test/one"))
+            second = group.create_task(client.get("https://a.example.test/two"))
+        return [first.result().text, second.result().text]
+
+    assert asyncio.run(run()) == ["body", "body"]
 
 
 def test_host_override_key_is_case_insensitive() -> None:

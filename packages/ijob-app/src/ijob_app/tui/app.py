@@ -30,6 +30,7 @@ and a clicked link opens only if it is `http(s)`. A change to a filter reloads
 the table once typing pauses.
 """
 
+import asyncio
 import re
 import sqlite3
 from collections.abc import Callable, Sequence
@@ -90,6 +91,8 @@ _VOTE_MARKS = {Vote.UP: "👍", Vote.DOWN: "👎"}
 _MARKDOWN_PUNCTUATION = re.compile(r"[!-/:-@\[-`{-~]")
 _WEB_SCHEMES = frozenset({"http", "https"})
 _FILTER_DEBOUNCE = 0.2
+_ROWS_PER_PAINT = 200
+_JUDGING = "judging…"
 _MAIN_ACTIONS = frozenset(
     {
         "refresh",
@@ -136,11 +139,11 @@ def _verdict_cell(item: SearchItem) -> str:
         item: The posting and what the judge made of it.
 
     Returns:
-        What `ijob search` prints in its verdict column, or blank for a posting
-        that was not judged.
+        What `ijob search` prints in its verdict column, or `judging…` for a
+        posting not judged yet.
     """
     if item.verdict is None and item.status is JudgeStatus.NOT_RUN:
-        return ""
+        return _JUDGING
     return verdict_cell(item)
 
 
@@ -324,7 +327,7 @@ class IjobApp(App[None]):
     TITLE = "ijob"
     CSS = """
     #filters { height: auto; }
-    #filters Input { width: 1fr; }
+    #filters Input { width: 1fr; border-title-color: $text; }
     #filters Checkbox { width: auto; }
     #body { height: 1fr; }
     #results { width: 1fr; }
@@ -742,21 +745,32 @@ class IjobApp(App[None]):
     async def _search(
         self, layers: FilterLayers, refs: list[SourceRef], *, with_verdicts: bool
     ) -> None:
-        """Fill the table from a search, row by row, then report what it did.
+        """Fill the table from a search, then report what it did.
 
-        A search the user replaces is cancelled where it waits; the verdicts it
-        had stored stay, so the next search does not judge those again.
+        When judging, every posting is listed at once with a blank verdict, and
+        each row then gets its verdict, or leaves if the judge drops it, as the
+        judge answers. A search the user replaces is cancelled where it waits;
+        the verdicts it had stored stay, so the next search does not judge those
+        again.
         """
         self._set_status(
             f"judging… cost ? of {self._cap_text()}" if with_verdicts else ""
         )
         started = False
+        added = 0
         try:
-            async for item in self._service.search(layers, refs):
+            listed = await self._service.search_postings(layers, refs)
+            if with_verdicts:
+                await self._list_unjudged(listed, refs)
+                started = True
+            async for item in self._service.search(layers, refs, listed=listed):
                 if not started:
                     self._start_results(refs, with_verdicts=with_verdicts)
                     started = True
                 self._add_item(item)
+                added += 1
+                if added % _ROWS_PER_PAINT == 0:
+                    await asyncio.sleep(0)
             if not started:
                 self._start_results(refs, with_verdicts=with_verdicts)
         except UnknownSourceError:
@@ -830,15 +844,45 @@ class IjobApp(App[None]):
         self._items = {}
         self._postings = {}
 
+    async def _list_unjudged(
+        self, postings: list[Posting], refs: list[SourceRef]
+    ) -> None:
+        """Start the results with every posting, none of them judged yet."""
+        self._start_results(refs, with_verdicts=True)
+        labels = self._service.labels([posting.id for posting in postings])
+        for count, posting in enumerate(postings, start=1):
+            item = SearchItem(
+                posting, None, JudgeStatus.NOT_RUN, posting.description is None
+            )
+            self._postings[posting.id] = posting
+            self._items[posting.id] = item
+            self._add_row(item, labels.get(posting.id))
+            if count % _ROWS_PER_PAINT == 0:
+                await asyncio.sleep(0)
+        self._select(self._cursor_id())
+
     def _add_item(self, item: SearchItem) -> None:
-        """Take a search item in and show its row unless it is hidden."""
+        """Take a search item in and add, update or remove its row."""
         posting_id = item.posting.id
+        listed = posting_id in self._items and self._shown(self._items[posting_id])
         self._postings[posting_id] = item.posting
         self._items[posting_id] = item
-        if self._shown(item):
+        if listed:
+            self._update_row(item)
+        elif self._shown(item):
             self._add_row(item, self._service.labels([posting_id]).get(posting_id))
-            if self._verdict_column is not None and posting_id == self._selected:
-                self._load_detail(posting_id)
+        if self._verdict_column is not None and posting_id == self._selected:
+            self._load_detail(posting_id)
+
+    def _update_row(self, item: SearchItem) -> None:
+        """Show a listed posting's verdict, or remove its row if it is now hidden."""
+        table = self.query_one("#results", DataTable)
+        key = str(item.posting.id)
+        if not self._shown(item):
+            table.remove_row(key)
+        elif self._verdict_column is not None:
+            cell = plain_cell(_verdict_cell(item))
+            table.update_cell(key, self._verdict_column, cell, update_width=True)
 
     def _shown(self, item: SearchItem) -> bool:
         """Tell whether the table lists a search item."""

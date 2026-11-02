@@ -7,6 +7,7 @@ from ijob_sources.collect import (
     SourceBatch,
     SourceFailure,
     collect,
+    skipped_item,
 )
 from ijob_sources.errors import SourceNotFoundError
 from ijob_sources.polite_http import PoliteClient
@@ -70,3 +71,44 @@ def test_non_sources_error_propagates() -> None:
         asyncio.run(_collect(sources))
 
     assert caught.value.exceptions == (bug,)
+
+
+def test_skipped_item_cuts_long_text() -> None:
+    item = skipped_item("x" * 50_000, "https://example.test/a", ValueError("bad"))
+
+    assert item.text == "x" * 20_000
+    assert item.url == "https://example.test/a"
+    assert item.reason == "bad"
+
+
+def test_skipped_item_turns_a_dict_into_json() -> None:
+    item = skipped_item({"title": "A"}, None, ValueError("bad"))
+
+    assert item.text == '{"title": "A"}'
+    assert item.url is None
+
+
+def test_skipped_item_survives_an_item_too_deep_to_encode() -> None:
+    deep: list[object] = []
+    for _ in range(100_000):
+        deep = [deep]
+
+    item = skipped_item(deep, None, ValueError("bad"))
+
+    assert item.text == "<unreadable list>"
+    assert item.reason == "bad"
+
+
+def test_collect_tells_when_each_source_ends() -> None:
+    error = SourceNotFoundError("https://boards.example.test/x")
+    good = SourceBatch(drafts=[], rejected=0)
+    sources = [_FakeSource(_ref("bad"), error), _FakeSource(_ref("good"), good)]
+    failed: list[bool] = []
+
+    async def run() -> None:
+        async with PoliteClient() as client:
+            await collect(sources, client, on_done=failed.append)
+
+    asyncio.run(run())
+
+    assert sorted(failed) == [False, True]

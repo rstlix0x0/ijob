@@ -29,6 +29,7 @@
 # judge        = "claude-sdk/claude-haiku-5-5"
 # scorer       = "claude-sdk/claude-haiku-5-5"
 # source_recipe = "claude-sdk/claude-sonnet-5-5"
+# job_extract  = "claude-sdk/claude-haiku-5-5"
 
 # Limits on model calls.
 # [llm]

@@ -16,9 +16,11 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    field_validator,
     model_validator,
 )
 
+_MAX_REASONS = 5
 _ITEM = Annotated[str, StringConstraints(min_length=1, max_length=100)]
 _REASON = Annotated[str, StringConstraints(min_length=1, max_length=200)]
 _RULE = Annotated[str, StringConstraints(min_length=1, max_length=200)]
@@ -134,11 +136,18 @@ class ScoreOut(_Strict):
 
     Attributes:
         score: The fit, an integer from 0 to 100.
-        reasons: 1 to 5 reasons, each 1 to 200 characters.
+        reasons: 1 to 5 reasons, each 1 to 200 characters. A model that gives
+            more keeps its first 5, since the score itself is still good.
     """
 
     score: Annotated[int, Field(ge=0, le=100)]
     reasons: Annotated[list[_REASON], Field(min_length=1, max_length=5)]
+
+    @field_validator("reasons", mode="before")
+    @classmethod
+    def _keep_first_reasons(cls, value: object) -> object:
+        """Cut a list of reasons to the most the field holds."""
+        return value[:_MAX_REASONS] if isinstance(value, list) else value
 
 
 class RecipeFieldsOut(_Strict):
@@ -221,3 +230,21 @@ class SourceRecipeOut(_Strict):
             msg = "set exactly one of recipe and json_url"
             raise ValueError(msg)
         return self
+
+
+class JobExtractOut(_Strict):
+    """What the model read from one item a parser could not read.
+
+    Attributes:
+        is_job: Whether the item is a job posting.
+        title: The job title, when the item states one.
+        company: The hiring company, when the item states one.
+        location: Where the job is, when the item states it.
+        url: The job's address, when the item states one.
+    """
+
+    is_job: bool
+    title: str | None = None
+    company: str | None = None
+    location: str | None = None
+    url: str | None = None

@@ -14,6 +14,7 @@ class Task(StrEnum):
 
     CV_PROFILE = "cv_profile"
     INSTRUCTIONS = "instructions"
+    JOB_EXTRACT = "job_extract"
     JUDGE = "judge"
     SCORER = "scorer"
     SOURCE_RECIPE = "source_recipe"

@@ -115,6 +115,25 @@ def json_url_answer(json_url: str) -> str:
     return json.dumps({"answer": {"recipe": None, "json_url": json_url}})
 
 
+def extract_answer(
+    *,
+    is_job: bool = True,
+    title: str | None = "Backend Engineer",
+    company: str | None = "Acme",
+    location: str | None = "Remote",
+    url: str | None = "https://jobs.example.test/acme/1",
+) -> str:
+    """Return the JSON a model gives when it reads one skipped item."""
+    answer = {
+        "is_job": is_job,
+        "title": title,
+        "company": company,
+        "location": location,
+        "url": url,
+    }
+    return json.dumps({"answer": answer})
+
+
 def request_text(request: Opaque) -> str:
     """Return every text part of a request's messages, joined."""
     return "".join(
@@ -136,6 +155,7 @@ def write_llm_config(  # noqa: PLR0913  # one knob of the config per argument
     instructions: str | None = None,
     scorer: str | None = None,
     source_recipe: str | None = None,
+    job_extract: str | None = None,
 ) -> None:
     """Write a config file that names made-up models.
 
@@ -152,6 +172,8 @@ def write_llm_config(  # noqa: PLR0913  # one knob of the config per argument
         scorer: The `[models].scorer` reference, or None to leave it unset.
         source_recipe: The `[models].source_recipe` reference, or None to leave it
             unset.
+        job_extract: The `[models].job_extract` reference, or None to leave it
+            unset.
     """
     lines: list[str] = []
     models = {
@@ -160,6 +182,7 @@ def write_llm_config(  # noqa: PLR0913  # one knob of the config per argument
         "instructions": instructions,
         "scorer": scorer,
         "source_recipe": source_recipe,
+        "job_extract": job_extract,
     }
     named = [f'{task} = "{ref}"' for task, ref in models.items() if ref is not None]
     if named:

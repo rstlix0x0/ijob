@@ -40,7 +40,7 @@ from ijob_core.model import (
     SourceRef,
 )
 
-from ijob_sources.collect import SourceBatch
+from ijob_sources.collect import SkippedItem, SourceBatch, skipped_item
 from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError, SourcesError
 from ijob_sources.jsonld import job_postings, read_job_posting
@@ -334,13 +334,15 @@ class RssFeed:
         """Draft every item from the feed alone."""
         drafts: list[SightingDraft] = []
         rejected = 0
+        skipped: list[SkippedItem] = []
         for index, item in enumerate(items):
             try:
                 drafts.append(self._plain_draft(item))
             except InvalidValueError as error:
                 rejected += 1
+                skipped.append(item_skipped(item, error))
                 self._log_rejected(item, index, error)
-        return SourceBatch(drafts=drafts, rejected=rejected)
+        return SourceBatch(drafts=drafts, rejected=rejected, skipped=tuple(skipped))
 
     async def _detail_batch(
         self, client: PoliteClient, items: list[RssItem]
@@ -349,6 +351,7 @@ class RssFeed:
         drafts: list[SightingDraft] = []
         still_listed: list[ExternalId] = []
         rejected = 0
+        skipped: list[SkippedItem] = []
         fetched = 0
         for index, item in enumerate(items):
             try:
@@ -363,9 +366,13 @@ class RssFeed:
                 drafts.append(self._detail_draft(item, link, page.content))
             except (InvalidValueError, SourcesError) as error:
                 rejected += 1
+                skipped.append(item_skipped(item, error))
                 self._log_rejected(item, index, error)
         return SourceBatch(
-            drafts=drafts, rejected=rejected, still_listed=tuple(still_listed)
+            drafts=drafts,
+            rejected=rejected,
+            still_listed=tuple(still_listed),
+            skipped=tuple(skipped),
         )
 
     def _plain_draft(self, item: RssItem) -> SightingDraft:
@@ -484,6 +491,19 @@ def item_raw(item: RssItem) -> str:
         InvalidValueError: The item is nested too deeply to encode.
     """
     return _raw(_item_json(item))
+
+
+def item_skipped(item: RssItem, error: Exception) -> SkippedItem:
+    """Build the record of an item a parser dropped.
+
+    Args:
+        item: The dropped item.
+        error: Why the item could not be read.
+
+    Returns:
+        The record, holding the item as JSON and its link.
+    """
+    return skipped_item(_item_json(item), item.link, error)
 
 
 def _item_json(item: RssItem) -> dict[str, Any]:

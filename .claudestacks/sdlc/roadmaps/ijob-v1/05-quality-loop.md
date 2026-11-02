@@ -1,5 +1,5 @@
 ---
-status: approved
+status: dropped
 created: 2026-10-30
 ---
 

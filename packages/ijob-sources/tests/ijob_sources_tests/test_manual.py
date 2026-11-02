@@ -228,14 +228,19 @@ def test_unreadable_posting_is_rejected_not_raised(
     with caplog.at_level(logging.WARNING, logger="ijob_sources.manual"):
         batch = _parse(body, company="Acme")
 
-    assert batch == SourceBatch(drafts=[], rejected=1)
+    assert (batch.drafts, batch.rejected) == ([], 1)
+    (item,) = batch.skipped
+    assert item.url == _PAGE_URL
+    assert "datePosted" in item.reason
     assert _PAGE_URL in caplog.text
 
 
 def test_posting_without_a_title_is_rejected() -> None:
     posting = {"@type": "JobPosting", "hiringOrganization": {"name": "Acme"}}
 
-    assert _parse(_page(posting), company="Acme") == SourceBatch(drafts=[], rejected=1)
+    batch = _parse(_page(posting), company="Acme")
+
+    assert (batch.drafts, batch.rejected) == ([], 1)
 
 
 def test_posting_without_a_company_proves_nothing_and_is_a_mismatch() -> None:
@@ -259,7 +264,9 @@ def test_rejected_posting_naming_another_company_is_a_mismatch() -> None:
 def test_rejected_posting_naming_the_company_is_still_rejected() -> None:
     body = _page(_posting(datePosted="not a date"))
 
-    assert _parse(body, company="Acme Corp") == SourceBatch(drafts=[], rejected=1)
+    batch = _parse(body, company="Acme Corp")
+
+    assert (batch.drafts, batch.rejected) == ([], 1)
 
 
 def test_parse_decodes_utf8() -> None:

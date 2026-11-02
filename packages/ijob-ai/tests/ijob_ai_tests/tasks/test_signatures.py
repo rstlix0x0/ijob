@@ -2,6 +2,7 @@ import dspy
 import pytest
 from ijob_ai.tasks.outputs import (
     InstructionsOut,
+    JobExtractOut,
     ProfileOut,
     ScoreOut,
     SourceRecipeOut,
@@ -10,10 +11,12 @@ from ijob_ai.tasks.outputs import (
 from ijob_ai.tasks.signatures import (
     CV_PROFILE_VERSION,
     INSTRUCTIONS_VERSION,
+    JOB_EXTRACT_VERSION,
     JUDGE_VERSION,
     SCORER_VERSION,
     SOURCE_RECIPE_VERSION,
     CvProfileSig,
+    JobExtractSig,
     JudgeSig,
     ParseInstructionsSig,
     ScoreSig,
@@ -26,6 +29,7 @@ _SIGNATURES: tuple[type[dspy.Signature], ...] = (
     ParseInstructionsSig,
     JudgeSig,
     ScoreSig,
+    JobExtractSig,
 )
 
 
@@ -57,6 +61,10 @@ def test_signature_fields() -> None:
         ParseInstructionsSig: (["instruction_text"], {"parsed": InstructionsOut}),
         JudgeSig: (["posting"], {"verdict": VerdictOut}),
         ScoreSig: (["posting", "profile"], {"score": ScoreOut}),
+        JobExtractSig: (
+            ["item_text", "item_url"],
+            {"answer": JobExtractOut},
+        ),
         SourceRecipeSig: (
             ["page_url", "page_format", "sample", "fields_text"],
             {"answer": SourceRecipeOut},
@@ -72,6 +80,11 @@ def test_signature_fields() -> None:
 def test_versions() -> None:
     assert CV_PROFILE_VERSION == "cv_profile-1"
     assert INSTRUCTIONS_VERSION == "instructions-1"
+    assert JOB_EXTRACT_VERSION == "job_extract-2"
     assert JUDGE_VERSION == "judge-1"
     assert SCORER_VERSION == "scorer-1"
     assert SOURCE_RECIPE_VERSION == "source_recipe-1"
+
+
+def test_job_extract_sig_forbids_guessing() -> None:
+    assert "never guess" in JobExtractSig.instructions

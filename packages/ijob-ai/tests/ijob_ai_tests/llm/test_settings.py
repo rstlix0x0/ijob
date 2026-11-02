@@ -14,6 +14,7 @@ def test_task_values() -> None:
     assert [t.value for t in Task] == [
         "cv_profile",
         "instructions",
+        "job_extract",
         "judge",
         "scorer",
         "source_recipe",

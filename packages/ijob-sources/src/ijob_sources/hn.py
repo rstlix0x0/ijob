@@ -26,7 +26,7 @@ from ijob_core.model import (
     SourceRef,
 )
 
-from ijob_sources.collect import SourceBatch
+from ijob_sources.collect import SkippedItem, SourceBatch, skipped_item
 from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError
 from ijob_sources.payload import raw_object
@@ -140,6 +140,7 @@ def parse_comments(body: bytes, story_id: int, key: SourceKey) -> SourceBatch:
     """
     drafts: list[SightingDraft] = []
     rejected = 0
+    skipped: list[SkippedItem] = []
     for index, hit in enumerate(_hits(body)):
         if not _is_reply_to(hit, story_id):
             continue
@@ -147,8 +148,23 @@ def parse_comments(body: bytes, story_id: int, key: SourceKey) -> SourceBatch:
             drafts.append(_to_draft(hit, key))
         except InvalidValueError as error:
             rejected += 1
+            skipped.append(skipped_item(_hit_text(hit), _hit_url(hit), error))
             _LOGGER.warning("rejected hn comment %s: %s", _hit_label(hit, index), error)
-    return SourceBatch(drafts=drafts, rejected=rejected)
+    return SourceBatch(drafts=drafts, rejected=rejected, skipped=tuple(skipped))
+
+
+def _hit_text(hit: object) -> object:
+    """Return a hit's comment text, or the whole hit when it has none."""
+    text = hit.get("comment_text") if isinstance(hit, dict) else None
+    return text if isinstance(text, str) else hit
+
+
+def _hit_url(hit: object) -> str | None:
+    """Return the thread address of a hit that has an `objectID`, else `None`."""
+    object_id = hit.get("objectID") if isinstance(hit, dict) else None
+    if isinstance(object_id, str) and object_id:
+        return _ITEM_URL.format(object_id=object_id)
+    return None
 
 
 def _hits(body: bytes) -> list[object]:

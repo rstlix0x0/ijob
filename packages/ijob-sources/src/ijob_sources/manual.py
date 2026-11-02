@@ -28,14 +28,14 @@ from ijob_core.model import (
     parse_source_key,
 )
 
-from ijob_sources.collect import SourceBatch
+from ijob_sources.collect import SkippedItem, SourceBatch, skipped_item
 from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError
 from ijob_sources.identity import check_identity
 from ijob_sources.jsonld import job_postings, read_job_posting
 from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
-from ijob_sources.rss import RssItem, item_link, item_raw, parse_rss
+from ijob_sources.rss import RssItem, item_link, item_raw, item_skipped, parse_rss
 from ijob_sources.rss import description_from_raw as rss_description_from_raw
 
 _LOGGER = logging.getLogger(__name__)
@@ -136,7 +136,11 @@ def parse_jobposting_page(
         draft = _posting_draft(postings[0], ref, target_url)
     except InvalidValueError as error:
         _LOGGER.warning("rejected job page %r: %s", target_url, error)
-        return SourceBatch(drafts=[], rejected=1)
+        return SourceBatch(
+            drafts=[],
+            rejected=1,
+            skipped=(skipped_item(postings[0], target_url, error),),
+        )
     return SourceBatch(drafts=[draft], rejected=0)
 
 
@@ -244,16 +248,18 @@ def parse_feed(
     ref = SourceRef(SourceKind.FEED, key)
     drafts: list[SightingDraft] = []
     rejected = 0
+    skipped: list[SkippedItem] = []
     for index, item in enumerate(parse_rss(body)):
         try:
             drafts.append(_feed_draft(item, ref, company))
         except InvalidValueError as error:
             rejected += 1
+            skipped.append(item_skipped(item, error))
             label = f"link {item.link!r}" if item.link else f"index {index}"
             _LOGGER.warning(
                 "rejected feed item %s from %r: %s", label, target_url, error
             )
-    return SourceBatch(drafts=drafts, rejected=rejected)
+    return SourceBatch(drafts=drafts, rejected=rejected, skipped=tuple(skipped))
 
 
 def _feed_draft(item: RssItem, ref: SourceRef, company: str) -> SightingDraft:

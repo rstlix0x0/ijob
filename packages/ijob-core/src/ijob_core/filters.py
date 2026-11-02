@@ -79,8 +79,8 @@ def _role_passes(posting: Posting, spec: FilterSpec) -> bool:
         return False
     if not spec.include or _matches_any(spec.include, posting.title):
         return True
-    if posting.role_hint is None:
-        return True
+    if posting.role_hint is None:  # no title match and nothing else to go on
+        return False
     return _matches_any(spec.include, posting.role_hint)
 
 

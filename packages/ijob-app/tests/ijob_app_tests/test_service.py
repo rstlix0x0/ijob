@@ -30,6 +30,7 @@ from ijob_app.service import (
     MAX_CV_BYTES,
     CacheUnavailableError,
     ClientFactory,
+    FetchProgress,
     InvalidCvError,
     NoRecipeError,
     RecipeAlreadyAddedError,
@@ -354,6 +355,7 @@ def _draft(
         posted_at=None,
         raw=raw,
         description=description,
+        role_hint="Software Engineer",
     )
 
 
@@ -2291,3 +2293,15 @@ def test_analyze_url_given_the_page_does_not_fetch_it_again(
     ]
     assert proposal.target_url == "https://jobs.example.org/careers"
     assert len(engines.engine.requests) == 1
+
+
+def test_refresh_reports_progress_from_zero_to_all(opener: _Opener) -> None:
+    seen: list[FetchProgress] = []
+
+    with opener(_serving()) as service:
+        asyncio.run(service.refresh([_TAILSCALE], on_progress=seen.append))
+
+    assert seen == [
+        FetchProgress(total=1, done=0, failed=0),
+        FetchProgress(total=1, done=1, failed=0),
+    ]

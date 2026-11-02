@@ -10,13 +10,14 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, override
 
 import httpx
 import pytest
 import typer
 from ijob_app import cli
 from ijob_app.cli import app, make_app
+from ijob_app.cli_progress import ProgressLine
 from ijob_app.llm_ops import LlmOptions
 from ijob_app.service import Service
 from ijob_core.countries import parse_country
@@ -383,7 +384,8 @@ def test_rejected_item_lines_stay_off_stderr_by_default(
 
     assert result.exit_code == 0
     assert result.stderr.splitlines() == [
-        "greenhouse:tailscale: skipped 1 invalid jobs"
+        "greenhouse:tailscale: skipped 1 invalid jobs",
+        "note: 1 skipped jobs unread; run: ijob sources extract",
     ]
 
 
@@ -2215,3 +2217,25 @@ def test_search_without_judge_model_exits_1(tmp_path: Path) -> None:
     assert result.exit_code == 1
     assert result.stdout == ""
     assert result.stderr.splitlines()[-1].startswith("error: no model for judge")
+
+
+def test_search_shows_fetch_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shown: list[str] = []
+
+    class _Recording(ProgressLine):
+        @override
+        def show_live(self, text: str) -> None:
+            shown.append(text)
+
+    monkeypatch.setattr("ijob_app.cli.ProgressLine", _Recording)
+
+    result = _rejecting_run(tmp_path, monkeypatch)
+
+    assert result.exit_code == 0
+    assert shown == [
+        "fetching sources: 0 of 1 done, 0 failed",
+        "fetching sources: 1 of 1 done, 0 failed, saving",
+    ]
+    assert "fetching" not in result.stderr
