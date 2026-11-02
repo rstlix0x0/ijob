@@ -23,8 +23,9 @@ from ijob_core.model import (
     SourceRef,
 )
 
-from ijob_sources.collect import SourceBatch
+from ijob_sources.collect import SkippedItem, SourceBatch, skipped_item
 from ijob_sources.errors import ParseError
+from ijob_sources.item_url import url_of
 from ijob_sources.polite_http import PoliteClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -124,6 +125,7 @@ def _to_batch(postings: list[object], key: SourceKey) -> SourceBatch:
     """Map postings to drafts, keeping the first posting of each `id`."""
     drafts: list[SightingDraft] = []
     rejected = 0
+    skipped: list[SkippedItem] = []
     seen: set[int] = set()
     for index, posting in enumerate(postings):
         job_id = _raw_id(posting)
@@ -135,9 +137,10 @@ def _to_batch(postings: list[object], key: SourceKey) -> SourceBatch:
             drafts.append(_to_draft(posting, key))
         except InvalidValueError as error:
             rejected += 1
+            skipped.append(skipped_item(posting, url_of(posting, "url"), error))
             label = f"id {job_id!r}" if job_id is not None else f"index {index}"
             _LOGGER.warning("rejected yc posting %s: %s", label, error)
-    return SourceBatch(drafts=drafts, rejected=rejected)
+    return SourceBatch(drafts=drafts, rejected=rejected, skipped=tuple(skipped))
 
 
 def _raw_id(posting: object) -> int | None:

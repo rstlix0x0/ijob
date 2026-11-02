@@ -2,8 +2,9 @@
 
 `describe` answers for every `SourceKind`. Sixteen kinds keep the posting's text
 in the `raw` payload of their sightings, so the owning adapter module reads it
-back with no request. Three kinds keep only a reference: Workable (a v2 job
-route), Y Combinator (the job page) and Let's Get Rusty (the job page). Those
+back with no request. Four kinds keep only a reference: Workable (a v2 job
+route), Y Combinator (the job page), Let's Get Rusty (the job page) and a
+recipe source (the job page, when its recipe has a `detail_description`). Those
 cost one request through the `PoliteClient`, so robots.txt, spacing and the
 User-Agent apply as for any other fetch.
 """
@@ -32,10 +33,12 @@ from ijob_sources import (
     rss,
 )
 from ijob_sources.description import TextForm, normalize
-from ijob_sources.errors import ParseError
+from ijob_sources.errors import ParseError, UnsupportedUrlError
 from ijob_sources.jsonld import job_postings
 from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
+from ijob_sources.recipe import read_detail_description
+from ijob_sources.recipe_document import HtmlDocument, fetch_document
 
 _WORKABLE_JOB_URL: Final = (
     "https://apply.workable.com/api/v2/accounts/{key}/jobs/{code}"
@@ -61,7 +64,8 @@ async def describe(sighting: Sighting, client: PoliteClient) -> str | None:  # n
             is missing or does not lead to the kind's own site.
         SourcesError: The client could not complete a request (for example
             `SourceNotFoundError` for a missing posting or
-            `RobotsDisallowedError` for a disallowed route).
+            `RobotsDisallowedError` for a disallowed route), or a recipe
+            source's job page is not HTML or its XPath failed.
     """
     raw = sighting.raw
     kind = sighting.source.kind
@@ -102,6 +106,8 @@ async def describe(sighting: Sighting, client: PoliteClient) -> str | None:  # n
             return await _yc_description(sighting, client)
         case SourceKind.LETSGETRUSTY:
             return await _letsgetrusty_description(sighting, client)
+        case SourceKind.RECIPE:
+            return await _recipe_description(sighting, client)
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -182,6 +188,44 @@ async def _letsgetrusty_description(
         raise ParseError(reason)
     response = await client.get(url)
     return _page_description(response.content, TextForm.MARKDOWN)
+
+
+async def _recipe_description(sighting: Sighting, client: PoliteClient) -> str | None:
+    """Fetch a recipe source's job page and evaluate its detail XPath on it.
+
+    Without a `detail_description` XPath in `raw` the posting has no text to
+    fetch, and no request is made. Otherwise the page is the `http` or `https`
+    address under `url` in `raw`.
+
+    Raises:
+        ParseError: `raw` is not a JSON object, or `detail_description` is
+            present but `url` is not an http(s) address.
+        UnsupportedUrlError: The page is not HTML.
+        RecipeEvaluationError: The XPath failed while evaluating.
+        SourcesError: The client could not complete the request.
+    """
+    raw = raw_object(sighting.raw)
+    xpath = raw.get("detail_description")
+    if not isinstance(xpath, str):
+        return None
+    url = raw.get("url")
+    if not isinstance(url, str) or not _is_web_url(url):
+        reason = "raw has no http(s) address under 'url'"
+        raise ParseError(reason)
+    document, final_url = await fetch_document(client, url)
+    if not isinstance(document, HtmlDocument):
+        raise UnsupportedUrlError(final_url, "the job page is not HTML")
+    return read_detail_description(document, xpath)
+
+
+def _is_web_url(url: str) -> bool:
+    """Say whether `url` is an absolute `http` or `https` address."""
+    try:
+        parts = urlsplit(url)
+        hostname = parts.hostname
+    except ValueError:
+        return False
+    return parts.scheme in {"http", "https"} and bool(hostname)
 
 
 def _is_board_url(url: str) -> bool:

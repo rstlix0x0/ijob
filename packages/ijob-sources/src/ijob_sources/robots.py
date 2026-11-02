@@ -5,7 +5,12 @@ through the `send` callable it is given, so it never depends on the HTTP client
 that uses it. It also reports the `Crawl-delay` a cached robots.txt sets for the
 crawler. Each origin's robots.txt is fetched once and cached; an entry is
 refetched after 24 hours, except one built from a 429 answer, which holds for
-the policy's life.
+the policy's life. A robots.txt that cannot be fetched at all, because the host
+is unreachable or the `send` callable fails with a `FetchError`, is not an
+answer: nothing is cached and `allowed` raises `FetchError`. Callers already
+waiting on that fetch share its failure, and a call made after it ended fetches
+again. Any other error `send` raises propagates unchanged. A 429, 5xx or
+unparseable answer is an answer, and it disallows every URL.
 """
 
 import asyncio
@@ -19,7 +24,9 @@ import httpx
 
 from ijob_sources.errors import FetchError
 
-_PARSE_LIMIT_BYTES: Final = 500 * 1024
+PARSE_LIMIT_BYTES: Final = 500 * 1024
+"""The most bytes of a robots.txt that are read and parsed (RFC 9309)."""
+
 _CACHE_LIFETIME_SECONDS: Final = 24 * 60 * 60.0
 _ROBOTS_PATH: Final = "/robots.txt"
 
@@ -27,6 +34,11 @@ _ROBOTS_PATH: Final = "/robots.txt"
 def _origin(parts: SplitResult) -> str:
     """Return the lowercase `scheme://host[:port]` cache key of a split URL."""
     return f"{parts.scheme}://{parts.netloc.rpartition('@')[2].lower()}"
+
+
+def _unreadable(url: str, failure: FetchError) -> FetchError:
+    """Build the error for a page whose origin's robots.txt could not be read."""
+    return FetchError(url, f"robots.txt could not be read: {failure.reason}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +71,8 @@ class RobotsPolicy:
         Args:
             send: Fetches a URL, following redirects, and returns the response
                 with its status unmapped. It raises `FetchError` when no
-                response can be had.
+                response can be had; `allowed` passes that on as a robots.txt
+                that could not be read.
             clock: Monotonic seconds, used to age cache entries.
             product_token: The crawler name that robots.txt groups are matched
                 against.
@@ -69,19 +82,28 @@ class RobotsPolicy:
         self._token = product_token
         self._entries: dict[str, _Entry] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._failures: dict[str, FetchError] = {}
 
     async def allowed(self, url: str) -> bool:
         """Report whether robots.txt allows fetching a URL.
 
         The `/robots.txt` path itself is always allowed, without a fetch.
         Otherwise the origin's robots.txt is fetched on a cold or expired cache;
-        concurrent callers for one origin share a single fetch.
+        concurrent callers for one origin share a single fetch, and share its
+        failure too: a caller that was waiting when the fetch failed raises
+        for its own URL without fetching again.
 
         Args:
             url: The absolute URL about to be requested.
 
         Returns:
             `True` when the URL may be fetched.
+
+        Raises:
+            FetchError: The origin's robots.txt could not be fetched. Its `url`
+                is `url`, its reason says why robots.txt could not be read and
+                the fetch failure is its cause. Nothing is cached, so a call
+                made after the failed fetch ended fetches again.
         """
         parts = urlsplit(url)
         if parts.path == _ROBOTS_PATH:
@@ -89,10 +111,18 @@ class RobotsPolicy:
         origin = _origin(parts)
         entry = self._entries.get(origin)
         if entry is None or self._expired(entry):
+            failure_seen = self._failures.get(origin)
             async with self._locks.setdefault(origin, asyncio.Lock()):
                 entry = self._entries.get(origin)
                 if entry is None or self._expired(entry):
-                    entry = await self._fetch(origin)
+                    failure = self._failures.get(origin)
+                    if failure is not None and failure is not failure_seen:
+                        raise _unreadable(url, failure) from failure
+                    try:
+                        entry = await self._fetch(origin)
+                    except FetchError as error:
+                        self._failures[origin] = error
+                        raise _unreadable(url, error) from error
                     self._entries[origin] = entry
         if isinstance(entry.rules, bool):
             return entry.rules
@@ -129,12 +159,13 @@ class RobotsPolicy:
         )
 
     async def _fetch(self, origin: str) -> _Entry:
-        """Fetch an origin's robots.txt and turn the answer into an entry."""
+        """Fetch an origin's robots.txt and turn the answer into an entry.
+
+        Raises:
+            FetchError: No answer came back; the `send` callable's error.
+        """
         fetched_at = self._clock()
-        try:
-            response = await self._send(origin + _ROBOTS_PATH)
-        except FetchError:
-            return _Entry(rules=False, fetched_at=fetched_at)
+        response = await self._send(origin + _ROBOTS_PATH)
         status = response.status_code
         if status == httpx.codes.TOO_MANY_REQUESTS:
             return _Entry(rules=False, fetched_at=fetched_at, permanent=True)
@@ -142,7 +173,7 @@ class RobotsPolicy:
             return _Entry(rules=True, fetched_at=fetched_at)
         if not httpx.codes.is_success(status):
             return _Entry(rules=False, fetched_at=fetched_at)
-        text = response.content[:_PARSE_LIMIT_BYTES].decode("utf-8", errors="replace")
+        text = response.content[:PARSE_LIMIT_BYTES].decode("utf-8", errors="replace")
         parser = RobotFileParser()
         try:
             parser.parse(text.splitlines())

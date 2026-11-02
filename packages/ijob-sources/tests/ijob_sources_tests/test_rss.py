@@ -1121,3 +1121,14 @@ def test_rss_detail_feed_ignores_the_items_own_description() -> None:
     (draft,) = _fetch(RssFeed(key), handler).drafts
 
     assert draft.description == "From the page"
+
+
+def test_rejected_item_is_kept_in_skipped() -> None:
+    bad = _item_xml(title="no separator", link="https://example.test/jobs/bad")
+
+    batch = _fetch_one_feed("wwr-programming", _feed_xml(bad))
+
+    (item,) = batch.skipped
+    assert json.loads(item.text)["title"] == "no separator"
+    assert item.url == "https://example.test/jobs/bad"
+    assert item.reason

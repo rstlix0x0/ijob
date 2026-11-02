@@ -25,8 +25,9 @@ from ijob_core.model import (
     SourceRef,
 )
 
-from ijob_sources.collect import SourceBatch
+from ijob_sources.collect import SkippedItem, SourceBatch, skipped_item
 from ijob_sources.errors import ParseError
+from ijob_sources.item_url import url_of
 from ijob_sources.jsonld import JobPostingFields, ld_json_blocks, read_job_posting
 from ijob_sources.polite_http import PoliteClient
 
@@ -109,7 +110,11 @@ def _merge(batches: list[SourceBatch]) -> SourceBatch:
             if draft.external_id not in seen:
                 seen.add(draft.external_id)
                 drafts.append(draft)
-    return SourceBatch(drafts=drafts, rejected=sum(b.rejected for b in batches))
+    return SourceBatch(
+        drafts=drafts,
+        rejected=sum(b.rejected for b in batches),
+        skipped=tuple(item for b in batches for item in b.skipped),
+    )
 
 
 def parse_lgr_page(html_text: str, key: SourceKey) -> SourceBatch:
@@ -129,15 +134,17 @@ def parse_lgr_page(html_text: str, key: SourceKey) -> SourceBatch:
     elements = _item_list(html_text)
     drafts: list[SightingDraft] = []
     rejected = 0
+    skipped: list[SkippedItem] = []
     for index, element in enumerate(elements):
         try:
             drafts.append(_to_draft(element, key))
         except InvalidValueError as error:
             rejected += 1
+            skipped.append(skipped_item(element, _element_url(element), error))
             _LOGGER.warning(
                 "rejected letsgetrusty job %s: %s", _job_label(element, index), error
             )
-    return SourceBatch(drafts=drafts, rejected=rejected)
+    return SourceBatch(drafts=drafts, rejected=rejected, skipped=tuple(skipped))
 
 
 def _item_list(html_text: str) -> list[object]:
@@ -153,6 +160,12 @@ def _item_list(html_text: str) -> list[object]:
                 return elements
     reason = "page has no 'ItemList' JSON-LD block"
     raise ParseError(reason)
+
+
+def _element_url(element: object) -> str | None:
+    """Return the `item.url` of a list element, or `None` when it has no text there."""
+    item = element.get("item") if isinstance(element, dict) else None
+    return url_of(item, "url")
 
 
 def _job_label(element: object, index: int) -> str:

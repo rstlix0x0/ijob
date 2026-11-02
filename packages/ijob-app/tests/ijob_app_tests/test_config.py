@@ -7,12 +7,15 @@ from pathlib import Path
 import pytest
 from ijob_app.config import (
     FilterFlags,
+    ShadowedField,
+    effective_filters,
     flags_from_spec,
     load_filters,
     parse_country_flag,
     parse_min_salary,
     parse_remote,
     parse_since,
+    read_filter_layers,
     read_filters,
     spec_from_flags,
 )
@@ -29,6 +32,10 @@ _DEFAULT_EXCLUDE = (
     r"\brecruit",
     r"\bmarketing\b",
     r"\baccount executive\b",
+)
+_SINCE_AND_SALARY = (
+    '[filters]\nsince = "3d"\n[filters.min_salary]\n'
+    'amount = 1\ncurrency = "USD"\nperiod = "year"\n'
 )
 
 
@@ -480,3 +487,198 @@ def test_spec_from_flags_rejects_bad_values() -> None:
         spec_from_flags(FilterSpec(), FilterFlags(since="abc"))
     with pytest.raises(InvalidValueError, match="company"):
         spec_from_flags(FilterSpec(), FilterFlags(companies=("",)))
+
+
+def test_read_filters_unchanged(tmp_path: Path) -> None:
+    default = tmp_path / "home.toml"
+    path = _write(
+        tmp_path, '[filters]\ncountries = ["SG"]\n[filters.role]\ninclude = []\n'
+    )
+    flags = FilterFlags(companies=("Acme",))
+
+    spec = read_filters(path, flags, default=default)
+    merged, shadowed = effective_filters(
+        read_filter_layers(path, flags, default=default), None
+    )
+
+    assert spec.include == ()
+    assert spec.countries == {CountryCode("SG")}
+    assert spec.companies == ("Acme",)
+    assert shadowed == ()
+    assert merged == spec
+
+
+@pytest.mark.parametrize(
+    ("text", "flags"),
+    [
+        (None, FilterFlags()),
+        ("", FilterFlags()),
+        ("[filters.role]\ninclude = []\nexclude = []\n", FilterFlags()),
+        ('[filters]\ncountries = ["JP"]\nrequire_salary = true\n', FilterFlags()),
+        (
+            _SINCE_AND_SALARY,
+            FilterFlags(since="9d", require_salary=False, remotes=("none",)),
+        ),
+        ('[filters]\ncompanies = ["A"]\n', FilterFlags(companies=("B",))),
+    ],
+)
+def test_effective_filters_without_instruction_equals_read_filters(
+    tmp_path: Path, text: str | None, flags: FilterFlags
+) -> None:
+    path = None if text is None else _write(tmp_path, text)
+    default = tmp_path / "absent.toml"
+
+    spec = read_filters(path, flags, default=default)
+    merged, shadowed = effective_filters(
+        read_filter_layers(path, flags, default=default), None
+    )
+
+    assert merged == spec
+    assert shadowed == ()
+
+
+def test_read_filter_layers_keeps_each_layer_apart(tmp_path: Path) -> None:
+    path = _write(tmp_path, '[filters]\ncountries = ["JP"]\n')
+
+    layers = read_filter_layers(path, FilterFlags(since="3d"), default=None)
+
+    assert _patterns(layers.packaged.include) == _DEFAULT_INCLUDE
+    assert layers.packaged.countries == frozenset()
+    assert layers.user == FilterSpec(countries=frozenset({CountryCode("JP")}))
+    assert layers.flags == FilterSpec(since=timedelta(days=3))
+    missing = tmp_path / "absent.toml"
+    with pytest.raises(InvalidValueError, match=re.escape(str(missing))):
+        read_filter_layers(missing, FilterFlags(), default=None)
+    assert read_filter_layers(None, FilterFlags(), default=missing).user == FilterSpec()
+
+
+def test_effective_filters_checked_example(tmp_path: Path) -> None:
+    path = _write(tmp_path, '[filters]\ncountries = ["JP"]\n')
+    layers = read_filter_layers(path, FilterFlags(), default=None)
+    instruction = {
+        "role": {"include": ["Rust"]},
+        "countries": ["ID"],
+        "remote": ["worldwide", "country"],
+    }
+
+    spec, shadowed = effective_filters(layers, instruction)
+
+    assert spec.countries == {CountryCode("JP")}
+    assert _patterns(spec.include) == ("Rust",)
+    assert spec.remote == {RemoteScope.WORLDWIDE, RemoteScope.COUNTRY}
+    assert _patterns(spec.exclude) == _DEFAULT_EXCLUDE
+    assert shadowed == (ShadowedField("countries", "config", "JP", "ID"),)
+
+
+def test_effective_filters_without_instruction_merges_layers(tmp_path: Path) -> None:
+    path = _write(tmp_path, '[filters]\ncountries = ["JP"]\n')
+    layers = read_filter_layers(path, FilterFlags(countries=("SG",)), default=None)
+
+    spec, shadowed = effective_filters(layers, None)
+
+    assert spec.countries == {CountryCode("SG")}
+    assert _patterns(spec.include) == _DEFAULT_INCLUDE
+    assert shadowed == ()
+
+
+def test_flag_beats_instruction(tmp_path: Path) -> None:
+    path = _write(tmp_path, '[filters]\ncountries = ["JP"]\n')
+    flags = FilterFlags(countries=("SG",), since="2d")
+    layers = read_filter_layers(path, flags, default=None)
+    instruction = {"countries": ["ID"], "since": "9d", "companies": ["Acme"]}
+
+    spec, shadowed = effective_filters(layers, instruction)
+
+    assert spec.countries == {CountryCode("SG")}
+    assert spec.since == timedelta(days=2)
+    assert spec.companies == ("Acme",)
+    assert shadowed == (
+        ShadowedField("countries", "flag", "SG", "ID"),
+        ShadowedField("since", "flag", "2d", "9d"),
+    )
+
+
+def test_instruction_equal_to_the_winner_is_not_shadowed(tmp_path: Path) -> None:
+    path = _write(tmp_path, '[filters]\ncountries = ["JP"]\n')
+    layers = read_filter_layers(path, FilterFlags(), default=None)
+
+    _, shadowed = effective_filters(layers, {"countries": ["JP"]})
+
+    assert shadowed == ()
+
+
+def test_no_require_salary_flag_beats_instruction(tmp_path: Path) -> None:
+    layers = read_filter_layers(
+        None, FilterFlags(require_salary=False), default=tmp_path / "absent.toml"
+    )
+
+    spec, shadowed = effective_filters(layers, {"require_salary": True})
+
+    assert spec.require_salary is False
+    assert shadowed == (ShadowedField("require_salary", "flag", "false", "true"),)
+
+
+def test_user_empty_include_beats_instruction(tmp_path: Path) -> None:
+    path = _write(tmp_path, "[filters.role]\ninclude = []\n")
+    layers = read_filter_layers(path, FilterFlags(), default=None)
+
+    spec, shadowed = effective_filters(layers, {"role": {"include": ["Rust"]}})
+
+    assert spec.include == ()
+    assert _patterns(spec.exclude) == _DEFAULT_EXCLUDE
+    assert shadowed == (ShadowedField("include", "config", "", "Rust"),)
+
+
+def test_field_the_user_file_names_beats_instruction_even_at_default(
+    tmp_path: Path,
+) -> None:
+    path = _write(tmp_path, "[filters]\nrequire_salary = false\n")
+    layers = read_filter_layers(path, FilterFlags(), default=None)
+
+    spec, shadowed = effective_filters(layers, {"require_salary": True})
+
+    assert spec.require_salary is False
+    assert shadowed == (ShadowedField("require_salary", "config", "false", "true"),)
+
+
+def test_shadowed_values_are_written_as_the_user_types_them(tmp_path: Path) -> None:
+    path = _write(tmp_path, "[filters.role]\ninclude = ['Go']\n")
+    flags = FilterFlags(
+        remotes=("none", "region"), min_salary="6000:SGD:month", require_salary=True
+    )
+    layers = read_filter_layers(path, flags, default=None)
+    instruction = {
+        "role": {"include": ["Rust", "Zig"]},
+        "remote": ["worldwide", "country"],
+        "min_salary": {"amount": 5000, "currency": "USD", "period": "year"},
+        "require_salary": False,
+    }
+
+    _, shadowed = effective_filters(layers, instruction)
+
+    assert shadowed == (
+        ShadowedField("include", "config", "Go", "Rust, Zig"),
+        ShadowedField("remote", "flag", "none, region", "country, worldwide"),
+        ShadowedField("min_salary", "flag", "6000:SGD:month", "5000:USD:year"),
+        ShadowedField("require_salary", "flag", "true", "false"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("table", "key"),
+    [
+        ({"since": "banana"}, "instructions.filters.since"),
+        ({"countries": ["Atlantis"]}, "instructions.filters.countries"),
+        ({"contries": []}, "instructions.filters.contries"),
+        ({"role": {"include": "Rust"}}, "instructions.filters.role.include"),
+        ({"require_salary": "yes"}, "instructions.filters.require_salary"),
+        ({"min_salary": {"amount": 1}}, "instructions.filters.min_salary"),
+    ],
+)
+def test_instruction_filter_invalid_rejected(
+    tmp_path: Path, table: dict[str, object], key: str
+) -> None:
+    layers = read_filter_layers(None, FilterFlags(), default=tmp_path / "absent.toml")
+
+    with pytest.raises(InvalidValueError, match=re.escape(key)):
+        effective_filters(layers, table)

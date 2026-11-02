@@ -31,7 +31,7 @@ from ijob_core.model import (
 )
 from ijob_core.money import Money, Period
 
-from ijob_sources.collect import SourceBatch
+from ijob_sources.collect import SkippedItem, SourceBatch, skipped_item
 from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError
 from ijob_sources.payload import raw_object
@@ -101,6 +101,7 @@ class KalibrrBoard:
         drafts: list[SightingDraft] = []
         seen: set[ExternalId] = set()
         rejected = 0
+        skipped: dict[str, SkippedItem] = {}
         offset = 0
         for fetched in range(_MAX_PAGES):
             response = await client.get(
@@ -111,6 +112,8 @@ class KalibrrBoard:
                 if draft.external_id not in seen:
                     seen.add(draft.external_id)
                     drafts.append(draft)
+            for item in page.batch.skipped:
+                skipped.setdefault(item.text, item)
             rejected += page.batch.rejected - len(page.rejected_ids)
             for external_id in page.rejected_ids:
                 if external_id not in seen:
@@ -119,7 +122,9 @@ class KalibrrBoard:
             offset += _PAGE_SIZE
             if offset >= page.count:
                 break
-        return SourceBatch(drafts=drafts, rejected=rejected)
+        return SourceBatch(
+            drafts=drafts, rejected=rejected, skipped=tuple(skipped.values())
+        )
 
 
 def parse_kalibrr(body: bytes, key: SourceKey) -> KalibrrPage:
@@ -158,11 +163,13 @@ def parse_kalibrr(body: bytes, key: SourceKey) -> KalibrrPage:
     drafts: list[SightingDraft] = []
     rejected_ids: list[ExternalId] = []
     rejected = 0
+    skipped: list[SkippedItem] = []
     for index, job in enumerate(jobs):
         try:
             drafts.append(_to_draft(job, key))
         except InvalidValueError as error:
             rejected += 1
+            skipped.append(skipped_item(job, None, error))
             if isinstance(job, dict) and (job_id := _raw_id(job)) is not None:
                 rejected_ids.append(ExternalId(str(job_id)))
             _LOGGER.warning(
@@ -172,7 +179,7 @@ def parse_kalibrr(body: bytes, key: SourceKey) -> KalibrrPage:
                 error,
             )
     return KalibrrPage(
-        batch=SourceBatch(drafts=drafts, rejected=rejected),
+        batch=SourceBatch(drafts=drafts, rejected=rejected, skipped=tuple(skipped)),
         count=count,
         rejected_ids=tuple(rejected_ids),
     )

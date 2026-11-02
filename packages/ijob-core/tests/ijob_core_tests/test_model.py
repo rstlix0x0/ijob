@@ -1,4 +1,6 @@
 import dataclasses
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 from typing import Any, override
@@ -8,15 +10,21 @@ from ijob_core.countries import CountryCode
 from ijob_core.errors import InvalidValueError
 from ijob_core.model import (
     ExternalId,
+    Instructions,
     Label,
     Posting,
     PostingId,
     RemoteScope,
+    ResumeProfile,
+    Score,
+    Seniority,
     Sighting,
     SightingDraft,
     SourceKind,
     SourceRef,
     StoredCv,
+    StoredRecipe,
+    Verdict,
     Vote,
     parse_source_key,
     parse_source_ref,
@@ -331,3 +339,222 @@ def test_stored_cv_holds_its_fields() -> None:
 def test_stored_cv_rejects_bad_fields(overrides: dict[str, Any]) -> None:
     with pytest.raises(InvalidValueError):
         _cv(**overrides)
+
+
+def _stored_recipe(**overrides: Any) -> StoredRecipe:  # noqa: ANN401  # forwards arbitrary field overrides
+    values: dict[str, Any] = {
+        "ref": SourceRef(SourceKind.GREENHOUSE, parse_source_key("acme")),
+        "recipe": '{"steps": []}',
+        "model": "model-a",
+        "created_at": _AWARE,
+    }
+    values.update(overrides)
+    return StoredRecipe(**values)
+
+
+def test_stored_recipe_holds_its_fields() -> None:
+    recipe = _stored_recipe()
+    assert recipe.ref == SourceRef(SourceKind.GREENHOUSE, parse_source_key("acme"))
+    assert (recipe.recipe, recipe.model, recipe.created_at) == (
+        '{"steps": []}',
+        "model-a",
+        _AWARE,
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "field"),
+    [
+        ({"recipe": ""}, "recipe"),
+        ({"model": ""}, "model"),
+        ({"created_at": datetime(2026, 10, 1, 8, 0)}, "created_at"),  # noqa: DTZ001  # naive on purpose
+    ],
+)
+def test_stored_recipe_validation(overrides: dict[str, Any], field: str) -> None:
+    with pytest.raises(InvalidValueError, match=field):
+        _stored_recipe(**overrides)
+
+
+def test_stored_recipe_is_keyword_only() -> None:
+    with pytest.raises(TypeError):
+        StoredRecipe(  # type: ignore[call-arg]
+            SourceRef(SourceKind.GREENHOUSE, parse_source_key("acme")),
+            "{}",
+            "model-a",
+            _AWARE,
+        )
+
+
+def _profile(**overrides: Any) -> ResumeProfile:  # noqa: ANN401  # forwards arbitrary field overrides
+    fields: dict[str, Any] = {
+        "summary": "Backend engineer.",
+        "years_experience": 7,
+        "seniority": Seniority.SENIOR,
+        "roles": ("backend engineer",),
+        "spoken_languages": ("English",),
+        "locations": ("Jakarta",),
+        "work_authorization": ("Indonesia",),
+        "skills": ("python", "sql"),
+    }
+    fields.update(overrides)
+    return ResumeProfile(**fields)
+
+
+def test_seniority_values() -> None:
+    assert [s.value for s in Seniority] == [
+        "junior",
+        "mid",
+        "senior",
+        "staff",
+        "principal",
+        "unknown",
+    ]
+
+
+def test_resume_profile_accepts_bounds() -> None:
+    assert len(_profile(summary="x" * 600).summary) == 600
+    assert _profile(years_experience=0).years_experience == 0
+    assert _profile(years_experience=60).years_experience == 60
+    assert _profile(years_experience=None).years_experience is None
+    assert len(_profile(roles=("r",) * 20).roles) == 20
+    assert len(_profile(skills=("s",) * 100).skills) == 100
+    assert len(_profile(skills=("s" * 100,)).skills[0]) == 100
+
+
+@pytest.mark.parametrize(
+    ("field", "overrides"),
+    [
+        ("summary", {"summary": "x" * 601}),
+        ("years_experience", {"years_experience": 61}),
+        ("years_experience", {"years_experience": -1}),
+        ("roles", {"roles": ("r",) * 21}),
+        ("spoken_languages", {"spoken_languages": ("l",) * 21}),
+        ("locations", {"locations": ("l",) * 21}),
+        ("work_authorization", {"work_authorization": ("w",) * 21}),
+        ("skills", {"skills": ("s",) * 101}),
+        ("roles", {"roles": ("ok", "  ")}),
+        ("skills", {"skills": ("",)}),
+        ("skills", {"skills": ("s" * 101,)}),
+        ("locations", {"locations": ("l" * 101,)}),
+    ],
+)
+def test_resume_profile_rejects_over_bounds(
+    field: str, overrides: dict[str, Any]
+) -> None:
+    with pytest.raises(InvalidValueError) as caught:
+        _profile(**overrides)
+    assert caught.value.field == field
+
+
+def test_resume_profile_json_roundtrip_and_hash_stable() -> None:
+    profile = _profile()
+    assert ResumeProfile.from_json(profile.to_json()) == profile
+    assert ", " not in profile.to_json()
+    assert ": " not in profile.to_json()
+
+    shuffled = json.loads(profile.to_json())
+    reordered = json.dumps(dict(reversed(list(shuffled.items()))), indent=3)
+    rebuilt = ResumeProfile.from_json(reordered)
+    assert rebuilt == profile
+    assert rebuilt.sha256() == profile.sha256()
+    assert profile.sha256() == hashlib.sha256(profile.to_json().encode()).hexdigest()
+    assert _profile(skills=("python",)).sha256() != profile.sha256()
+
+
+def test_resume_profile_from_json_rejects_bad_text() -> None:
+    with pytest.raises(InvalidValueError):
+        ResumeProfile.from_json("not json")
+    with pytest.raises(InvalidValueError):
+        ResumeProfile.from_json("[]")
+    with pytest.raises(InvalidValueError):
+        ResumeProfile.from_json('{"summary": "x"}')
+    bad = json.loads(_profile().to_json())
+    bad["seniority"] = "wizard"
+    with pytest.raises(InvalidValueError):
+        ResumeProfile.from_json(json.dumps(bad))
+
+
+def _instructions(**overrides: Any) -> Instructions:  # noqa: ANN401  # forwards arbitrary field overrides
+    fields: dict[str, Any] = {
+        "text": "Remote backend roles only.",
+        "filters_json": '{"remote":true}',
+        "rules": ("no crypto", "no on-site"),
+        "model": "m",
+        "task_version": "v1",
+        "set_at": _AWARE,
+    }
+    fields.update(overrides)
+    return Instructions(**fields)
+
+
+def test_instructions_hashes() -> None:
+    base = _instructions()
+    expected_rules = json.dumps(["no crypto", "no on-site"], separators=(",", ":"))
+    assert base.rules_sha256 == hashlib.sha256(expected_rules.encode()).hexdigest()
+    assert base.text_sha256 == hashlib.sha256(base.text.encode()).hexdigest()
+    changed = _instructions(rules=("no crypto", "no travel"))
+    assert changed.rules_sha256 != base.rules_sha256
+    later = _instructions(set_at=_AWARE + timedelta(days=1))
+    assert later.rules_sha256 == base.rules_sha256
+    assert later.text_sha256 == base.text_sha256
+    joined = _instructions(rules=("a\nb",))
+    split = _instructions(rules=("a", "b"))
+    assert joined.rules_sha256 != split.rules_sha256
+
+
+def test_instructions_accepts_bounds() -> None:
+    assert len(_instructions(text="x" * 4000).text) == 4000
+    assert _instructions(rules=()).rules == ()
+    assert len(_instructions(rules=("r",) * 10).rules) == 10
+    assert len(_instructions(rules=("r" * 200,)).rules[0]) == 200
+
+
+@pytest.mark.parametrize(
+    ("field", "overrides"),
+    [
+        ("text", {"text": "   "}),
+        ("text", {"text": "x" * 4001}),
+        ("rules", {"rules": ("r",) * 11}),
+        ("rules", {"rules": ("r" * 201,)}),
+        ("rules", {"rules": ("",)}),
+        ("filters_json", {"filters_json": "not json"}),
+        ("filters_json", {"filters_json": "[1]"}),
+        ("model", {"model": " "}),
+        ("task_version", {"task_version": ""}),
+        ("set_at", {"set_at": datetime(2026, 10, 1, 8, 0)}),  # noqa: DTZ001  # naive
+    ],
+)
+def test_instructions_rejects_blank_text_and_too_many_rules(
+    field: str, overrides: dict[str, Any]
+) -> None:
+    with pytest.raises(InvalidValueError) as caught:
+        _instructions(**overrides)
+    assert caught.value.field == field
+
+
+def test_verdict_consistency() -> None:
+    assert Verdict(keep=True, reason="fits", rule=None).rule is None
+    assert Verdict(keep=False, reason="no", rule=2).rule == 2
+    for keep, rule in ((True, 1), (False, None), (False, 0)):
+        with pytest.raises(InvalidValueError) as caught:
+            Verdict(keep=keep, reason="r", rule=rule)
+        assert caught.value.field == "rule"
+    for reason in ("", "r" * 201):
+        with pytest.raises(InvalidValueError) as caught:
+            Verdict(keep=True, reason=reason, rule=None)
+        assert caught.value.field == "reason"
+    assert len(Verdict(keep=True, reason="r" * 200, rule=None).reason) == 200
+
+
+def test_score_bounds() -> None:
+    assert Score(score=0, reasons=("a",)).score == 0
+    assert Score(score=100, reasons=("a",) * 5).score == 100
+    assert len(Score(score=50, reasons=("a" * 200,)).reasons[0]) == 200
+    for value in (-1, 101):
+        with pytest.raises(InvalidValueError) as caught:
+            Score(score=value, reasons=("a",))
+        assert caught.value.field == "score"
+    for reasons in ((), ("a",) * 6, ("",), ("a" * 201,)):
+        with pytest.raises(InvalidValueError) as caught:
+            Score(score=1, reasons=reasons)
+        assert caught.value.field == "reasons"

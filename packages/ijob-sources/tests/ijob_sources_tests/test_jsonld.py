@@ -134,6 +134,47 @@ def test_locality_beats_country_for_location() -> None:
     assert fields.country == "JP"
 
 
+def test_locality_given_as_list() -> None:
+    address = {"addressLocality": ["Kyiv"], "addressCountry": "UA"}
+
+    fields = _read(_page(_posting(jobLocation=_location(address))))
+
+    assert fields.location == "Kyiv"
+    assert fields.country == "UA"
+
+
+def test_locality_list_keeps_the_first_non_blank_text() -> None:
+    address = {"addressLocality": [" ", "Lviv", "Kyiv"]}
+
+    fields = _read(_page(_posting(jobLocation=_location(address))))
+
+    assert fields.location == "Lviv"
+
+
+def test_empty_locality_list_names_no_locality() -> None:
+    address = {"addressLocality": [], "addressCountry": "Canada"}
+
+    fields = _read(_page(_posting(jobLocation=_location(address))))
+
+    assert fields.location == "Canada"
+
+
+@pytest.mark.parametrize(
+    "locality",
+    [
+        pytest.param(["Kyiv", 7], id="non-text-item"),
+        pytest.param([["Kyiv"]], id="nested-list"),
+        pytest.param(7, id="non-text-value"),
+        pytest.param({"name": "Kyiv"}, id="object"),
+    ],
+)
+def test_non_text_locality_is_invalid(locality: object) -> None:
+    address = {"addressLocality": locality}
+
+    with pytest.raises(InvalidValueError):
+        _read(_page(_posting(jobLocation=_location(address))))
+
+
 def test_first_country_that_parses_wins() -> None:
     places = [
         _location({"addressCountry": "Nowhere"}),

@@ -10,13 +10,19 @@ from ijob_core.countries import CountryCode, parse_country
 from ijob_core.errors import InvalidValueError
 from ijob_core.model import (
     ExternalId,
+    Instructions,
     Label,
     PostingId,
     RemoteScope,
+    ResumeProfile,
+    Score,
+    Seniority,
     SightingDraft,
     SourceKind,
     SourceRef,
     StoredCv,
+    StoredRecipe,
+    Verdict,
     Vote,
     parse_source_key,
 )
@@ -24,10 +30,13 @@ from ijob_core.money import Money, Period
 from ijob_core.store import (
     _MIGRATIONS,
     RecordResult,
+    SkippedStatus,
     SourceOrigin,
     SourceRow,
     Store,
+    StoredProfile,
     _Outcome,
+    skipped_item_id,
 )
 
 _A = SourceRef(SourceKind.GREENHOUSE, parse_source_key("alpha"))
@@ -37,6 +46,10 @@ _T1 = datetime(2026, 10, 1, 8, 0, tzinfo=UTC)
 _T2 = datetime(2026, 10, 2, 9, 30, 15, 250000, tzinfo=UTC)
 _T1_TEXT = "2026-10-01T08:00:00.000000+00:00"
 _T2_TEXT = "2026-10-02T09:30:15.250000+00:00"
+_ALL_TABLES = (
+    "cv,cv_profile,instructions,labels,postings,scores,sightings,"
+    "skipped_items,source_recipes,sources,verdicts"
+)
 
 
 class _TrackedConnection(sqlite3.Connection):
@@ -77,17 +90,17 @@ def _draft(
     return SightingDraft(source=source, external_id=ExternalId(external_id), **values)
 
 
-def test_fresh_database_is_version_3(tmp_path: Path) -> None:
+def test_fresh_database_is_version_6(tmp_path: Path) -> None:
     path = tmp_path / "ijob.db"
     with Store.open(path):
         pass
-    assert _scalar(path, "PRAGMA user_version") == 3
+    assert _scalar(path, "PRAGMA user_version") == 6
     tables = _scalar(
         path,
         "SELECT group_concat(name) FROM "
         "(SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name)",
     )
-    assert tables == "cv,labels,postings,sightings,sources"
+    assert tables == _ALL_TABLES
     indexes = _scalar(
         path,
         "SELECT group_concat(name) FROM "
@@ -110,7 +123,7 @@ def test_open_is_idempotent(tmp_path: Path) -> None:
         )
     with Store.open(path):
         pass
-    assert _scalar(path, "PRAGMA user_version") == 3
+    assert _scalar(path, "PRAGMA user_version") == 6
     assert _scalar(path, "SELECT count(*) FROM postings") == 1
 
 
@@ -376,7 +389,7 @@ def test_version_1_database_migrates_and_keeps_rows(tmp_path: Path) -> None:
         conn.execute("PRAGMA user_version = 1")
     with Store.open(path) as store:
         postings = store.postings(sources=[_A])
-    assert _scalar(path, "PRAGMA user_version") == 3
+    assert _scalar(path, "PRAGMA user_version") == 6
     assert len(postings) == 1
     posting = postings[0]
     assert (posting.title, posting.company) == ("Engineer", "Acme")
@@ -887,7 +900,7 @@ def test_migration_3_on_version_2_database(tmp_path: Path) -> None:
     _version_2_database(path)
     with Store.open(path) as store:
         (posting,) = store.postings(sources=[_A])
-    assert _scalar(path, "PRAGMA user_version") == 3
+    assert _scalar(path, "PRAGMA user_version") == 6
     assert posting.title == "Engineer"
     assert posting.description is None
     tables = _scalar(
@@ -895,7 +908,7 @@ def test_migration_3_on_version_2_database(tmp_path: Path) -> None:
         "SELECT group_concat(name) FROM "
         "(SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name)",
     )
-    assert tables == "cv,labels,postings,sightings,sources"
+    assert tables == _ALL_TABLES
 
 
 def test_record_stores_description(tmp_path: Path) -> None:
@@ -1078,3 +1091,428 @@ def test_cv_round_trip_and_replace(tmp_path: Path) -> None:
         store.set_cv(second)
         assert store.cv() == second
     assert _scalar(tmp_path / "ijob.db", "SELECT count(*) FROM cv") == 1
+
+
+def _version_3_database(path: Path) -> None:
+    """Build a database by applying only the first three migrations."""
+    with closing(sqlite3.connect(path)) as conn, conn:
+        for statements in _MIGRATIONS[:3]:
+            for statement in statements:
+                conn.execute(statement)
+        conn.execute(
+            "INSERT INTO postings (title, company, location, url, first_seen, "
+            "last_seen) VALUES ('Engineer', 'Acme', 'Remote', "
+            "'https://example.com/jobs/1', ?, ?)",
+            (_T1_TEXT, _T1_TEXT),
+        )
+        conn.execute(
+            "INSERT INTO cv (id, name, sha256, size, stored_at) "
+            "VALUES (1, 'cv.pdf', ?, 10, ?)",
+            ("ab" * 32, _T1_TEXT),
+        )
+        conn.execute("PRAGMA user_version = 3")
+
+
+def test_migration_4_creates_tables(tmp_path: Path) -> None:
+    path = tmp_path / "ijob.db"
+    _version_3_database(path)
+    with Store.open(path) as store:
+        posting = store.posting(PostingId(1))
+        cv = store.cv()
+        assert store.cv_profile() is None
+        assert store.instructions() is None
+    assert _scalar(path, "PRAGMA user_version") == 6
+    assert posting is not None
+    assert posting.title == "Engineer"
+    assert cv == StoredCv("cv.pdf", "ab" * 32, 10, _T1)
+    tables = _scalar(
+        path,
+        "SELECT group_concat(name) FROM "
+        "(SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name)",
+    )
+    assert tables == _ALL_TABLES
+
+
+def _version_4_database(path: Path) -> None:
+    """Build a database by applying only the first four migrations."""
+    with closing(sqlite3.connect(path)) as conn, conn:
+        for statements in _MIGRATIONS[:4]:
+            for statement in statements:
+                conn.execute(statement)
+        conn.execute(
+            "INSERT INTO sources (ref, company, origin) "
+            "VALUES ('greenhouse:alpha', 'Alpha', 'seed')"
+        )
+        conn.execute("PRAGMA user_version = 4")
+
+
+def test_migration_5_adds_source_recipes(tmp_path: Path) -> None:
+    fresh = tmp_path / "fresh.db"
+    with Store.open(fresh):
+        pass
+    assert _scalar(fresh, "PRAGMA user_version") == 6
+    assert _rows(fresh, "PRAGMA table_info(source_recipes)") == [
+        (0, "ref", "TEXT", 1, None, 1),
+        (1, "recipe", "TEXT", 1, None, 0),
+        (2, "model", "TEXT", 1, None, 0),
+        (3, "created_at", "TEXT", 1, None, 0),
+    ]
+    assert _rows(fresh, "PRAGMA foreign_key_list(source_recipes)") == [
+        (0, 0, "sources", "ref", "ref", "NO ACTION", "NO ACTION", "NONE")
+    ]
+
+    upgraded = tmp_path / "upgraded.db"
+    _version_4_database(upgraded)
+    assert _rows(upgraded, "PRAGMA table_info(source_recipes)") == []
+    with Store.open(upgraded) as store:
+        row = store.source(_A)
+        assert store.recipe(_A) is None
+    assert _scalar(upgraded, "PRAGMA user_version") == 6
+    assert _rows(upgraded, "PRAGMA table_info(source_recipes)") == _rows(
+        fresh, "PRAGMA table_info(source_recipes)"
+    )
+    assert row is not None
+    assert row.company == "Alpha"
+    assert row.origin is SourceOrigin.SEED
+
+
+def test_set_recipe_source_adds_both_rows(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.set_recipe_source(
+            _A,
+            company="Alpha",
+            target_url="https://example.com/jobs",
+            recipe='{"steps": []}',
+            model="model-a",
+            at=_T2,
+        )
+        row = store.source(_A)
+        stored = store.recipe(_A)
+    assert row == SourceRow(
+        ref=_A,
+        company="Alpha",
+        target_url="https://example.com/jobs",
+        origin=SourceOrigin.USER,
+        removed=False,
+        last_fetched_at=None,
+    )
+    assert stored == StoredRecipe(
+        ref=_A, recipe='{"steps": []}', model="model-a", created_at=_T2
+    )
+
+
+def test_set_recipe_source_writes_utc_text(tmp_path: Path) -> None:
+    path = tmp_path / "ijob.db"
+    local = datetime(
+        2026, 10, 2, 11, 30, 15, 250000, tzinfo=timezone(timedelta(hours=2))
+    )
+    with Store.open(path) as store:
+        store.set_recipe_source(
+            _A,
+            company="Alpha",
+            target_url=None,
+            recipe="{}",
+            model="model-a",
+            at=local,
+        )
+    assert _scalar(path, "SELECT created_at FROM source_recipes") == _T2_TEXT
+
+
+def test_set_recipe_source_replaces_recipe_and_restores(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.set_recipe_source(
+            _A,
+            company="First",
+            target_url="https://example.com/one",
+            recipe='{"v": 1}',
+            model="model-a",
+            at=_T1,
+        )
+        store.remove_source(_A)
+        store.set_recipe_source(
+            _A,
+            company="Second",
+            target_url="https://example.com/two",
+            recipe='{"v": 2}',
+            model="model-b",
+            at=_T2,
+        )
+        row = store.source(_A)
+        stored = store.recipe(_A)
+    assert row is not None
+    assert not row.removed
+    assert row.company == "First"
+    assert stored == StoredRecipe(
+        ref=_A, recipe='{"v": 2}', model="model-b", created_at=_T2
+    )
+
+
+def test_removed_source_keeps_recipe(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.set_recipe_source(
+            _A,
+            company="Alpha",
+            target_url=None,
+            recipe="{}",
+            model="model-a",
+            at=_T1,
+        )
+        store.remove_source(_A)
+        stored = store.recipe(_A)
+    assert stored == StoredRecipe(ref=_A, recipe="{}", model="model-a", created_at=_T1)
+
+
+def test_set_recipe_source_is_atomic(tmp_path: Path) -> None:
+    path = tmp_path / "ijob.db"
+    with Store.open(path) as store:
+        with closing(sqlite3.connect(path)) as conn, conn:
+            conn.execute(
+                "CREATE TRIGGER fail_recipe BEFORE INSERT ON source_recipes "
+                "BEGIN SELECT RAISE(ABORT, 'x'); END"
+            )
+        with pytest.raises(sqlite3.Error, match="x"):
+            store.set_recipe_source(
+                _B,
+                company="Beta",
+                target_url=None,
+                recipe="{}",
+                model="model-a",
+                at=_T1,
+            )
+        assert store.source(_B) is None
+        assert store.recipe(_B) is None
+
+
+def test_recipe_unknown_ref_is_none(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        assert store.recipe(_A) is None
+
+
+def test_set_recipe_source_rejects_naive_time(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        with pytest.raises(InvalidValueError, match="at"):
+            store.set_recipe_source(
+                _A,
+                company="Alpha",
+                target_url=None,
+                recipe="{}",
+                model="model-a",
+                at=datetime(2026, 10, 1, 8, 0),  # noqa: DTZ001  # naive on purpose
+            )
+        assert store.source(_A) is None
+
+
+def _profile(summary: str = "Backend engineer") -> ResumeProfile:
+    return ResumeProfile(
+        summary=summary,
+        years_experience=7,
+        seniority=Seniority.SENIOR,
+        roles=("backend",),
+        spoken_languages=("English",),
+        locations=("Jakarta",),
+        work_authorization=("ID",),
+        skills=("python", "sql"),
+    )
+
+
+def _instructions(text: str = "Backend only") -> Instructions:
+    return Instructions(
+        text=text,
+        filters_json='{"include": ["backend"]}',
+        rules=("no on-site", "no crypto"),
+        model="model-a",
+        task_version="1",
+        set_at=_T1,
+    )
+
+
+def test_cv_profile_roundtrip_and_replace(tmp_path: Path) -> None:
+    first = StoredProfile(_profile(), "ab" * 32, "model-a", "1", _T1)
+    second = StoredProfile(_profile("Staff engineer"), "cd" * 32, "model-b", "2", _T2)
+    path = tmp_path / "ijob.db"
+    with Store.open(path) as store:
+        assert store.cv_profile() is None
+        store.set_cv_profile(
+            first.profile,
+            cv_sha256=first.cv_sha256,
+            model=first.model,
+            task_version=first.task_version,
+            made_at=first.made_at,
+        )
+        assert store.cv_profile() == first
+        store.set_cv_profile(
+            second.profile,
+            cv_sha256=second.cv_sha256,
+            model=second.model,
+            task_version=second.task_version,
+            made_at=second.made_at,
+        )
+        assert store.cv_profile() == second
+    assert _scalar(path, "SELECT count(*) FROM cv_profile") == 1
+    assert _scalar(path, "SELECT profile_sha256 FROM cv_profile") == (
+        second.profile.sha256()
+    )
+
+
+def test_set_cv_profile_rejects_naive_time(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store, pytest.raises(InvalidValueError):
+        store.set_cv_profile(
+            _profile(),
+            cv_sha256="ab" * 32,
+            model="m",
+            task_version="1",
+            made_at=datetime(2026, 10, 1),  # noqa: DTZ001  # the naive time is the case
+        )
+
+
+def test_instructions_roundtrip_and_clear(tmp_path: Path) -> None:
+    path = tmp_path / "ijob.db"
+    with Store.open(path) as store:
+        assert store.instructions() is None
+        store.clear_instructions()
+        assert store.instructions() is None
+        first = _instructions()
+        store.set_instructions(first)
+        assert store.instructions() == first
+        second = _instructions("Remote only")
+        store.set_instructions(second)
+        assert store.instructions() == second
+        store.clear_instructions()
+        assert store.instructions() is None
+    assert _scalar(path, "SELECT count(*) FROM instructions") == 0
+
+
+def test_instructions_store_hashes(tmp_path: Path) -> None:
+    path = tmp_path / "ijob.db"
+    stored = _instructions()
+    with Store.open(path) as store:
+        store.set_instructions(stored)
+    assert _scalar(path, "SELECT text_sha256 FROM instructions") == stored.text_sha256
+    assert _scalar(path, "SELECT rules_sha256 FROM instructions") == stored.rules_sha256
+
+
+_KEY = ("in-hash", "rules-hash", "model-a", "1")
+
+
+def test_verdict_cache_hit_and_miss(tmp_path: Path) -> None:
+    keep = Verdict(keep=True, reason="fits", rule=None)
+    with Store.open(tmp_path / "ijob.db") as store:
+        (posting_id,) = _record_ids(store, _draft())
+        assert store.verdict(posting_id, *_KEY) is None
+        store.put_verdict(posting_id, *_KEY, keep, made_at=_T1)
+        assert store.verdict(posting_id, *_KEY) == keep
+        for index in range(len(_KEY)):
+            changed = tuple("other" if i == index else v for i, v in enumerate(_KEY))
+            assert store.verdict(posting_id, *changed) is None
+        assert store.verdict(PostingId(posting_id + 1), *_KEY) is None
+
+
+def test_put_verdict_replaces_same_key(tmp_path: Path) -> None:
+    path = tmp_path / "ijob.db"
+    reject = Verdict(keep=False, reason="on-site", rule=1)
+    with Store.open(path) as store:
+        (posting_id,) = _record_ids(store, _draft())
+        store.put_verdict(
+            posting_id, *_KEY, Verdict(keep=True, reason="fits", rule=None), made_at=_T1
+        )
+        store.put_verdict(posting_id, *_KEY, reject, made_at=_T2)
+        assert store.verdict(posting_id, *_KEY) == reject
+    assert _scalar(path, "SELECT count(*) FROM verdicts") == 1
+    assert _scalar(path, "SELECT made_at FROM verdicts") == _T2_TEXT
+
+
+def test_put_verdict_unknown_posting_fails(tmp_path: Path) -> None:
+    path = tmp_path / "ijob.db"
+    with Store.open(path) as store:
+        with pytest.raises(sqlite3.IntegrityError):
+            store.put_verdict(
+                PostingId(99),
+                *_KEY,
+                Verdict(keep=True, reason="fits", rule=None),
+                made_at=_T1,
+            )
+        assert store.verdict(PostingId(99), *_KEY) is None
+    assert _scalar(path, "SELECT count(*) FROM verdicts") == 0
+
+
+_SCORE_KEY = ("in-hash", "profile-hash", "model-a", "1")
+
+
+def test_score_cache_hit_and_miss(tmp_path: Path) -> None:
+    fit = Score(score=82, reasons=("python match", "senior"))
+    with Store.open(tmp_path / "ijob.db") as store:
+        (posting_id,) = _record_ids(store, _draft())
+        assert store.score(posting_id, *_SCORE_KEY) is None
+        store.put_score(posting_id, *_SCORE_KEY, fit, made_at=_T1)
+        assert store.score(posting_id, *_SCORE_KEY) == fit
+        for index in range(len(_SCORE_KEY)):
+            changed = tuple(
+                "other" if i == index else v for i, v in enumerate(_SCORE_KEY)
+            )
+            assert store.score(posting_id, *changed) is None
+        better = Score(score=90, reasons=("python match",))
+        store.put_score(posting_id, *_SCORE_KEY, better, made_at=_T2)
+        assert store.score(posting_id, *_SCORE_KEY) == better
+
+
+def test_put_score_unknown_posting_fails(tmp_path: Path) -> None:
+    with (
+        Store.open(tmp_path / "ijob.db") as store,
+        pytest.raises(sqlite3.IntegrityError),
+    ):
+        store.put_score(
+            PostingId(99), *_SCORE_KEY, Score(score=5, reasons=("none",)), made_at=_T1
+        )
+
+
+def test_put_rejects_naive_time(tmp_path: Path) -> None:
+    naive = datetime(2026, 10, 1)  # noqa: DTZ001  # the naive time is the case
+    with Store.open(tmp_path / "ijob.db") as store:
+        (posting_id,) = _record_ids(store, _draft())
+        with pytest.raises(InvalidValueError):
+            store.put_verdict(
+                posting_id,
+                *_KEY,
+                Verdict(keep=True, reason="fits", rule=None),
+                made_at=naive,
+            )
+        with pytest.raises(InvalidValueError):
+            store.put_score(
+                posting_id, *_SCORE_KEY, Score(score=5, reasons=("x",)), made_at=naive
+            )
+
+
+def test_skipped_items_are_kept_once_and_listed_while_pending(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.add_skipped(_A, [("one", "https://x.test/1", "no title")], seen_at=_T1)
+        store.add_skipped(_A, [("one", None, "other reason")], seen_at=_T2)
+        store.add_skipped(_B, [("two", None, "no url")], seen_at=_T2)
+        rows = store.pending_skipped([_A])
+        assert store.pending_skipped([]) == []
+
+    assert [(r.item_id, r.text, r.url, r.reason) for r in rows] == [
+        (skipped_item_id("one"), "one", "https://x.test/1", "no title")
+    ]
+    assert rows[0].status is SkippedStatus.PENDING
+    assert rows[0].seen_at == _T1
+
+
+def test_marked_skipped_items_leave_the_pending_list(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.add_skipped(_A, [("one", None, "r"), ("two", None, "r")], seen_at=_T1)
+        store.mark_skipped(_A, skipped_item_id("one"), SkippedStatus.NOT_JOB)
+        store.mark_skipped(
+            _A, skipped_item_id("two"), SkippedStatus.JOB, external_id=ExternalId("e")
+        )
+        pending = store.pending_skipped([_A])
+        again = store.add_skipped(
+            _A, [("one", None, "r"), ("two", None, "r")], seen_at=_T2
+        )
+
+    assert pending == []
+    assert again == [ExternalId("e")]
+
+
+def test_marking_a_job_needs_an_external_id(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store, pytest.raises(InvalidValueError):
+        store.mark_skipped(_A, skipped_item_id("one"), SkippedStatus.JOB)

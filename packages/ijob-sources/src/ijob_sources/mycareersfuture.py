@@ -27,9 +27,10 @@ from ijob_core.model import (
     SourceRef,
 )
 
-from ijob_sources.collect import SourceBatch
+from ijob_sources.collect import SkippedItem, SourceBatch, skipped_item
 from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError
+from ijob_sources.item_url import url_of
 from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
 
@@ -91,6 +92,7 @@ class MyCareersFutureBoard:
         """
         drafts: list[SightingDraft] = []
         rejected = 0
+        skipped: list[SkippedItem] = []
         url: str | None = _FIRST_PAGE_URL
         for fetched in range(_MAX_PAGES):
             if url is None:
@@ -99,8 +101,9 @@ class MyCareersFutureBoard:
             page = parse_mycareersfuture(response.content, self._key)
             drafts.extend(page.batch.drafts)
             rejected += page.batch.rejected
+            skipped.extend(page.batch.skipped)
             url = page.next_href
-        return SourceBatch(drafts=drafts, rejected=rejected)
+        return SourceBatch(drafts=drafts, rejected=rejected, skipped=tuple(skipped))
 
 
 def parse_mycareersfuture(body: bytes, key: SourceKey) -> MyCareersFuturePage:
@@ -132,11 +135,13 @@ def parse_mycareersfuture(body: bytes, key: SourceKey) -> MyCareersFuturePage:
 
     drafts: list[SightingDraft] = []
     rejected = 0
+    skipped: list[SkippedItem] = []
     for index, job in enumerate(jobs):
         try:
             drafts.append(_to_draft(job, key))
         except InvalidValueError as error:
             rejected += 1
+            skipped.append(skipped_item(job, _detail_url(job), error))
             _LOGGER.warning(
                 "rejected mycareersfuture job %s from %s: %s",
                 _job_label(job, index),
@@ -144,7 +149,8 @@ def parse_mycareersfuture(body: bytes, key: SourceKey) -> MyCareersFuturePage:
                 error,
             )
     return MyCareersFuturePage(
-        batch=SourceBatch(drafts=drafts, rejected=rejected), next_href=next_href
+        batch=SourceBatch(drafts=drafts, rejected=rejected, skipped=tuple(skipped)),
+        next_href=next_href,
     )
 
 
@@ -194,6 +200,12 @@ def _next_href(payload: dict[str, Any]) -> str | None:
         reason = f"'_links.next' points off the API: {href!r}"
         raise ParseError(reason)
     return href
+
+
+def _detail_url(job: object) -> str | None:
+    """Return the job's `metadata.jobDetailsUrl`, or `None` when it has none."""
+    metadata = job.get("metadata") if isinstance(job, dict) else None
+    return url_of(metadata, "jobDetailsUrl")
 
 
 def _job_label(job: object, index: int) -> str:

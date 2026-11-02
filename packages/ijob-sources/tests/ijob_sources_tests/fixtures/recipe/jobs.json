@@ -1,0 +1,32 @@
+[
+  {
+    "title": "Senior Magento Developer",
+    "url": "https://jobs.example.test/job/go/101/",
+    "company_name": "Acme Commerce",
+    "location": "Anywhere",
+    "pub_date": "2026-10-29T09:50:51-04:00",
+    "description": "<p>Build <b>stores</b> with <a href=\"https://acme.example.test/\">Acme</a>.</p>",
+    "tags": ["php", "magento"],
+    "category_name": "Development"
+  },
+  {
+    "title": "Data Engineer",
+    "url": "https://jobs.example.test/job/go/102/",
+    "company_name": "Globex Data",
+    "location": "Europe",
+    "pub_date": "2026-10-28T12:00:00-04:00",
+    "description": "<p>Pipelines.</p>",
+    "tags": ["python", "sql"],
+    "category_name": "Data"
+  },
+  {
+    "title": "Support Engineer",
+    "url": "https://jobs.example.test/job/go/103/",
+    "company_name": "Initech Support",
+    "location": "Americas",
+    "pub_date": "2026-10-27T08:30:00-04:00",
+    "description": "<p>Help customers.</p>",
+    "tags": ["support"],
+    "category_name": "Support"
+  }
+]

@@ -1,13 +1,22 @@
 import pytest
 from ijob_core.model import SourceKind, SourceRef, parse_source_key
 from ijob_sources.errors import (
+    FetchedPage,
     FetchError,
     HttpStatusError,
     IdentityMismatchError,
+    InvalidRecipeError,
+    NotPublicAddressError,
     ParseError,
+    RecipeEvaluationError,
+    RecipeFailedError,
+    ReservedHostError,
+    ResponseTooLargeError,
     RobotsDisallowedError,
     SourceNotFoundError,
     SourcesError,
+    UnrecognizedPageError,
+    UnsupportedRecipeVersionError,
     UnsupportedUrlError,
 )
 
@@ -22,9 +31,16 @@ _REF = SourceRef(SourceKind.GREENHOUSE, parse_source_key("prisma"))
         HttpStatusError(_URL, 500),
         SourceNotFoundError(_URL),
         FetchError(_URL, "connection refused"),
+        ResponseTooLargeError(_URL, 1024),
         ParseError("not JSON"),
         IdentityMismatchError(_REF, "company 'Prisma' not found on the board"),
         UnsupportedUrlError(_URL, "no feed found"),
+        NotPublicAddressError(_URL),
+        ReservedHostError("www.jobstreet.com"),
+        InvalidRecipeError("no items"),
+        UnsupportedRecipeVersionError(2),
+        RecipeEvaluationError("Unregistered function"),
+        RecipeFailedError("recipe failed"),
     ],
 )
 def test_every_error_is_a_sources_error(error: SourcesError) -> None:
@@ -67,3 +83,62 @@ def test_unsupported_url_error_fields() -> None:
     assert error.reason == "no feed found"
     assert _URL in str(error)
     assert "no feed found" in str(error)
+
+
+def test_error_messages() -> None:
+    not_public = NotPublicAddressError(_URL)
+    assert str(not_public) == f"{_URL} is not a public address"
+    assert not_public.url == _URL
+    reserved = ReservedHostError("www.jobstreet.com")
+    assert str(reserved) == "www.jobstreet.com is read only by its own source kind"
+    assert reserved.host == "www.jobstreet.com"
+    invalid = InvalidRecipeError("no items")
+    assert str(invalid) == "invalid recipe: no items"
+    assert invalid.reason == "no items"
+    unsupported = UnsupportedRecipeVersionError(2)
+    assert str(unsupported) == "recipe version 2 is not supported"
+    assert unsupported.version == 2
+    evaluation = RecipeEvaluationError("Unregistered function")
+    assert str(evaluation) == "Unregistered function"
+    assert evaluation.reason == "Unregistered function"
+
+
+def test_recipe_failed_messages() -> None:
+    ref = SourceRef(SourceKind.RECIPE, parse_source_key("example"))
+    reanalyze = "run: ijob sources reanalyze recipe:example"
+
+    failed = RecipeFailedError.failed(ref, "Unregistered function")
+    unsupported = RecipeFailedError.unsupported_version(ref, 2)
+    expected = RecipeFailedError.expected_format(ref, "json")
+    no_jobs = RecipeFailedError.no_jobs(ref)
+
+    assert str(failed) == (
+        f"recipe for recipe:example failed: Unregistered function; {reanalyze}"
+    )
+    assert str(unsupported) == f"recipe version 2 is not supported; {reanalyze}"
+    assert str(expected) == f"recipe for recipe:example expected json; {reanalyze}"
+    assert str(no_jobs) == (
+        "recipe for recipe:example found no jobs; "
+        "if the site changed, run: ijob sources reanalyze recipe:example"
+    )
+    assert isinstance(no_jobs, SourcesError)
+
+
+def test_response_too_large_is_a_fetch_error_naming_url_and_limit() -> None:
+    error = ResponseTooLargeError(_URL, 1024)
+
+    assert isinstance(error, FetchError)
+    assert error.url == _URL
+    assert error.limit == 1024
+    assert _URL in str(error)
+    assert "1024" in str(error)
+
+
+def test_unrecognized_page_carries_the_fetched_page() -> None:
+    page = FetchedPage(body=b"<p>hi</p>", content_type="text/html", final_url=_URL)
+
+    error = UnrecognizedPageError("http://example.test/jobs", page=page)
+
+    assert error.page is page
+    assert error.url == "http://example.test/jobs"
+    assert UnrecognizedPageError(_URL).page is None

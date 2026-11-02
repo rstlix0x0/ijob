@@ -1,5 +1,8 @@
 """Exceptions raised by ijob_sources."""
 
+from dataclasses import dataclass
+from typing import Self
+
 from ijob_core.model import SourceRef
 
 
@@ -76,6 +79,24 @@ class FetchError(SourcesError):
         self.reason = reason
 
 
+class ResponseTooLargeError(FetchError):
+    """A response body ran past the size limit before it was fully read.
+
+    Attributes:
+        limit: The most bytes the caller accepted.
+    """
+
+    def __init__(self, url: str, limit: int) -> None:
+        """Build the error from the requested URL and the limit.
+
+        Args:
+            url: The URL that was requested.
+            limit: The most bytes the caller accepted, counted after decoding.
+        """
+        super().__init__(url, f"the response is larger than {limit} bytes")
+        self.limit = limit
+
+
 class ParseError(SourcesError):
     """A response body could not be read.
 
@@ -131,3 +152,183 @@ class UnsupportedUrlError(SourcesError):
         super().__init__(f"cannot use {url}: {reason}")
         self.url = url
         self.reason = reason
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FetchedPage:
+    """A page that was already fetched, so it need not be fetched again.
+
+    Attributes:
+        body: The decoded response body.
+        content_type: The `Content-Type` header value, or `None` if absent.
+        final_url: The address of the response that held the body, after any
+            redirects.
+    """
+
+    body: bytes
+    content_type: str | None
+    final_url: str
+
+
+class UnrecognizedPageError(UnsupportedUrlError):
+    """A fetched page is no hiring system, job posting or feed.
+
+    Unlike its parent, this error means the page was read and matched nothing, so
+    a caller can offer to learn a recipe for it.
+
+    Attributes:
+        page: The page that was read, or `None` when it is not kept.
+    """
+
+    def __init__(self, url: str, *, page: FetchedPage | None = None) -> None:
+        """Build the error from the URL of the unrecognized page.
+
+        Args:
+            url: The URL of the page, as the user gave it.
+            page: The page that was read, which a recipe can be learned from
+                without fetching it again.
+        """
+        super().__init__(url, "no hiring system, job posting or feed found")
+        self.page = page
+
+
+class NotPublicAddressError(SourcesError):
+    """A request was refused because it does not go to a public address.
+
+    Attributes:
+        url: The URL of the refused request.
+    """
+
+    def __init__(self, url: str) -> None:
+        """Build the error from the refused request's URL.
+
+        Args:
+            url: The URL of the refused request.
+        """
+        super().__init__(f"{url} is not a public address")
+        self.url = url
+
+
+class ReservedHostError(SourcesError):
+    """A host is reserved for the source kind that reads it by its own rules.
+
+    Attributes:
+        host: The refused host name.
+    """
+
+    def __init__(self, host: str) -> None:
+        """Build the error from the refused host name.
+
+        Args:
+            host: The refused host name.
+        """
+        super().__init__(f"{host} is read only by its own source kind")
+        self.host = host
+
+
+class InvalidRecipeError(SourcesError):
+    """Text is not a valid recipe.
+
+    Attributes:
+        reason: What is wrong with the recipe.
+    """
+
+    def __init__(self, reason: str) -> None:
+        """Build the error from what is wrong with the recipe.
+
+        Args:
+            reason: What is wrong with the recipe.
+        """
+        super().__init__(f"invalid recipe: {reason}")
+        self.reason = reason
+
+
+class UnsupportedRecipeVersionError(SourcesError):
+    """A recipe states a version this release cannot read.
+
+    Attributes:
+        version: The version the recipe states.
+    """
+
+    def __init__(self, version: int) -> None:
+        """Build the error from the stated version.
+
+        Args:
+            version: The version the recipe states.
+        """
+        super().__init__(f"recipe version {version} is not supported")
+        self.version = version
+
+
+class RecipeEvaluationError(SourcesError):
+    """An expression engine failed while a recipe was being evaluated.
+
+    The message is the engine's own text, so a caller can place it inside a
+    longer sentence of its own.
+
+    Attributes:
+        reason: The text of the failure the engine raised.
+    """
+
+    def __init__(self, reason: str) -> None:
+        """Build the error from the engine failure's text.
+
+        Args:
+            reason: The text of the failure the engine raised.
+        """
+        super().__init__(reason)
+        self.reason = reason
+
+
+class RecipeFailedError(SourcesError):
+    """A stored recipe could not be used to read its source at search time.
+
+    Every message ends by naming the command that learns the recipe again. Build
+    one with the classmethod for the failure.
+    """
+
+    @classmethod
+    def failed(cls, ref: SourceRef, error: str) -> Self:
+        """Build the error for a recipe that is invalid or failed to evaluate.
+
+        Args:
+            ref: The recipe source.
+            error: The text of the failure.
+        """
+        return cls(f"recipe for {ref} failed: {error}; {_reanalyze(ref)}")
+
+    @classmethod
+    def unsupported_version(cls, ref: SourceRef, version: int) -> Self:
+        """Build the error for a recipe whose version this release cannot read.
+
+        Args:
+            ref: The recipe source.
+            version: The version the recipe states.
+        """
+        return cls(f"recipe version {version} is not supported; {_reanalyze(ref)}")
+
+    @classmethod
+    def expected_format(cls, ref: SourceRef, expected: str) -> Self:
+        """Build the error for a page of another format than the recipe reads.
+
+        Args:
+            ref: The recipe source.
+            expected: The format the recipe reads, `html` or `json`.
+        """
+        return cls(f"recipe for {ref} expected {expected}; {_reanalyze(ref)}")
+
+    @classmethod
+    def no_jobs(cls, ref: SourceRef) -> Self:
+        """Build the error for a first page that yielded no valid job.
+
+        Args:
+            ref: The recipe source.
+        """
+        return cls(
+            f"recipe for {ref} found no jobs; if the site changed, {_reanalyze(ref)}"
+        )
+
+
+def _reanalyze(ref: SourceRef) -> str:
+    """Return the command that learns a source's recipe again."""
+    return f"run: ijob sources reanalyze {ref}"

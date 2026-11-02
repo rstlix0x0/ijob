@@ -358,7 +358,9 @@ def test_job_that_cannot_be_re_encoded_is_rejected(
 ) -> None:
     body = _body(_FIRST)
 
-    def overflow(_: object) -> str:
+    def overflow(_: object, **options: object) -> str:
+        if "default" in options:  # the record of a dropped job still encodes
+            return "{}"
         raise RecursionError
 
     monkeypatch.setattr(json, "dumps", overflow)

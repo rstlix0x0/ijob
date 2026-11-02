@@ -26,7 +26,7 @@ from ijob_core.model import (
     SourceRef,
 )
 
-from ijob_sources.collect import SourceBatch
+from ijob_sources.collect import SkippedItem, SourceBatch, skipped_item
 from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError, SourcesError
 from ijob_sources.jsonld import job_postings, read_job_posting
@@ -95,15 +95,23 @@ class JapanDev:
 
         drafts: list[SightingDraft] = []
         rejected = 0
+        skipped: list[SkippedItem] = []
         for slug, url in new[:_MAX_DETAILS]:
+            html_text = ""
             try:
                 page = await client.get(url)
                 html_text = page.content.decode(errors="replace")
                 drafts.append(_to_draft(html_text, url, slug, self._key))
             except (SourcesError, InvalidValueError) as error:
                 rejected += 1
+                skipped.append(skipped_item(html_text, url, error))
                 _LOGGER.warning("rejected japandev job %r: %s", slug, error)
-        return SourceBatch(drafts=drafts, rejected=rejected, still_listed=still_listed)
+        return SourceBatch(
+            drafts=drafts,
+            rejected=rejected,
+            still_listed=still_listed,
+            skipped=tuple(skipped),
+        )
 
 
 def parse_sitemap(body: bytes) -> list[str]:

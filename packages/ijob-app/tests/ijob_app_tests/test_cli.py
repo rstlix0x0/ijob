@@ -1,20 +1,29 @@
 import itertools
 import json
+import logging
+import os
 import re
-from collections.abc import Callable, Mapping
+import sqlite3
+import subprocess
+import sys
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn, override
 
 import httpx
 import pytest
 import typer
 from ijob_app import cli
 from ijob_app.cli import app, make_app
+from ijob_app.cli_progress import ProgressLine
+from ijob_app.llm_ops import LlmOptions
+from ijob_app.service import Service
 from ijob_core.countries import parse_country
 from ijob_core.model import (
     ExternalId,
+    Instructions,
     RemoteScope,
     SightingDraft,
     SourceKind,
@@ -24,11 +33,24 @@ from ijob_core.model import (
 )
 from ijob_core.money import Money, Period
 from ijob_core.store import Store
+from ijob_core.traces import TraceStore
 from ijob_sources.greenhouse import description_from_raw
 from ijob_sources.manual import manual_key
 from ijob_sources.polite_http import ConditionalCache, PoliteClient
 from ijob_sources.registry import HOST_INTERVALS
+from ijob_sources.seeds import load_seeds
 from typer.testing import CliRunner, Result
+
+from .llm_fakes import (
+    MADE_UP_CLAUDE,
+    FakeAsyncEngine,
+    FakeEngines,
+    profile_answer,
+    verdict_answer,
+    write_cv_pdf,
+    write_fake_cli,
+    write_llm_config,
+)
 
 _FIXTURE = (
     Path(__file__).parents[3]
@@ -106,6 +128,12 @@ def _factory(
         )
 
     return client_factory
+
+
+async def _public(host: str, port: int) -> Sequence[str]:
+    """Resolve every host to one public address, so no test asks the network."""
+    del host, port
+    return ["93.184.216.34"]
 
 
 def _home(tmp_path: Path) -> Path:
@@ -299,6 +327,20 @@ def test_http_and_fetch_failures_reported(
     assert result.stderr.splitlines() == [expected]
 
 
+def test_unreachable_host_reported_as_unreadable_robots_txt(tmp_path: Path) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        msg = "no route to host"
+        raise httpx.ConnectError(msg)
+
+    result = _search(handler, tmp_path, *_TAILSCALE)
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr.splitlines() == [
+        "failed greenhouse:tailscale: robots.txt could not be read: no route to host"
+    ]
+
+
 def test_parse_failure_reported(tmp_path: Path) -> None:
     handler = _serving({"tailscale": httpx.Response(200, text="<html>no</html>")})
 
@@ -318,6 +360,81 @@ def test_rejected_jobs_reported(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert "greenhouse:tailscale: skipped 1 invalid jobs" in result.stderr.splitlines()
     assert len(result.stdout.splitlines()) == 1
+
+
+def _rejecting_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *args: str
+) -> Result:
+    """Search a board holding one invalid job, with logging as a terminal run has it.
+
+    pytest keeps capture handlers on the root logger while a test runs, which
+    would stop Python's last-resort stderr handler from ever firing, so they are
+    taken off here, inside the test, after pytest has put them on.
+    """
+    monkeypatch.setattr(logging.getLogger(), "handlers", [])
+    body = json.dumps({"jobs": [_JOBS[0], {**_JOBS[1], "title": ""}]}).encode()
+    handler = _serving({"tailscale": httpx.Response(200, content=body)})
+    return _search(handler, tmp_path, *_TAILSCALE, *args)
+
+
+def test_rejected_item_lines_stay_off_stderr_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _rejecting_run(tmp_path, monkeypatch)
+
+    assert result.exit_code == 0
+    assert result.stderr.splitlines() == [
+        "greenhouse:tailscale: skipped 1 invalid jobs",
+        "note: 1 skipped jobs unread; run: ijob sources extract",
+    ]
+
+
+def test_verbose_prints_each_rejected_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _rejecting_run(tmp_path, monkeypatch, "--verbose")
+
+    assert result.exit_code == 0
+    lines = result.stderr.splitlines()
+    assert "greenhouse:tailscale: skipped 1 invalid jobs" in lines
+    (rejected,) = (line for line in lines if line.startswith("rejected "))
+    assert rejected.startswith("rejected greenhouse job ")
+    assert rejected.endswith("invalid title: is empty")
+    assert len(result.stdout.splitlines()) == 1
+
+
+def test_verbose_handler_is_removed_after_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources_logger = logging.getLogger("ijob_sources")
+
+    _rejecting_run(tmp_path, monkeypatch, "--verbose")
+    handlers_after_verbose = list(sources_logger.handlers)
+    (tmp_path / "again").mkdir()
+    quiet = _rejecting_run(tmp_path / "again", monkeypatch)
+
+    assert all(
+        isinstance(handler, logging.NullHandler) for handler in handlers_after_verbose
+    )
+    assert "rejected " not in quiet.stderr
+
+
+def test_any_command_silences_the_source_loggers_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources_logger = logging.getLogger("ijob_sources")
+    monkeypatch.setattr(sources_logger, "handlers", [])
+    app_: typer.Typer = make_app(_factory(_serving()))
+
+    for _ in range(2):
+        result = CliRunner().invoke(
+            app_,
+            ["sources", "list", "--db", str(tmp_path / "ijob.db")],
+            env=_env(tmp_path),
+        )
+        assert result.exit_code == 0
+
+    assert [type(h) for h in sources_logger.handlers] == [logging.NullHandler]
 
 
 def test_identity_failure_line(tmp_path: Path) -> None:
@@ -512,7 +629,7 @@ def _web(
 
 def _run(handler: _Handler, tmp_path: Path, *args: str, db: bool = True) -> Result:
     """Run `ijob <args>` against a `tmp_path` database with the ijob home isolated."""
-    app: typer.Typer = make_app(_factory(handler))
+    app: typer.Typer = make_app(_factory(handler), resolver=_public)
     argv = [*args, "--db", str(tmp_path / "ijob.db")] if db else list(args)
     return CliRunner().invoke(app, argv, env=_env(tmp_path))
 
@@ -829,6 +946,29 @@ def test_sources_add_url_unsupported(tmp_path: Path) -> None:
     assert result.exit_code == 1
     assert "no hiring system, job posting or feed found" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "url", ["foo", "", "https://", "//a.example/x", "ftp://a.example/x"]
+)
+def test_sources_add_url_of_no_web_address_names_the_url(
+    tmp_path: Path, url: str
+) -> None:
+    requests: list[httpx.Request] = []
+
+    result = _run(
+        _web(requests=requests),
+        tmp_path,
+        "sources",
+        "add-url",
+        url,
+        "--company",
+        "Acme",
+    )
+
+    assert result.exit_code == 1
+    assert result.stderr == f"error: cannot use {url}: not an http or https address\n"
+    assert requests == []
 
 
 def test_sources_add_url_robots_blocked(tmp_path: Path) -> None:
@@ -1489,6 +1629,234 @@ def test_non_pdf_cv_is_reported_as_the_bare_reason(tmp_path: Path) -> None:
     ]
 
 
+def _model_app(
+    tmp_path: Path, engines: FakeEngines, *, model: bool = True
+) -> typer.Typer:
+    """Build an app whose LLM calls go to `engines`, with a config naming a model.
+
+    Args:
+        tmp_path: The test's directory; the config goes into its ijob home.
+        engines: The fake engine factory every model call is routed through.
+        model: Whether the config sets `[models].cv_profile`.
+
+    Returns:
+        The application.
+    """
+    cli_path = write_fake_cli(tmp_path / "bin").path
+    write_llm_config(
+        _home(tmp_path) / "config.toml",
+        judge=None,
+        cv_profile=MADE_UP_CLAUDE if model else None,
+        cli_path=cli_path,
+    )
+
+    def options(_ijob_home: object, config_path: Path) -> LlmOptions:
+        return LlmOptions(config_path=config_path, engines=engines)
+
+    return make_app(_factory(_serving()), llm_options=options)
+
+
+def _invoke(app_: typer.Typer, tmp_path: Path, *args: str) -> Result:
+    """Run `ijob <args>` on `app_` against the `tmp_path` database."""
+    argv = [*args, "--db", str(tmp_path / "ijob.db")]
+    return CliRunner().invoke(app_, argv, env=_env(tmp_path))
+
+
+def test_cv_set_without_model_notes_and_exits_0(tmp_path: Path) -> None:
+    file = _pdf(tmp_path)
+    app_ = _model_app(tmp_path, FakeEngines(), model=False)
+
+    result = _invoke(app_, tmp_path, "cv", "set", str(file))
+
+    assert result.exit_code == 0
+    [stored] = result.stdout.splitlines()
+    assert stored.startswith("resume.pdf\t")
+    assert result.stderr.splitlines() == [
+        "note: profile not built; set [models].cv_profile"
+    ]
+
+
+def test_cv_set_builds_profile(tmp_path: Path) -> None:
+    file = write_cv_pdf(tmp_path / "resume.pdf")
+    engines = FakeEngines(FakeAsyncEngine([profile_answer()]))
+    app_ = _model_app(tmp_path, engines)
+
+    result = _invoke(app_, tmp_path, "cv", "set", str(file))
+
+    assert result.exit_code == 0
+    lines = result.stdout.splitlines()
+    assert lines[0].startswith("resume.pdf\t")
+    assert lines[1:] == [
+        "summary: Backend engineer",
+        "years_experience: 7",
+        "seniority: senior",
+        "roles: Backend Engineer",
+        "skills: Python",
+        "spoken_languages: English",
+        "locations: Jakarta",
+        "work_authorization: Indonesia",
+    ]
+    assert len(engines.engine.requests) == 1
+
+
+def _refuse_trace_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the trace store refuse every write, so each span is dropped."""
+
+    def refuse(_store: TraceStore, _rows: object) -> None:
+        raise sqlite3.OperationalError("refused")
+
+    monkeypatch.setattr(TraceStore, "insert", refuse)
+
+
+def test_cv_set_reports_spans_that_were_not_stored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    file = write_cv_pdf(tmp_path / "resume.pdf")
+    app_ = _model_app(tmp_path, FakeEngines(FakeAsyncEngine([profile_answer()])))
+    _refuse_trace_writes(monkeypatch)
+
+    result = _invoke(app_, tmp_path, "cv", "set", str(file))
+
+    assert result.exit_code == 0, result.stderr
+    [note] = result.stderr.splitlines()
+    assert re.fullmatch(r"warning: \d+ spans not stored", note)
+
+
+def test_cv_profile_reports_spans_that_were_not_stored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    file = write_cv_pdf(tmp_path / "resume.pdf")
+    app_ = _model_app(tmp_path, FakeEngines(FakeAsyncEngine([profile_answer()])))
+    _invoke(app_, tmp_path, "cv", "set", str(file))
+    _refuse_trace_writes(monkeypatch)
+
+    result = _invoke(app_, tmp_path, "cv", "profile", "--refresh")
+
+    assert result.exit_code == 0, result.stderr
+    [note] = result.stderr.splitlines()
+    assert re.fullmatch(r"warning: \d+ spans not stored", note)
+
+
+def test_cv_set_profile_oserror_is_not_a_store_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    file = write_cv_pdf(tmp_path / "resume.pdf")
+    app_ = _model_app(tmp_path, FakeEngines())
+
+    async def unreadable(_service: Service, *, refresh: bool) -> NoReturn:
+        msg = f"profile io {refresh}"
+        raise OSError(msg)
+
+    monkeypatch.setattr(Service, "build_profile", unreadable)
+
+    result = _invoke(app_, tmp_path, "cv", "set", str(file))
+    shown = _invoke(app_, tmp_path, "cv", "show")
+
+    assert isinstance(result.exception, OSError)
+    assert "cannot store the CV" not in result.stderr
+    assert shown.stdout.startswith("resume.pdf\t")
+
+
+def test_cv_set_profile_error_keeps_pdf_exit_1(tmp_path: Path) -> None:
+    file = write_cv_pdf(tmp_path / "resume.pdf", text="")
+    app_ = _model_app(tmp_path, FakeEngines())
+
+    result = _invoke(app_, tmp_path, "cv", "set", str(file))
+    shown = _invoke(app_, tmp_path, "cv", "show")
+
+    assert result.exit_code == 1
+    assert "CV has no text layer; OCR is not supported" in result.stderr
+    assert result.stderr.startswith("error: ")
+    assert shown.stdout.startswith("resume.pdf\t")
+
+
+def test_cv_set_bad_config_exits_2_with_pdf_kept(tmp_path: Path) -> None:
+    file = write_cv_pdf(tmp_path / "resume.pdf")
+    app_ = _model_app(tmp_path, FakeEngines())
+    (_home(tmp_path) / "config.toml").write_text("[llm]\nbogus = 1\n", encoding="utf-8")
+
+    result = _invoke(app_, tmp_path, "cv", "set", str(file))
+    shown = _invoke(app_, tmp_path, "cv", "show")
+
+    assert result.exit_code == 2
+    assert result.stderr.startswith("error: ")
+    assert "llm" in result.stderr
+    assert shown.stdout.startswith("resume.pdf\t")
+
+
+def test_cv_profile_no_cv_exit_1(tmp_path: Path) -> None:
+    app_ = _model_app(tmp_path, FakeEngines())
+
+    result = _invoke(app_, tmp_path, "cv", "profile")
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr.splitlines() == ["error: no CV is stored; add one first"]
+
+
+def test_cv_profile_without_model_exit_1(tmp_path: Path) -> None:
+    file = write_cv_pdf(tmp_path / "resume.pdf")
+    app_ = _model_app(tmp_path, FakeEngines(), model=False)
+    _invoke(app_, tmp_path, "cv", "set", str(file))
+
+    result = _invoke(app_, tmp_path, "cv", "profile")
+
+    assert result.exit_code == 1
+    assert result.stderr.startswith("error: no model for cv_profile; set ")
+
+
+def test_cv_profile_refresh_calls_again(tmp_path: Path) -> None:
+    file = write_cv_pdf(tmp_path / "resume.pdf")
+    engines = FakeEngines(FakeAsyncEngine([profile_answer()]))
+    app_ = _model_app(tmp_path, engines)
+    _invoke(app_, tmp_path, "cv", "set", str(file))
+
+    plain = _invoke(app_, tmp_path, "cv", "profile")
+    after_plain = len(engines.engine.requests)
+    refreshed = _invoke(app_, tmp_path, "cv", "profile", "--refresh")
+
+    assert plain.exit_code == refreshed.exit_code == 0
+    assert plain.stdout.splitlines()[0] == "summary: Backend engineer"
+    assert refreshed.stdout == plain.stdout
+    assert after_plain == 1
+    assert len(engines.engine.requests) == after_plain + 1
+
+
+def test_cv_profile_builds_when_absent(tmp_path: Path) -> None:
+    file = write_cv_pdf(tmp_path / "resume.pdf")
+    engines = FakeEngines(FakeAsyncEngine([profile_answer()]))
+    app_ = _model_app(tmp_path, engines, model=False)
+    _invoke(app_, tmp_path, "cv", "set", str(file))
+
+    result = _invoke(_model_app(tmp_path, engines), tmp_path, "cv", "profile")
+
+    assert result.exit_code == 0
+    assert "seniority: senior" in result.stdout.splitlines()
+    assert len(engines.engine.requests) == 1
+
+
+def test_setup_and_cv_show_import_no_llm(tmp_path: Path) -> None:
+    code = (
+        "import atexit, sys\n"
+        "from ijob_app.cli import main\n"
+        "atexit.register(lambda: print('LOADED', [m for m in "
+        "('dspy', 'claude_agent_sdk') if m in sys.modules]))\n"
+        "main()\n"
+    )
+    env = {**os.environ, "IJOB_HOME": str(tmp_path / "fresh-home")}
+
+    for argv in (["setup"], ["cv", "show"]):
+        run = subprocess.run(  # noqa: S603 - fixed argv built from this interpreter
+            [sys.executable, "-I", "-c", code, *argv],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert run.returncode == 0, run.stderr
+        assert run.stdout.splitlines()[-1] == "LOADED []"
+
+
 def _blocked_cache_env(tmp_path: Path) -> dict[str, str]:
     """The test environment with a cache directory that cannot be created."""
     env = _env(tmp_path)
@@ -1605,3 +1973,269 @@ def test_show_prints_a_dash_for_absent_metadata(tmp_path: Path) -> None:
         "sources: workable:acme",
         "url: https://apply.workable.com/acme/j/PRICED/",
     ]
+
+
+_JUDGE_RULE = "no crypto, blockchain or Web3 companies"
+_JOBICY = parse_source_ref("jobicy:engineering")
+_JOBICY_SEARCH = ("--source", "jobicy:engineering")
+_LATER = _T0 + timedelta(minutes=10)
+
+
+def _no_request(request: httpx.Request) -> httpx.Response:
+    msg = f"a judged search made a request: {request.url}"
+    raise AssertionError(msg)
+
+
+_NO_CLIENT = _factory(_no_request)
+
+
+def _seed_judged(
+    tmp_path: Path,
+    *descriptions: str | None,
+    rules: tuple[str, ...] = (_JUDGE_RULE,),
+) -> list[str]:
+    """Store one open Jobicy posting per description and the instructions' rules.
+
+    The first description is the newest posting. The source counts as fetched
+    just now, so a search a few minutes later reads it without a request.
+
+    Returns:
+        The postings' titles, newest first.
+    """
+    drafts = [
+        SightingDraft(
+            source=_JOBICY,
+            external_id=ExternalId(f"J{number}"),
+            title=f"Job {number}",
+            company="Acme",
+            location=None,
+            url=f"https://jobicy.com/jobs/{number}",
+            posted_at=_T0 - timedelta(days=number + 1),
+            raw="{}",
+            description=text,
+        )
+        for number, text in enumerate(descriptions)
+    ]
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.import_seeds(load_seeds())
+        store.record(drafts, seen_at=_T0)
+        store.mark_fetched(_JOBICY, _T0)
+        store.set_instructions(
+            Instructions(
+                text="no crypto",
+                filters_json="{}",
+                rules=rules,
+                model=MADE_UP_CLAUDE,
+                task_version="1",
+                set_at=_T0,
+            )
+        )
+    return [draft.title for draft in drafts]
+
+
+def _judge_app(
+    tmp_path: Path, engines: FakeEngines, *, cap: float | None = None
+) -> typer.Typer:
+    """Build an app whose judge answers from `engines`, keeping every role."""
+    cli_path = write_fake_cli(tmp_path / "bin").path
+    config = _home(tmp_path) / "config.toml"
+    write_llm_config(
+        config,
+        judge=MADE_UP_CLAUDE,
+        concurrency=1,
+        max_cost_usd=cap,
+        cli_path=cli_path,
+    )
+    with config.open("a", encoding="utf-8") as handle:
+        handle.write("[filters.role]\ninclude = []\nexclude = []\n")
+
+    def options(_ijob_home: object, config_path: Path) -> LlmOptions:
+        return LlmOptions(config_path=config_path, engines=engines)
+
+    return make_app(_NO_CLIENT, now=lambda: _LATER, llm_options=options)
+
+
+def _judged(
+    tmp_path: Path, engines: FakeEngines, *args: str, cap: float | None = None
+) -> Result:
+    """Run `ijob search` on the Jobicy source against the seeded database."""
+    _env(tmp_path)
+    app_ = _judge_app(tmp_path, engines, cap=cap)
+    argv = ["search", *_JOBICY_SEARCH, *args, "--db", str(tmp_path / "ijob.db")]
+    return CliRunner().invoke(app_, argv, env=_env(tmp_path))
+
+
+def _answers(*texts: str) -> FakeEngines:
+    return FakeEngines(FakeAsyncEngine(list(texts)))
+
+
+def _drop(reason: str = "crypto") -> str:
+    return verdict_answer(keep=False, reason=reason, rule=1)
+
+
+def _kept_line() -> str:
+    return "kept jobicy:engineering: fetched less than 60 min ago"
+
+
+def test_search_without_rules_output_unchanged(tmp_path: Path) -> None:
+    _seed_judged(tmp_path, "one", "two", rules=())
+    engines = _answers(verdict_answer())
+
+    result = _judged(tmp_path, engines)
+
+    assert result.exit_code == 0
+    assert result.stderr.splitlines() == [_kept_line()]
+    lines = result.stdout.splitlines()
+    assert len(lines) == 2
+    assert all(len(line.split("\t")) == 6 for line in lines)
+    assert engines.calls == []
+
+
+def test_search_with_rules_marks_and_hides_dropped(tmp_path: Path) -> None:
+    _seed_judged(tmp_path, "one", "two", "three")
+
+    result = _judged(tmp_path, _answers(verdict_answer(), _drop(), verdict_answer()))
+
+    assert result.exit_code == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert [line.split("\t")[1] for line in lines] == ["Job 0", "Job 2"]
+    assert all(line.endswith("\t\u2714") for line in lines)
+    summary = result.stderr.splitlines()[-1]
+    assert summary.startswith("judged 3, cached 0, dropped 1, not judged 0, cost $")
+    assert " of $" in summary
+
+
+def test_search_dropped_flag_lists_both(tmp_path: Path) -> None:
+    _seed_judged(tmp_path, "one", "two", "three")
+
+    result = _judged(
+        tmp_path,
+        _answers(verdict_answer(), _drop(), verdict_answer()),
+        "--dropped",
+    )
+
+    assert result.exit_code == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert [line.split("\t")[1] for line in lines] == ["Job 0", "Job 1", "Job 2"]
+    assert lines[1].endswith("\t\u2718 crypto")
+    assert lines[0].endswith("\t\u2714")
+    assert lines[2].endswith("\t\u2714")
+
+
+def test_search_prints_in_filter_order_after_cached_run(tmp_path: Path) -> None:
+    _seed_judged(tmp_path, "one", "two", "three")
+    _judged(tmp_path, _answers(verdict_answer()), "--dropped")
+    _seed_judged(tmp_path, "one", "two", "three changed")
+    engines = _answers(verdict_answer())
+
+    result = _judged(tmp_path, engines, "--dropped")
+
+    assert [line.split("\t")[1] for line in result.stdout.splitlines()] == [
+        "Job 0",
+        "Job 1",
+        "Job 2",
+    ]
+    assert result.stderr.splitlines()[-1].startswith("judged 1, cached 2, ")
+
+
+def test_search_no_description_marker(tmp_path: Path) -> None:
+    _seed_judged(tmp_path, "one", None)
+
+    first = _judged(tmp_path, _answers(verdict_answer()))
+    second = _judged(tmp_path, _answers(verdict_answer()))
+
+    for result in (first, second):
+        lines = result.stdout.splitlines()
+        assert lines[0].endswith("\t\u2714")
+        assert lines[1].endswith("\t\u2714 (no description)")
+    assert second.stderr.splitlines()[-1].startswith("judged 0, cached 2, ")
+
+
+def test_search_cap_reached_exit_0_with_note(tmp_path: Path) -> None:
+    _seed_judged(tmp_path, "one", "two", "three")
+
+    result = _judged(
+        tmp_path,
+        FakeEngines(FakeAsyncEngine([verdict_answer()], cost=0.5)),
+        "--dropped",
+        cap=0.3,
+    )
+
+    assert result.exit_code == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[0].endswith("\t\u2714")
+    assert [line.split("\t")[-1] for line in lines[1:]] == ["\u00b7 cap reached"] * 2
+    summary = result.stderr.splitlines()[-1]
+    assert summary.startswith("judged 1, cached 0, dropped 0, not judged 2, cost $")
+    assert summary.endswith("; stopped: cap reached")
+
+
+def test_search_provider_failure_prints_partial_exit_1(tmp_path: Path) -> None:
+    _seed_judged(tmp_path, "one", "two")
+    _env(tmp_path)
+    app_ = _judge_app(tmp_path, FakeEngines())
+    write_fake_cli(tmp_path / "bin", version="1.0.0")
+
+    result = CliRunner().invoke(
+        app_,
+        ["search", *_JOBICY_SEARCH, "--db", str(tmp_path / "ijob.db")],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 1
+    lines = result.stdout.splitlines()
+    assert [line.split("\t")[-1] for line in lines] == ["\u00b7 provider error"] * 2
+    assert result.stderr.splitlines()[-1].endswith("; stopped: provider error")
+
+
+def test_search_reason_printed_literally(tmp_path: Path) -> None:
+    _seed_judged(tmp_path, "one")
+
+    result = _judged(
+        tmp_path,
+        _answers(_drop("[b]x[/b] **x** \x1b[31mred")),
+        "--dropped",
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert "\x1b" not in result.stdout
+    assert result.stdout.splitlines()[0].endswith("\t\u2718 [b]x[/b] **x** [31mred")
+
+
+def test_search_without_judge_model_exits_1(tmp_path: Path) -> None:
+    _seed_judged(tmp_path, "one")
+    _env(tmp_path)
+    write_llm_config(_home(tmp_path) / "config.toml", judge=None)
+    app_ = make_app(_NO_CLIENT, now=lambda: _LATER)
+
+    result = CliRunner().invoke(
+        app_,
+        ["search", *_JOBICY_SEARCH, "--db", str(tmp_path / "ijob.db")],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr.splitlines()[-1].startswith("error: no model for judge")
+
+
+def test_search_shows_fetch_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shown: list[str] = []
+
+    class _Recording(ProgressLine):
+        @override
+        def show_live(self, text: str) -> None:
+            shown.append(text)
+
+    monkeypatch.setattr("ijob_app.cli.ProgressLine", _Recording)
+
+    result = _rejecting_run(tmp_path, monkeypatch)
+
+    assert result.exit_code == 0
+    assert shown == [
+        "fetching sources: 0 of 1 done, 0 failed",
+        "fetching sources: 1 of 1 done, 0 failed, saving",
+    ]
+    assert "fetching" not in result.stderr

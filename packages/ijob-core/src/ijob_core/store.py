@@ -8,12 +8,19 @@ postings a source's latest fetch still showed, and closes it. It also keeps the
 table of sources, the boards ijob collects from: seeded or added by the user,
 removable, and stamped with the time each was last fetched. It also keeps a
 posting's description, the user's vote on each posting and the one CV the user
-stored.
+stored. For the assessment tasks it keeps the profile read from that CV, the
+user's standing instructions, and the verdicts and scores already made, each
+keyed by what it was made from so a repeat call is a cache hit. A source can be
+stored together with its recipe, kept as opaque JSON text that outlives the
+source's removal.
+It also keeps the items a source's parser could not read, so a model reads each
+once: a pending item becomes a job or not a job and is not read again.
 
 The schema version lives in `PRAGMA user_version`; opening a database applies
 every migration newer than that version, each in one transaction.
 """
 
+import hashlib
 import json
 import sqlite3
 from collections.abc import Collection, Iterable
@@ -31,14 +38,19 @@ from ijob_core.dedupe import canonical_url, fingerprint
 from ijob_core.errors import InvalidValueError
 from ijob_core.model import (
     ExternalId,
+    Instructions,
     Label,
     Posting,
     PostingId,
     RemoteScope,
+    ResumeProfile,
+    Score,
     Sighting,
     SightingDraft,
     SourceRef,
     StoredCv,
+    StoredRecipe,
+    Verdict,
     Vote,
     parse_source_ref,
 )
@@ -99,7 +111,122 @@ _MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
         ) STRICT
         """,
     ),
+    (
+        """
+        CREATE TABLE cv_profile (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            cv_sha256 TEXT NOT NULL, profile TEXT NOT NULL,
+            profile_sha256 TEXT NOT NULL, model TEXT NOT NULL,
+            task_version TEXT NOT NULL, made_at TEXT NOT NULL
+        ) STRICT
+        """,
+        """
+        CREATE TABLE instructions (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            text TEXT NOT NULL, text_sha256 TEXT NOT NULL,
+            filters TEXT NOT NULL, rules TEXT NOT NULL, rules_sha256 TEXT NOT NULL,
+            model TEXT NOT NULL, task_version TEXT NOT NULL, set_at TEXT NOT NULL
+        ) STRICT
+        """,
+        """
+        CREATE TABLE verdicts (
+            posting_id INTEGER NOT NULL REFERENCES postings(id),
+            input_sha256 TEXT NOT NULL, rules_sha256 TEXT NOT NULL,
+            model TEXT NOT NULL, task_version TEXT NOT NULL,
+            keep INTEGER NOT NULL CHECK (keep IN (0, 1)), reason TEXT NOT NULL,
+            rule INTEGER, made_at TEXT NOT NULL,
+            PRIMARY KEY (posting_id, input_sha256, rules_sha256, model, task_version)
+        ) STRICT
+        """,
+        """
+        CREATE TABLE scores (
+            posting_id INTEGER NOT NULL REFERENCES postings(id),
+            input_sha256 TEXT NOT NULL, profile_sha256 TEXT NOT NULL,
+            model TEXT NOT NULL, task_version TEXT NOT NULL,
+            score INTEGER NOT NULL, reasons TEXT NOT NULL, made_at TEXT NOT NULL,
+            PRIMARY KEY (posting_id, input_sha256, profile_sha256, model, task_version)
+        ) STRICT
+        """,
+    ),
+    (
+        """
+        CREATE TABLE source_recipes (
+            ref TEXT PRIMARY KEY REFERENCES sources(ref),
+            recipe TEXT NOT NULL, model TEXT NOT NULL, created_at TEXT NOT NULL
+        ) STRICT
+        """,
+    ),
+    (
+        """
+        CREATE TABLE skipped_items (
+            source TEXT NOT NULL, item_id TEXT NOT NULL, text TEXT NOT NULL,
+            url TEXT, reason TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'job', 'not_job')),
+            external_id TEXT, seen_at TEXT NOT NULL,
+            PRIMARY KEY (source, item_id)
+        ) STRICT
+        """,
+    ),
 )
+
+
+@dataclass(frozen=True, slots=True)
+class StoredProfile:
+    """The profile read from the CV, with what it was made from.
+
+    Attributes:
+        profile: The structured facts read from the CV.
+        cv_sha256: The SHA-256 of the CV the profile was read from.
+        model: The model that read the CV.
+        task_version: The version of the task that did so.
+        made_at: When the profile was made, timezone-aware.
+    """
+
+    profile: ResumeProfile
+    cv_sha256: str
+    model: str
+    task_version: str
+    made_at: datetime
+
+
+class SkippedStatus(StrEnum):
+    """Where a skipped item stands: not yet read, read as a job, or read as no job."""
+
+    PENDING = "pending"
+    JOB = "job"
+    NOT_JOB = "not_job"
+
+
+@dataclass(frozen=True, slots=True)
+class SkippedRow:
+    """One item a parser could not read, kept so a model can read it once.
+
+    Attributes:
+        source: The source the item came from.
+        item_id: The SHA-256 hex digest of `text`.
+        text: The item as the source gave it.
+        url: The item's address, when one was known.
+        reason: Why the parser could not read it.
+        status: Whether the item is still unread.
+        external_id: The external id of the sighting made from the item, once
+            its status is `job`.
+        seen_at: When the item was first seen, timezone-aware.
+    """
+
+    source: SourceRef
+    item_id: str
+    text: str
+    url: str | None
+    reason: str
+    status: SkippedStatus
+    external_id: ExternalId | None
+    seen_at: datetime
+
+
+def skipped_item_id(text: str) -> str:
+    """Return the id of a skipped item: the SHA-256 hex digest of its text."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +288,13 @@ def _to_text(moment: datetime) -> str:
 def _from_text(text: str) -> datetime:
     """Read ISO-8601 text written by `_to_text` as an aware UTC datetime."""
     return datetime.fromisoformat(text).astimezone(UTC)
+
+
+def _stamp(field: str, moment: datetime) -> str:
+    """Render `moment` as `_to_text` does, rejecting a naive one by `field` name."""
+    if moment.utcoffset() is None:
+        raise InvalidValueError(field, "has no timezone")
+    return _to_text(moment)
 
 
 _SELECT_SOURCES: Final = (
@@ -785,6 +919,273 @@ class Store:
             name=row[0], sha256=row[1], size=row[2], stored_at=_from_text(row[3])
         )
 
+    def set_cv_profile(
+        self,
+        profile: ResumeProfile,
+        *,
+        cv_sha256: str,
+        model: str,
+        task_version: str,
+        made_at: datetime,
+    ) -> None:
+        """Store the profile read from the CV, replacing the earlier one.
+
+        Args:
+            profile: The profile to keep.
+            cv_sha256: The SHA-256 of the CV it was read from.
+            model: The model that read the CV.
+            task_version: The version of the task that did so.
+            made_at: When the profile was made, timezone-aware.
+
+        Raises:
+            InvalidValueError: If `made_at` has no timezone.
+            sqlite3.Error: If the write fails.
+        """
+        stamp = _stamp("made_at", made_at)
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO cv_profile (id, cv_sha256, profile, "
+                "profile_sha256, model, task_version, made_at) "
+                "VALUES (1, ?, ?, ?, ?, ?, ?)",
+                (
+                    cv_sha256,
+                    profile.to_json(),
+                    profile.sha256(),
+                    model,
+                    task_version,
+                    stamp,
+                ),
+            )
+
+    def cv_profile(self) -> StoredProfile | None:
+        """Read the stored CV profile.
+
+        Returns:
+            The profile with what it was made from, or `None` if none was stored.
+        """
+        row = self._conn.execute(
+            "SELECT profile, cv_sha256, model, task_version, made_at "
+            "FROM cv_profile WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return StoredProfile(
+            profile=ResumeProfile.from_json(row[0]),
+            cv_sha256=row[1],
+            model=row[2],
+            task_version=row[3],
+            made_at=_from_text(row[4]),
+        )
+
+    def set_instructions(self, instructions: Instructions) -> None:
+        """Store the user's instructions, replacing the earlier ones.
+
+        Args:
+            instructions: The instructions to keep.
+
+        Raises:
+            sqlite3.Error: If the write fails.
+        """
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO instructions (id, text, text_sha256, "
+                "filters, rules, rules_sha256, model, task_version, set_at) "
+                "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    instructions.text,
+                    instructions.text_sha256,
+                    instructions.filters_json,
+                    json.dumps(instructions.rules),
+                    instructions.rules_sha256,
+                    instructions.model,
+                    instructions.task_version,
+                    _to_text(instructions.set_at),
+                ),
+            )
+
+    def instructions(self) -> Instructions | None:
+        """Read the stored instructions.
+
+        Returns:
+            The instructions, or `None` if none were stored.
+        """
+        row = self._conn.execute(
+            "SELECT text, filters, rules, model, task_version, set_at "
+            "FROM instructions WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return Instructions(
+            text=row[0],
+            filters_json=row[1],
+            rules=tuple(json.loads(row[2])),
+            model=row[3],
+            task_version=row[4],
+            set_at=_from_text(row[5]),
+        )
+
+    def clear_instructions(self) -> None:
+        """Remove the stored instructions; clearing with none stored is a no-op.
+
+        Raises:
+            sqlite3.Error: If the write fails.
+        """
+        with self._conn:
+            self._conn.execute("DELETE FROM instructions WHERE id = 1")
+
+    def verdict(
+        self,
+        posting_id: PostingId,
+        input_sha256: str,
+        rules_sha256: str,
+        model: str,
+        task_version: str,
+    ) -> Verdict | None:
+        """Read the verdict made from exactly these inputs.
+
+        Args:
+            posting_id: The posting judged.
+            input_sha256: The SHA-256 of the posting text the verdict read.
+            rules_sha256: The SHA-256 of the rules it applied.
+            model: The model that judged.
+            task_version: The version of the task that did so.
+
+        Returns:
+            The stored verdict, or `None` if any of the five key fields differs
+            from every stored verdict.
+        """
+        row = self._conn.execute(
+            "SELECT keep, reason, rule FROM verdicts WHERE posting_id = ? "
+            "AND input_sha256 = ? AND rules_sha256 = ? AND model = ? "
+            "AND task_version = ?",
+            (posting_id, input_sha256, rules_sha256, model, task_version),
+        ).fetchone()
+        if row is None:
+            return None
+        return Verdict(keep=bool(row[0]), reason=row[1], rule=row[2])
+
+    def put_verdict(  # noqa: PLR0913, PLR0917  # five key fields, verdict, time
+        self,
+        posting_id: PostingId,
+        input_sha256: str,
+        rules_sha256: str,
+        model: str,
+        task_version: str,
+        verdict: Verdict,
+        *,
+        made_at: datetime,
+    ) -> None:
+        """Store a verdict under its five key fields, replacing one under the same.
+
+        Args:
+            posting_id: The posting judged.
+            input_sha256: The SHA-256 of the posting text the verdict read.
+            rules_sha256: The SHA-256 of the rules it applied.
+            model: The model that judged.
+            task_version: The version of the task that did so.
+            verdict: The verdict to keep.
+            made_at: When it was made, timezone-aware.
+
+        Raises:
+            InvalidValueError: If `made_at` has no timezone.
+            sqlite3.IntegrityError: If the posting is unknown.
+            sqlite3.Error: If the write fails.
+        """
+        stamp = _stamp("made_at", made_at)
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO verdicts (posting_id, input_sha256, "
+                "rules_sha256, model, task_version, keep, reason, rule, made_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    posting_id,
+                    input_sha256,
+                    rules_sha256,
+                    model,
+                    task_version,
+                    int(verdict.keep),
+                    verdict.reason,
+                    verdict.rule,
+                    stamp,
+                ),
+            )
+
+    def score(
+        self,
+        posting_id: PostingId,
+        input_sha256: str,
+        profile_sha256: str,
+        model: str,
+        task_version: str,
+    ) -> Score | None:
+        """Read the score made from exactly these inputs.
+
+        Args:
+            posting_id: The posting scored.
+            input_sha256: The SHA-256 of the posting text the score read.
+            profile_sha256: The SHA-256 of the profile it was scored against.
+            model: The model that scored.
+            task_version: The version of the task that did so.
+
+        Returns:
+            The stored score, or `None` if any of the five key fields differs
+            from every stored score.
+        """
+        row = self._conn.execute(
+            "SELECT score, reasons FROM scores WHERE posting_id = ? "
+            "AND input_sha256 = ? AND profile_sha256 = ? AND model = ? "
+            "AND task_version = ?",
+            (posting_id, input_sha256, profile_sha256, model, task_version),
+        ).fetchone()
+        if row is None:
+            return None
+        return Score(score=row[0], reasons=tuple(json.loads(row[1])))
+
+    def put_score(  # noqa: PLR0913, PLR0917  # five key fields, score, time
+        self,
+        posting_id: PostingId,
+        input_sha256: str,
+        profile_sha256: str,
+        model: str,
+        task_version: str,
+        score: Score,
+        *,
+        made_at: datetime,
+    ) -> None:
+        """Store a score under its five key fields, replacing one under the same.
+
+        Args:
+            posting_id: The posting scored.
+            input_sha256: The SHA-256 of the posting text the score read.
+            profile_sha256: The SHA-256 of the profile it was scored against.
+            model: The model that scored.
+            task_version: The version of the task that did so.
+            score: The score to keep.
+            made_at: When it was made, timezone-aware.
+
+        Raises:
+            InvalidValueError: If `made_at` has no timezone.
+            sqlite3.IntegrityError: If the posting is unknown.
+            sqlite3.Error: If the write fails.
+        """
+        stamp = _stamp("made_at", made_at)
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO scores (posting_id, input_sha256, "
+                "profile_sha256, model, task_version, score, reasons, made_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    posting_id,
+                    input_sha256,
+                    profile_sha256,
+                    model,
+                    task_version,
+                    score.score,
+                    json.dumps(score.reasons),
+                    stamp,
+                ),
+            )
+
     def import_seeds(self, rows: Iterable[tuple[SourceRef, str]]) -> int:
         """Add seed sources that the table does not hold yet.
 
@@ -832,6 +1233,74 @@ class Store:
                 "VALUES (?, ?, ?, ?) ON CONFLICT (ref) DO UPDATE SET removed = 0",
                 (str(ref), company, target_url, SourceOrigin.USER.value),
             )
+
+    def set_recipe_source(  # noqa: PLR0913  # the source's fields and the recipe's
+        self,
+        ref: SourceRef,
+        *,
+        company: str,
+        target_url: str | None,
+        recipe: str,
+        model: str,
+        at: datetime,
+    ) -> None:
+        """Add a source together with its recipe, in one transaction.
+
+        The source row is written as `add_source` does: a new ref gets a `user`
+        row, and a ref already in the table keeps its row and only has `removed`
+        cleared. The recipe row is inserted, or its recipe, model and time are
+        replaced. If either write fails neither is kept.
+
+        Args:
+            ref: The source to add.
+            company: The company the source belongs to.
+            target_url: The page the source is read from, if any.
+            recipe: The recipe as JSON text; it is stored, not parsed.
+            model: The model that learned the recipe.
+            at: When the recipe was learned, timezone-aware.
+
+        Raises:
+            InvalidValueError: If `at` has no timezone, or `recipe` or `model` is
+                empty.
+            sqlite3.Error: If a write fails.
+        """
+        stamp = _stamp("at", at)
+        record = StoredRecipe(ref=ref, recipe=recipe, model=model, created_at=at)
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO sources (ref, company, target_url, origin) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT (ref) DO UPDATE SET removed = 0",
+                (str(ref), company, target_url, SourceOrigin.USER.value),
+            )
+            self._conn.execute(
+                "INSERT INTO source_recipes (ref, recipe, model, created_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT (ref) DO UPDATE SET "
+                "recipe = excluded.recipe, model = excluded.model, "
+                "created_at = excluded.created_at",
+                (str(ref), record.recipe, record.model, stamp),
+            )
+
+    def recipe(self, ref: SourceRef) -> StoredRecipe | None:
+        """Read the recipe stored for a source, removed or not.
+
+        Args:
+            ref: The source to read.
+
+        Returns:
+            The stored recipe, or `None` if the source has none.
+        """
+        row = self._conn.execute(
+            "SELECT ref, recipe, model, created_at FROM source_recipes WHERE ref = ?",
+            (str(ref),),
+        ).fetchone()
+        if row is None:
+            return None
+        return StoredRecipe(
+            ref=parse_source_ref(row[0]),
+            recipe=row[1],
+            model=row[2],
+            created_at=_from_text(row[3]),
+        )
 
     def remove_source(self, ref: SourceRef) -> None:
         """Mark a source removed; an unknown ref is ignored.
@@ -891,6 +1360,112 @@ class Store:
             self._conn.execute(
                 "UPDATE sources SET last_fetched_at = ? WHERE ref = ?",
                 (_to_text(at), str(ref)),
+            )
+
+    def add_skipped(
+        self,
+        source: SourceRef,
+        items: Iterable[tuple[str, str | None, str]],
+        *,
+        seen_at: datetime,
+    ) -> list[ExternalId]:
+        """Keep the items a parser could not read, leaving known ones untouched.
+
+        An item whose source and text are already stored keeps its row, status
+        and time. All items are written in one transaction.
+
+        Args:
+            source: The source the items came from.
+            items: Each item's `(text, url, reason)`.
+            seen_at: When they were seen, timezone-aware.
+
+        Returns:
+            The external ids of the sightings made from those items that were
+            already read as jobs, so the caller can keep their postings listed.
+
+        Raises:
+            InvalidValueError: If `seen_at` has no timezone.
+            sqlite3.Error: If a write fails.
+        """
+        stamp = _stamp("seen_at", seen_at)
+        jobs: list[ExternalId] = []
+        with self._conn:
+            for text, url, reason in items:
+                item_id = skipped_item_id(text)
+                self._conn.execute(
+                    "INSERT INTO skipped_items "
+                    "(source, item_id, text, url, reason, seen_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT (source, item_id) DO NOTHING",
+                    (str(source), item_id, text, url, reason, stamp),
+                )
+                row = self._conn.execute(
+                    "SELECT external_id FROM skipped_items WHERE source = ? "
+                    "AND item_id = ? AND status = 'job' AND external_id IS NOT NULL",
+                    (str(source), item_id),
+                ).fetchone()
+                if row is not None:
+                    jobs.append(ExternalId(row[0]))
+        return jobs
+
+    def pending_skipped(self, sources: Collection[SourceRef]) -> list[SkippedRow]:
+        """Read the skipped items of some sources that no model has read yet.
+
+        Args:
+            sources: The sources to read; empty means none.
+
+        Returns:
+            The pending items, oldest first, then by source and id.
+        """
+        wanted = json.dumps([str(source) for source in sources])
+        rows = self._conn.execute(
+            "SELECT source, item_id, text, url, reason, status, external_id, seen_at "
+            "FROM skipped_items WHERE status = 'pending' "
+            "AND source IN (SELECT value FROM json_each(?)) "
+            "ORDER BY seen_at, source, item_id",
+            (wanted,),
+        ).fetchall()
+        return [
+            SkippedRow(
+                source=parse_source_ref(row[0]),
+                item_id=row[1],
+                text=row[2],
+                url=row[3],
+                reason=row[4],
+                status=SkippedStatus(row[5]),
+                external_id=None if row[6] is None else ExternalId(row[6]),
+                seen_at=_from_text(row[7]),
+            )
+            for row in rows
+        ]
+
+    def mark_skipped(
+        self,
+        source: SourceRef,
+        item_id: str,
+        status: SkippedStatus,
+        *,
+        external_id: ExternalId | None = None,
+    ) -> None:
+        """Record what the model made of a skipped item.
+
+        Args:
+            source: The item's source.
+            item_id: The item's id.
+            status: The result; `job` needs `external_id`.
+            external_id: The external id of the sighting made from the item.
+
+        Raises:
+            InvalidValueError: If `status` is `job` without an `external_id`.
+            sqlite3.Error: If the write fails.
+        """
+        if status is SkippedStatus.JOB and external_id is None:
+            raise InvalidValueError("external_id", "is needed for a job")
+        with self._conn:
+            self._conn.execute(
+                "UPDATE skipped_items SET status = ?, external_id = ? "
+                "WHERE source = ? AND item_id = ?",
+                (status.value, external_id, str(source), item_id),
             )
 
     def close(self) -> None:

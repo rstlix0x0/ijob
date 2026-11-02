@@ -447,3 +447,16 @@ def test_description_missing_gives_none(
 def test_description_from_raw_refuses_a_raw_that_is_not_an_object(raw: str) -> None:
     with pytest.raises(ParseError):
         description_from_raw(raw)
+
+
+def test_rejected_comment_is_kept_in_skipped() -> None:
+    bad = _comment("Acme", objectID="900000777")
+    body = json.dumps({"hits": [bad]}).encode()
+
+    batch = parse_comments(body, _STORY, _KEY)
+
+    assert batch.rejected == 1
+    (item,) = batch.skipped
+    assert item.text == "Acme"
+    assert item.url == "https://news.ycombinator.com/item?id=900000777"
+    assert "fewer than two fields" in item.reason

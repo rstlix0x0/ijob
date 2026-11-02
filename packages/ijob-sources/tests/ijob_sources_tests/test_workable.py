@@ -205,7 +205,9 @@ def test_unreadable_optional_field_is_dropped_and_job_kept(
 def test_job_that_cannot_be_re_encoded_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def overflow(_: object) -> str:
+    def overflow(_: object, **options: object) -> str:
+        if "default" in options:  # the record of a dropped job still encodes
+            return "{}"
         raise RecursionError
 
     monkeypatch.setattr(json, "dumps", overflow)

@@ -179,7 +179,9 @@ def test_job_that_cannot_be_re_encoded_is_rejected(
 ) -> None:
     body = _body(_FIRST)
 
-    def overflow(_: object) -> str:
+    def overflow(_: object, **options: object) -> str:
+        if "default" in options:  # the record of a dropped job still encodes
+            return "{}"
         raise RecursionError
 
     monkeypatch.setattr(json, "dumps", overflow)
@@ -596,3 +598,14 @@ def test_description_is_unescaped_once() -> None:
     draft = parse_jobs(_body(job), _KEY).drafts[0]
 
     assert draft.description == "R&D \\<b>"
+
+
+def test_rejected_job_is_kept_in_skipped() -> None:
+    bad = {**_SECOND, "company_name": 3}
+
+    batch = parse_jobs(_body(bad), _KEY)
+
+    (item,) = batch.skipped
+    assert json.loads(item.text) == bad
+    assert item.url == bad["absolute_url"]
+    assert "company_name" in item.reason

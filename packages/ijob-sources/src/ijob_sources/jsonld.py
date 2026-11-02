@@ -229,10 +229,11 @@ def _place(
             if text := _text(address, "jobLocation.address"):
                 string_addresses.append(text)
         elif isinstance(address, dict):
-            if locality := _text(
-                address.get("addressLocality"), "jobLocation.address.addressLocality"
-            ):
-                localities.append(locality)
+            localities.extend(
+                locality
+                for item in _as_list(address.get("addressLocality"))
+                if (locality := _text(item, "jobLocation.address.addressLocality"))
+            )
             if name := _country_name(address.get("addressCountry")):
                 country_names.append(name)
 

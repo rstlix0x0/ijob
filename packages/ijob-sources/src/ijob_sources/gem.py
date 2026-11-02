@@ -27,10 +27,11 @@ from ijob_core.model import (
     SourceRef,
 )
 
-from ijob_sources.collect import SourceBatch
+from ijob_sources.collect import SkippedItem, SourceBatch, skipped_item
 from ijob_sources.description import TextForm, normalize
 from ijob_sources.errors import ParseError
 from ijob_sources.identity import check_identity
+from ijob_sources.item_url import url_of
 from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
 
@@ -128,6 +129,7 @@ def _read(body: bytes, key: SourceKey, company: str) -> _Listing:
     drafts: list[SightingDraft] = []
     texts: list[str] = []
     rejected = 0
+    skipped: list[SkippedItem] = []
     for index, job in enumerate(jobs):
         text = job.get("content_plain") if isinstance(job, dict) else None
         texts.append(text if isinstance(text, str) else "")
@@ -135,10 +137,15 @@ def _read(body: bytes, key: SourceKey, company: str) -> _Listing:
             drafts.append(_to_draft(job, key, company))
         except InvalidValueError as error:
             rejected += 1
+            skipped.append(skipped_item(job, url_of(job, "absolute_url"), error))
             _LOGGER.warning(
                 "rejected gem job %s from %s: %s", _job_label(job, index), key, error
             )
-    return _Listing(SourceBatch(drafts=drafts, rejected=rejected), len(jobs), texts)
+    return _Listing(
+        SourceBatch(drafts=drafts, rejected=rejected, skipped=tuple(skipped)),
+        len(jobs),
+        texts,
+    )
 
 
 def _job_label(job: object, index: int) -> str:

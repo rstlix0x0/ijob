@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 from ijob_core.errors import InvalidValueError
-from ijob_core.money import Money, Period
+from ijob_core.money import Money, Period, money_text
 
 
 def test_money_accepts_range_and_single_bound() -> None:
@@ -63,3 +63,19 @@ def test_money_is_frozen_and_hashable() -> None:
     with pytest.raises(dataclasses.FrozenInstanceError):
         money.currency = "EUR"  # type: ignore[misc]
     assert hash(money) == hash(Money(Decimal(1), None, "USD", None))
+
+
+@pytest.mark.parametrize(
+    ("money", "expected"),
+    [
+        (
+            Money(Decimal(120000), Decimal(150000), "USD", Period.YEAR),
+            "120000-150000 USD/year",
+        ),
+        (Money(Decimal(120000), None, "USD", None), "from 120000 USD"),
+        (Money(None, Decimal(150000), "EUR", Period.MONTH), "up to 150000 EUR/month"),
+        (Money(None, Decimal(150000), "USD", None), "up to 150000 USD"),
+    ],
+)
+def test_money_text_moved(money: Money, expected: str) -> None:
+    assert money_text(money) == expected

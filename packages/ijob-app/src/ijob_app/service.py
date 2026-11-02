@@ -3,22 +3,36 @@
 `Service` owns what a front end does with the stored data: choosing sources,
 fetching the ones that are due, recording what they show, listing the open,
 filtered postings, reading a posting's detail and description, voting on
-postings, keeping the CV and managing the source table. It returns values and
-raises `InvalidValueError` subclasses, `SourcesError` or `OSError`; it neither
-prints nor starts an event loop, so each front end keeps its own output, exit
-codes and loop.
+postings, keeping the CV, judging and scoring postings with a model, reading
+the recorded traces and managing the source table. It returns values and
+raises `InvalidValueError` subclasses, `SourcesError`, the model layer's
+`LlmError` subclasses or `OSError`; it neither prints nor starts an event loop,
+so each front end keeps its own output, exit codes and loop.
+
+A recipe source is read through a client that refuses any request to a
+non-public address, so its page address, its next pages and its job pages are
+checked, while a refresh of every other source keeps the plain client. Adding
+by URL and the analysis that learns a recipe for an unrecognized page use such a
+client too, from their first request on, and the analysis stores nothing until
+the caller accepts its proposal.
+
+Every client the service builds shares one record of when each host was last
+requested, so requests to one host are spaced apart even when they come from
+different clients, such as `add_url` followed by `analyze_url`.
 
 `open_service` builds a `Service` over the seeded database and the HTTP cache of
 an ijob home. The store and the cache are bound to the thread that opens them,
 so every `Service` method must run on that thread. The methods that reach the
-network are `async` and run on the caller's event loop.
+network or call a model are `async` and run on the caller's event loop.
 """
 
+import asyncio
 import hashlib
+import json
 import sqlite3
 import tempfile
-from collections.abc import Callable, Collection, Iterator, Sequence
-from contextlib import contextmanager, suppress
+from collections.abc import AsyncIterator, Callable, Collection, Iterator, Sequence
+from contextlib import AsyncExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -29,30 +43,77 @@ from ijob_core.errors import InvalidValueError
 from ijob_core.filters import FilterSpec, keep
 from ijob_core.model import (
     ExternalId,
+    Instructions,
     Label,
     Posting,
     PostingId,
+    ResumeProfile,
+    SourceKind,
     SourceRef,
     StoredCv,
     Vote,
 )
 from ijob_core.store import SourceOrigin, SourceRow, Store
+from ijob_core.traces import PruneReport, TraceSummary, TraceTree
 from ijob_sources.collect import CollectResult, Source, SourceFailure, collect
 from ijob_sources.details import describe
 from ijob_sources.detect import resolve_url, verify_new_source
-from ijob_sources.errors import SourcesError
+from ijob_sources.errors import FetchedPage, SourcesError
 from ijob_sources.http_cache import SqliteHttpCache
-from ijob_sources.polite_http import ConditionalCache, PoliteClient
+from ijob_sources.manual import manual_key
+from ijob_sources.polite_http import ConditionalCache, HostPacing, PoliteClient
+from ijob_sources.public_host import (
+    HostResolver,
+    public_host_guard,
+    system_resolver,
+)
 from ijob_sources.registry import build_source, refresh_interval
 from ijob_sources.seeds import load_seeds
 
+from ijob_app import recipe_ops
+from ijob_app.config import FilterLayers, effective_filters
+from ijob_app.extract_ops import ExtractProgress, ExtractReport, extract_operation
 from ijob_app.home import IjobHome
+from ijob_app.llm_ops import (
+    JudgeStatus,
+    LlmOptions,
+    LlmRuntime,
+    OperationReport,
+    Proposal,
+    ScoreItem,
+    SearchItem,
+    accept_proposal,
+    instructions_model,
+    judge_operation,
+    list_traces,
+    profile_operation,
+    propose_operation,
+    prune_traces,
+    read_trace,
+    score_operation,
+)
+from ijob_app.recipe_ops import RecipeProposal
 
 type ClientFactory = Callable[[ConditionalCache | None], PoliteClient]
 
 MAX_CV_BYTES: Final = 20_000_000
 _PDF_MAGIC: Final = b"%PDF-"
 _CV_FILE_NAME: Final = "cv.pdf"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FetchProgress:
+    """How far fetching the sources has got.
+
+    Attributes:
+        total: The sources being fetched.
+        done: The sources that have ended, failed ones included.
+        failed: The sources that failed.
+    """
+
+    total: int
+    done: int
+    failed: int
 
 
 class UnknownSourceError(InvalidValueError):
@@ -91,6 +152,31 @@ class SourceCompanyError(InvalidValueError):
             company: The company the table already has it for.
         """
         super().__init__("source", f"{ref} is already a source for {company}")
+
+
+class RecipeAlreadyAddedError(SourcesError):
+    """A URL's recipe source is already added and was not removed."""
+
+    def __init__(self, ref: SourceRef) -> None:
+        """Build the error from the source that exists.
+
+        Args:
+            ref: The recipe source that is already added.
+        """
+        super().__init__(f"{ref} is already added; run: ijob sources reanalyze {ref}")
+        self.ref = ref
+
+
+class NoRecipeError(InvalidValueError):
+    """A source that has no recipe was named where a recipe source is needed."""
+
+    def __init__(self, ref: SourceRef) -> None:
+        """Build the error from the source that has no recipe.
+
+        Args:
+            ref: The source that is not a recipe source.
+        """
+        super().__init__("source", f"{ref} has no recipe")
 
 
 class InvalidCvError(InvalidValueError):
@@ -284,7 +370,7 @@ class Service:
     methods only on one event loop at a time.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913  # the resources a service is built over, one each
         self,
         store: Store,
         *,
@@ -292,24 +378,43 @@ class Service:
         client_factory: ClientFactory,
         cache: ConditionalCache | None,
         now: Callable[[], datetime],
+        home: IjobHome,
+        llm: LlmOptions,
+        resolver: HostResolver = system_resolver,
     ) -> None:
         """Build a service over open resources it does not own.
 
         Args:
             store: The open store, with the seed sources imported.
             db_path: The database file the store was opened on.
-            client_factory: Builds the client a fetch goes through.
+            client_factory: Builds the client a fetch goes through; the
+                service has every client it builds share its host pacing.
             cache: The HTTP cache the fetching clients revalidate against, or
                 `None` for none.
             now: The wall clock, returning timezone-aware times.
+            home: The ijob home, which holds the trace database.
+            llm: What the model-calling operations are given.
+            resolver: Looks up the addresses of a host for the check that keeps
+                a recipe source on public hosts.
         """
         self._store = store
         self._db_path = db_path
         self._client_factory = client_factory
         self._cache = cache
         self._now = now
+        self._home = home
+        self._llm = llm
+        self._resolver = resolver
+        self._pacing = HostPacing()
+        self._llm_runtime: LlmRuntime | None = None
+        self.last_report: OperationReport | None = None
 
-    async def refresh(self, refs: Sequence[SourceRef]) -> RefreshReport:
+    async def refresh(
+        self,
+        refs: Sequence[SourceRef],
+        *,
+        on_progress: Callable[[FetchProgress], None] | None = None,
+    ) -> RefreshReport:
         """Fetch the chosen sources that are due and record what they show.
 
         The clock is read twice: once to split the sources by interval before
@@ -318,6 +423,8 @@ class Service:
 
         Args:
             refs: The sources to read; empty means every source in the table.
+            on_progress: Called once before the first fetch and as each source
+                ends.
 
         Returns:
             What was fetched, kept, rejected, refused and found stale.
@@ -329,7 +436,7 @@ class Service:
         rows = self._choose_sources(refs)
         due, kept = _split_by_interval(rows, self._now())
         sources, refused = self._build_sources(due)
-        result = await self._collect(sources)
+        result = await self._collect(sources, on_progress)
         seen_at = self._now()
         fetched = self._record(due, result, seen_at)
         return RefreshReport(
@@ -345,6 +452,39 @@ class Service:
             refused=refused,
             stale=self._stale(rows, seen_at),
         )
+
+    async def search_postings(
+        self, layers: FilterLayers, refs: Sequence[SourceRef]
+    ) -> list[Posting]:
+        """List the postings a search goes through, before any judging.
+
+        The read runs off the event loop on its own connection, as a large store
+        takes seconds to read and a screen must not freeze meanwhile.
+
+        Args:
+            layers: The filters the config file and the flags set.
+            refs: The sources to read; empty means every source.
+
+        Returns:
+            The open postings that pass the layers and the stored instructions.
+
+        Raises:
+            UnknownSourceError: A named source has no row or was removed.
+            InvalidValueError: A filter in the stored instructions is unusable.
+            sqlite3.Error: A store read failed.
+        """
+        stored = self._store.instructions()
+        layer = None if stored is None else json.loads(stored.filters_json)
+        spec, _ = effective_filters(layers, layer)
+        self._choose_sources(refs)
+        at = self._now()
+
+        def read() -> list[Posting]:
+            with Store.open(self._db_path) as store:
+                postings = store.open_postings(now=at, sources=refs or None)
+            return [posting for posting in postings if keep(posting, spec, now=at)]
+
+        return await asyncio.to_thread(read)
 
     def open_postings(
         self, spec: FilterSpec, refs: Sequence[SourceRef]
@@ -365,6 +505,158 @@ class Service:
         at = self._now()
         postings = self._store.open_postings(now=at, sources=refs or None)
         return [posting for posting in postings if keep(posting, spec, now=at)]
+
+    async def search(
+        self,
+        layers: FilterLayers,
+        refs: Sequence[SourceRef],
+        *,
+        listed: Sequence[Posting] | None = None,
+    ) -> AsyncIterator[SearchItem]:
+        """List the open postings that pass the filters, judged by the user's rules.
+
+        The filters in force are `layers` merged with the stored instructions'
+        filters. With no stored rules the postings are yielded as they are listed,
+        with status `not_run`, and no model module is loaded. With rules, a
+        posting whose verdict is stored comes first, as `cached`, and the rest
+        are judged and yielded in the order they finish.
+
+        `last_report` is `None` while the iteration runs and when no rules are
+        stored; otherwise it holds what the judging did once the iteration ends.
+        Abandoning the iteration early cancels the calls still running.
+
+        Args:
+            layers: The filters the packaged config, the user's file and the
+                flags set.
+            refs: The sources to read; empty means every source.
+            listed: What `search_postings` already returned for these filters,
+                so they are not read twice.
+
+        Yields:
+            One item per posting.
+
+        Raises:
+            UnknownSourceError: A named source has no row or was removed.
+            InvalidValueError: A filter in the stored instructions is unusable,
+                or the config file is unusable.
+            MissingModelError: Rules are stored and no model is set for the
+                `judge` task.
+            ProviderUnavailableError: A variable that redirects model calls is
+                set. A `claude` CLI that is missing or too old does not raise;
+                the items it stops come back as `provider_error`.
+            sqlite3.Error: A store read or write failed.
+        """
+        self.last_report = None
+        stored = self._store.instructions()
+        postings = (
+            await self.search_postings(layers, refs) if listed is None else listed
+        )
+        if stored is None or not stored.rules:
+            for posting in postings:
+                yield SearchItem(
+                    posting, None, JudgeStatus.NOT_RUN, posting.description is None
+                )
+            return
+        async for item in judge_operation(
+            self._runtime(),
+            self._store,
+            postings,
+            stored,
+            now=self._now,
+            on_report=self._keep_report,
+        ):
+            yield item
+
+    async def score(self, ids: Sequence[PostingId]) -> AsyncIterator[ScoreItem]:
+        """Score postings against the stored CV profile, on demand.
+
+        Repeated ids are scored once, in the order they first appear. A posting
+        whose score is stored for this posting text, this profile, this model and
+        this task version comes first, as `cached`; the rest are scored and
+        yielded in the order they finish. When no profile is stored, or the stored
+        one was read from an earlier CV, it is built from the CV first, inside
+        the same budget and trace.
+
+        `last_report` is `None` while the iteration runs and holds what the
+        scoring did once it ends.
+
+        Args:
+            ids: The postings to score.
+
+        Yields:
+            One item per distinct id.
+
+        Raises:
+            UnknownPostingError: An id names no posting; no call is made.
+            NoCvError: No CV is stored.
+            MissingModelError: No model is set for the `scorer` task, or for the
+                `cv_profile` task when the profile must be built.
+            CvTextError: The CV text cannot be read or used.
+            ProviderUnavailableError: A variable that redirects model calls is
+                set. A `claude` CLI that is missing or too old does not raise;
+                the items it stops come back as `provider_error`.
+            InvalidValueError: The config file is unusable.
+            sqlite3.Error: A store read or write failed.
+        """
+        self.last_report = None
+        postings = [
+            self._require_posting(posting_id) for posting_id in dict.fromkeys(ids)
+        ]
+        async for item in score_operation(
+            self._runtime(),
+            self._store,
+            postings,
+            self._db_path.parent / _CV_FILE_NAME,
+            now=self._now,
+            on_report=self._keep_report,
+        ):
+            yield item
+
+    def traces(self, limit: int = 20) -> list[TraceSummary]:
+        """List the recorded traces, newest first.
+
+        Args:
+            limit: The most traces to list.
+
+        Returns:
+            The summaries, newest first.
+
+        Raises:
+            InvalidValueError: `limit` is negative.
+            sqlite3.Error: The trace database cannot be opened or read.
+        """
+        return list_traces(self._home, limit)
+
+    def trace(self, trace_id: str) -> TraceTree:
+        """Read one trace as nested spans.
+
+        Args:
+            trace_id: The trace to read, as `traces` lists it.
+
+        Returns:
+            The trace's spans nested under their parents.
+
+        Raises:
+            UnknownTraceError: No span of that trace is recorded.
+            sqlite3.Error: The trace database cannot be opened or read.
+        """
+        return read_trace(self._home, trace_id)
+
+    def prune_traces(self) -> PruneReport:
+        """Delete the oldest traces until the database fits `[tracing].max_size_mb`.
+
+        Returns:
+            How many traces were deleted and the file size afterwards.
+
+        Raises:
+            InvalidValueError: The config file is unusable.
+            sqlite3.Error: The trace database cannot be opened or pruned.
+        """
+        return prune_traces(self._home, self._llm.config_path)
+
+    def _keep_report(self, report: OperationReport) -> None:
+        """Remember the report of the operation that just ended."""
+        self.last_report = report
 
     async def detail(self, posting_id: PostingId) -> PostingDetail:
         """Read a posting with its sources, label and description.
@@ -493,6 +785,122 @@ class Service:
         """
         return self._store.cv()
 
+    def _runtime(self) -> LlmRuntime:
+        """Return the LLM runtime, building it on the first model operation.
+
+        Raises:
+            ProviderUnavailableError: A variable that redirects model calls is set.
+            InvalidValueError: The config file is unreadable, or a setting in it
+                is unknown or out of range.
+        """
+        if self._llm_runtime is None:
+            self._llm_runtime = LlmRuntime.create(self._home, self._llm)
+        return self._llm_runtime
+
+    async def build_profile(
+        self, *, refresh: bool
+    ) -> tuple[ResumeProfile, OperationReport]:
+        """Return the profile of the stored CV, reading the CV only when needed.
+
+        The stored profile is reused while the CV, the task version and the
+        `cv_profile` model are unchanged, unless `refresh`.
+
+        Args:
+            refresh: Whether to read the CV again even if the profile is current.
+
+        Returns:
+            The profile and what the operation did and spent.
+
+        Raises:
+            NoCvError: No CV is stored.
+            MissingModelError: No model is set for the `cv_profile` task.
+            CvTextError: The CV text cannot be read or used.
+            TaskOutputError: The model's answer is unusable.
+            ProviderUnavailableError: The provider cannot be used.
+            ProviderFailedError: The provider failed the call.
+            CostUnknownError: The cost of the call cannot be determined.
+            InvalidValueError: The config file is unusable.
+            sqlite3.Error: The store cannot be read or written.
+        """
+        return await profile_operation(
+            self._runtime(),
+            self._store,
+            self._db_path.parent / _CV_FILE_NAME,
+            refresh=refresh,
+            at=self._now(),
+        )
+
+    def cv_profile(self) -> ResumeProfile | None:
+        """Read the stored CV profile, which may be from an earlier CV.
+
+        Returns:
+            The profile, or `None` if none was built.
+        """
+        stored = self._store.cv_profile()
+        return None if stored is None else stored.profile
+
+    async def propose_instructions(self, layers: FilterLayers, text: str) -> Proposal:
+        """Work out what the user's instructions would set, without storing them.
+
+        Args:
+            layers: The filters the packaged config, the user's file and the
+                flags set.
+            text: The instructions the user wrote.
+
+        Returns:
+            The proposal for the user to confirm with `accept_instructions`.
+
+        Raises:
+            InvalidValueError: `text` is blank or too long, a filter the
+                instructions imply is unusable, or the config file is unusable.
+            MissingModelError: No model is set for the `instructions` task.
+            NothingActionableError: The instructions give neither a filter nor
+                a rule.
+            TaskOutputError: The model's answer is unusable.
+            ProviderUnavailableError: The provider cannot be used.
+            ProviderFailedError: The provider failed the call.
+            CostUnknownError: The cost of the call cannot be determined.
+            sqlite3.Error: The store cannot be read.
+        """
+        return await propose_operation(self._runtime(), self._store, layers, text)
+
+    def accept_instructions(self, proposal: Proposal) -> None:
+        """Store a confirmed proposal as the user's instructions.
+
+        Args:
+            proposal: The proposal `propose_instructions` returned.
+
+        Raises:
+            MissingModelError: No model is set for the `instructions` task.
+            ProviderUnavailableError: A variable that redirects model calls is
+                set.
+            InvalidValueError: The instructions break a limit of the stored
+                form, or the config file is unusable.
+            sqlite3.Error: The store cannot be written.
+        """
+        accept_proposal(
+            self._store,
+            proposal,
+            model=instructions_model(self._runtime()),
+            at=self._now(),
+        )
+
+    def instructions(self) -> Instructions | None:
+        """Read the stored instructions.
+
+        Returns:
+            The instructions, or `None` if none were stored.
+        """
+        return self._store.instructions()
+
+    def clear_instructions(self) -> None:
+        """Remove the stored instructions; clearing with none stored is a no-op.
+
+        Raises:
+            sqlite3.Error: The write failed.
+        """
+        self._store.clear_instructions()
+
     def sources(self) -> list[SourceRow]:
         """List every source that was not removed.
 
@@ -522,7 +930,7 @@ class Service:
         """
         self._refuse_other_company(ref, company)
         source = build_source(_new_row(ref, company))
-        async with self._client_factory(None) as client:
+        async with self._client(None) as client:
             await verify_new_source(source, client)
         self._store.add_source(ref, company)
         return self._require_source(ref)
@@ -547,7 +955,12 @@ class Service:
         """Work out what a URL is, verify it and add it as a source.
 
         A URL read from a page or feed is already checked by being read; a
-        hiring-system board is fetched once before it is added.
+        hiring-system board is fetched once before it is added. Every request,
+        robots.txt and redirect hops included, goes through a client that
+        refuses a non-public address and a host another source kind reads, so
+        such a URL is refused before anything is sent. A redirect is followed
+        and the source reads the address it ended on, because a refresh follows
+        none; a redirect to a hiring-system board adds that board.
 
         Args:
             url: A board, job page or feed URL.
@@ -560,10 +973,16 @@ class Service:
             SourceCompanyError: The table already holds the resolved reference
                 for another company.
             InvalidValueError: The registry cannot build the resolved source.
-            SourcesError: The URL is unusable, or the source fails its check.
+            UnrecognizedPageError: The page is no hiring system, job posting or
+                feed; `analyze_url` can learn a recipe for it, given the page
+                the error holds.
+            SourcesError: The URL is malformed or unusable, is not a public
+                address, is on a host another source kind reads, its page is
+                over 5 MiB or its robots.txt could not be read, or the source
+                fails its check.
             sqlite3.Error: The write failed.
         """
-        async with self._client_factory(None) as client:
+        async with self._client(None, public_only=True) as client:
             resolution = await resolve_url(url, company=company, client=client)
             self._refuse_other_company(resolution.ref, company)
             if resolution.batch is None:
@@ -571,6 +990,200 @@ class Service:
                 await verify_new_source(source, client)
         self._store.add_source(resolution.ref, company, resolution.target_url)
         return self._require_source(resolution.ref)
+
+    def learns_recipes(self) -> bool:
+        """Say whether a model is set to learn recipes.
+
+        The config is read without loading an LLM library; the runtime is built
+        only when a model is set.
+
+        Returns:
+            Whether `[models].source_recipe` is set.
+
+        Raises:
+            ProviderUnavailableError: A model is set and a variable that
+                redirects model calls is set.
+            InvalidValueError: The config file is unreadable, or a setting in it
+                is unknown or out of range.
+        """
+        from ijob_ai.llm.settings import Task  # noqa: PLC0415
+
+        from ijob_app.llm_config import read_llm_settings  # noqa: PLC0415
+
+        settings = read_llm_settings(self._llm.config_path)
+        if Task.SOURCE_RECIPE not in settings.models:
+            return False
+        self._runtime()
+        return True
+
+    async def analyze_url(
+        self, url: str, company: str, *, page: FetchedPage | None = None
+    ) -> RecipeProposal:
+        """Learn a recipe for a page no source kind recognizes, without storing it.
+
+        Call this after `add_url` raised `UnrecognizedPageError` for the URL,
+        passing the page the error holds so the page is not fetched again.
+        Without `page` it is fetched, through a client that refuses non-public
+        addresses. A JSON address the model names is always fetched that way.
+        The recipe source is named after the address the page ended on, as
+        every other source added by URL is, so two addresses that lead to one
+        page are one source; without `page` it is named after `url`. The
+        source's target stays `url`.
+
+        Args:
+            url: The page's address, as it was added.
+            company: The company the source would belong to.
+            page: The page `add_url` already read, or `None` to fetch it.
+
+        Returns:
+            The proposal for the user to confirm with `accept_recipe`.
+
+        Raises:
+            RecipeAlreadyAddedError: The URL's recipe source is already added
+                and not removed.
+            SourceCompanyError: The table already holds the source for another
+                company, removed or not.
+            MissingModelError: No model is set for the `source_recipe` task.
+            UnsupportedUrlError: `url` is malformed; nothing is fetched.
+            SourcesError: The page or a JSON address it names cannot be
+                fetched, is not a public address, is on a host another source
+                kind reads, is over 5 MiB, is neither HTML nor JSON, or a JSON
+                address serves HTML.
+            TaskOutputError: The model's answer is unusable, or its recipe is
+                invalid.
+            NoTrialJobsError: The recipe reads no job from the page.
+            RecipeCapReachedError: The cost cap was reached before the second
+                call.
+            ProviderUnavailableError: The provider cannot be used.
+            ProviderFailedError: The provider failed a call.
+            CostUnknownError: The cost of a call cannot be determined.
+            InvalidValueError: The config file is unusable.
+            sqlite3.Error: The store cannot be read.
+        """
+        ref = SourceRef(
+            SourceKind.RECIPE, manual_key(url if page is None else page.final_url)
+        )
+        row = self._store.source(ref)
+        if row is not None and not row.removed:
+            raise RecipeAlreadyAddedError(ref)
+        self._refuse_other_company(ref, company)
+        return await self._analyze(ref, url, company, page)
+
+    async def analyze_source(self, ref: SourceRef) -> RecipeProposal:
+        """Learn a recipe again for a recipe source, keeping the stored one.
+
+        The page is the source's stored address and the company is its stored
+        company. The stored recipe stays until `accept_recipe` replaces it.
+
+        Args:
+            ref: The recipe source.
+
+        Returns:
+            The proposal for the user to confirm with `accept_recipe`.
+
+        Raises:
+            UnknownSourceError: The source has no row or was removed.
+            NoRecipeError: The source is not a recipe source, or its row has no
+                address to read.
+            MissingModelError: No model is set for the `source_recipe` task.
+            UnsupportedUrlError: The stored address is malformed.
+            SourcesError: The page or a JSON address it names cannot be
+                fetched, is not a public address, is on a host another source
+                kind reads, is over 5 MiB, is neither HTML nor JSON, or a JSON
+                address serves HTML.
+            TaskOutputError: The model's answer is unusable, or its recipe is
+                invalid.
+            NoTrialJobsError: The recipe reads no job from the page.
+            RecipeCapReachedError: The cost cap was reached before the second
+                call.
+            ProviderUnavailableError: The provider cannot be used.
+            ProviderFailedError: The provider failed a call.
+            CostUnknownError: The cost of a call cannot be determined.
+            InvalidValueError: The config file is unusable.
+            sqlite3.Error: The store cannot be read.
+        """
+        row = self._store.source(ref)
+        if row is None or row.removed:
+            reason = f"unknown source {ref}"
+            raise UnknownSourceError(reason)
+        if ref.kind is not SourceKind.RECIPE or row.target_url is None:
+            raise NoRecipeError(ref)
+        return await self._analyze(ref, row.target_url, row.company, None)
+
+    def accept_recipe(self, proposal: RecipeProposal) -> SourceRow:
+        """Store a confirmed proposal as a source and its recipe.
+
+        A removed source is restored, and a recipe already stored for the
+        source is replaced.
+
+        Args:
+            proposal: The proposal `analyze_url` or `analyze_source` returned.
+
+        Returns:
+            The source's row.
+
+        Raises:
+            InvalidValueError: The recipe or the model reference is empty, or the
+                service's clock gives a time with no timezone.
+            sqlite3.Error: The store cannot be written.
+        """
+        recipe_ops.accept_recipe(self._store, proposal, at=self._now())
+        return self._require_source(proposal.ref)
+
+    def unread_count(self, refs: Sequence[SourceRef]) -> int:
+        """Count the skipped items of some sources that no model has read yet.
+
+        Args:
+            refs: The sources to count; empty means every source.
+
+        Returns:
+            The number of pending items.
+
+        Raises:
+            UnknownSourceError: A named source has no row or was removed.
+            sqlite3.Error: The store cannot be read.
+        """
+        rows = self._choose_sources(refs)
+        return len(self._store.pending_skipped([row.ref for row in rows]))
+
+    async def extract_skipped(
+        self,
+        refs: Sequence[SourceRef],
+        *,
+        on_progress: Callable[[ExtractProgress], None] | None = None,
+    ) -> ExtractReport:
+        """Read the skipped jobs of some sources with the `job_extract` model.
+
+        Each job read becomes a low-confidence posting of its source. An item
+        that was read, as a job or not, is never sent again; one that could not
+        be read stays pending.
+
+        Args:
+            refs: The sources to read; empty means every source.
+            on_progress: Called once before the first call and after each item.
+
+        Returns:
+            What was added, set aside and left unread, and what it cost.
+
+        Raises:
+            UnknownSourceError: A named source has no row or was removed.
+            MissingModelError: No model is set for the `job_extract` task; no
+                call is made.
+            ProviderUnavailableError: The provider cannot be used.
+            InvalidValueError: The config file is unusable.
+            sqlite3.Error: The store cannot be read or written.
+        """
+        rows = self._choose_sources(refs)
+        pending = self._store.pending_skipped([row.ref for row in rows])
+        report = await extract_operation(
+            self._runtime(),
+            self._store,
+            pending,
+            now=self._now(),
+            on_progress=on_progress,
+        )
+        self._keep_report(report.report)
+        return report
 
     def posting_sources(self, posting_id: PostingId) -> list[SourceRef]:
         """List the sources that have shown a posting.
@@ -583,6 +1196,16 @@ class Service:
             unknown.
         """
         return self._store.posting_sources(posting_id)
+
+    async def _analyze(
+        self, ref: SourceRef, url: str, company: str, page: FetchedPage | None
+    ) -> RecipeProposal:
+        """Analyze a page through a guarded client that has no cache."""
+        runtime = self._runtime()
+        async with self._client(None, public_only=True) as client:
+            return await recipe_ops.analyze_operation(
+                runtime, client, ref=ref, target_url=url, company=company, page=page
+            )
 
     def _refuse_other_company(self, ref: SourceRef, company: str) -> None:
         """Refuse a reference the table already holds for a different company.
@@ -633,13 +1256,25 @@ class Service:
         Returns:
             The description and `None`, or `None` and the reason there is none:
             the message of the first source error, or that no source publishes
-            a description.
+            a description. A recipe source's job page is fetched through the
+            client that refuses non-public addresses.
         """
         failure: str | None = None
-        async with self._client_factory(self._cache) as client:
+        async with (
+            self._client(self._cache) as client,
+            AsyncExitStack() as stack,
+        ):
+            guarded: PoliteClient | None = None
             for sighting in self._store.sightings_of(posting_id):
+                used = client
+                if sighting.source.kind is SourceKind.RECIPE:
+                    if guarded is None:
+                        guarded = await stack.enter_async_context(
+                            self._client(self._cache, public_only=True)
+                        )
+                    used = guarded
                 try:
-                    text = await describe(sighting, client)
+                    text = await describe(sighting, used)
                 except SourcesError as error:
                     failure = failure or str(error)
                     continue
@@ -683,30 +1318,98 @@ class Service:
             rows: The sources to build.
 
         Returns:
-            The adapters, and the reason each refused row could not be built.
+            The adapters, and the reason each refused row could not be built. A
+            recipe row with no stored recipe is refused.
         """
         sources: list[Source] = []
         refused: dict[SourceRef, InvalidValueError] = {}
         for row in rows:
             try:
                 sources.append(
-                    build_source(row, known=self._store.external_ids(row.ref))
+                    build_source(
+                        row,
+                        known=self._store.external_ids(row.ref),
+                        recipe=self._recipe_text(row),
+                    )
                 )
             except InvalidValueError as error:
                 refused[row.ref] = error
         return sources, refused
 
-    async def _collect(self, sources: list[Source]) -> CollectResult:
-        """Fetch every source with one client, opened and closed on this loop.
+    def _recipe_text(self, row: SourceRow) -> str | None:
+        """Return the recipe stored for a recipe row, or `None` for any other row."""
+        if row.ref.kind is not SourceKind.RECIPE:
+            return None
+        stored = self._store.recipe(row.ref)
+        return None if stored is None else stored.recipe
+
+    def _client(
+        self, cache: ConditionalCache | None, *, public_only: bool = False
+    ) -> PoliteClient:
+        """Build a client that paces by the service's shared host pacing.
+
+        Args:
+            cache: The cache the client revalidates against, or `None`.
+            public_only: Whether the client refuses any request to a non-public
+                address or to a host another source kind reads.
+        """
+        client = self._client_factory(cache)
+        client.share_pacing(self._pacing)
+        if public_only:
+            client.guard_requests(public_host_guard(self._resolver))
+        return client
+
+    async def _collect(
+        self,
+        sources: list[Source],
+        on_progress: Callable[[FetchProgress], None] | None = None,
+    ) -> CollectResult:
+        """Fetch every source with clients opened and closed on this loop.
+
+        The recipe sources go through a client that refuses non-public
+        addresses, concurrently with the rest; no such client is opened when
+        there is no recipe source.
 
         Args:
             sources: The sources to fetch.
+            on_progress: Called once before the first fetch and as each source
+                ends. It is not called when there is no source.
 
         Returns:
-            What `collect` returned for the sources.
+            What `collect` returned for the sources, merged.
         """
-        async with self._client_factory(self._cache) as client:
-            return await collect(sources, client)
+        recipes = [source for source in sources if source.ref.kind is SourceKind.RECIPE]
+        others = [
+            source for source in sources if source.ref.kind is not SourceKind.RECIPE
+        ]
+        done = 0
+        failed = 0
+
+        def source_done(source_failed: bool) -> None:  # noqa: FBT001
+            nonlocal done, failed
+            done += 1
+            failed += source_failed
+            if on_progress is not None:
+                on_progress(FetchProgress(total=len(sources), done=done, failed=failed))
+
+        if on_progress is not None and sources:
+            on_progress(FetchProgress(total=len(sources), done=0, failed=0))
+        async with self._client(self._cache) as client:
+            if not recipes:
+                return await collect(others, client, on_done=source_done)
+            async with (
+                self._client(self._cache, public_only=True) as guarded,
+                asyncio.TaskGroup() as group,
+            ):
+                plain = group.create_task(collect(others, client, on_done=source_done))
+                checked = group.create_task(
+                    collect(recipes, guarded, on_done=source_done)
+                )
+        first, second = plain.result(), checked.result()
+        return CollectResult(
+            batches={**first.batches, **second.batches},
+            failures=[*first.failures, *second.failures],
+        )
 
     def _record(
         self, rows: list[SourceRow], result: CollectResult, seen_at: datetime
@@ -731,6 +1434,17 @@ class Service:
             for ref, batch in zip(fetched, batches, strict=True)
             for external_id in batch.still_listed
         ]
+        for ref, batch in zip(fetched, batches, strict=True):
+            # A skipped item a model already read as a job stays listed, so its
+            # posting is not closed while the source still shows the item.
+            still_listed.extend(
+                (ref, external_id)
+                for external_id in self._store.add_skipped(
+                    ref,
+                    ((item.text, item.url, item.reason) for item in batch.skipped),
+                    seen_at=seen_at,
+                )
+            )
         self._store.record(
             (draft for batch in batches for draft in batch.drafts),
             seen_at=seen_at,
@@ -751,13 +1465,15 @@ class Service:
 
 
 @contextmanager
-def open_service(
+def open_service(  # noqa: PLR0913  # the service's inputs, one each
     home: IjobHome,
     db: Path | None,
     client_factory: ClientFactory,
     *,
     now: Callable[[], datetime],
     use_cache: bool = True,
+    llm: LlmOptions | None = None,
+    resolver: HostResolver = system_resolver,
 ) -> Iterator[Service]:
     """Open the seeded database and the HTTP cache and build a service on them.
 
@@ -773,6 +1489,10 @@ def open_service(
             entries by it too.
         use_cache: Whether to open the HTTP cache and hand it to the clients.
             A caller that never revalidates responses leaves it off.
+        llm: What the model-calling operations are given, or `None` for the
+            home's config file, the real engines and the real `PATH`.
+        resolver: Looks up the addresses of a host for the check that keeps a
+            recipe source on public hosts; the default asks the system.
 
     Yields:
         The service, valid until the context exits and bound to this thread.
@@ -797,6 +1517,9 @@ def open_service(
                 client_factory=client_factory,
                 cache=cache,
                 now=now,
+                home=home,
+                llm=llm or LlmOptions(config_path=home.config),
+                resolver=resolver,
             )
     finally:
         if cache is not None:

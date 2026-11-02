@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import Callable, Mapping
 from datetime import timedelta
 from importlib.resources import files
@@ -12,6 +13,7 @@ from ijob_sources.collect import SourceBatch
 from ijob_sources.errors import IdentityMismatchError
 from ijob_sources.manual import FeedUrl, JobPostingPage
 from ijob_sources.polite_http import PoliteClient
+from ijob_sources.recipe_source import RecipeSource
 from ijob_sources.registry import HOST_INTERVALS, build_source, refresh_interval
 from ijob_sources.rss import FEEDS, parse_rss
 
@@ -19,6 +21,15 @@ _MANUAL_KINDS = frozenset({SourceKind.JOBPOSTING, SourceKind.FEED})
 _FEED_URL = "https://feed.example.test/rss.xml"
 _PAGE_URL = "https://careers.example.test/jobs/release-engineer"
 _MANUAL_KEY = "0123456789abcdef"
+_RECIPE_TEXT = json.dumps(
+    {
+        "version": 1,
+        "format": "html",
+        "url": "https://example.org/jobs/",
+        "items": "//li",
+        "fields": {"title": "./a", "url": "./a/@href"},
+    }
+)
 
 type _Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -52,6 +63,10 @@ def _row_of_kind(kind: SourceKind) -> SourceRow:
     return _row(kind, "example")
 
 
+def _recipe_for(kind: SourceKind) -> str | None:
+    return _RECIPE_TEXT if kind is SourceKind.RECIPE else None
+
+
 class _FakeTime:
     def __init__(self) -> None:
         self.now = 0.0
@@ -67,6 +82,7 @@ def _fetch(
     row: SourceRow,
     handler: _Handler,
     known: frozenset[ExternalId] = frozenset(),
+    recipe: str | None = None,
 ) -> SourceBatch:
     fake_time = _FakeTime()
 
@@ -81,7 +97,7 @@ def _fetch(
             clock=fake_time.clock,
             sleep=fake_time.sleep,
         ) as client:
-            return await build_source(row, known=known).fetch(client)
+            return await build_source(row, known=known, recipe=recipe).fetch(client)
 
     return asyncio.run(run())
 
@@ -90,7 +106,33 @@ def _fetch(
 def test_every_kind_builds(kind: SourceKind) -> None:
     row = _row_of_kind(kind)
 
-    assert build_source(row).ref == row.ref
+    assert build_source(row, recipe=_recipe_for(kind)).ref == row.ref
+
+
+def test_recipe_builds_only_with_recipe() -> None:
+    row = _row(SourceKind.RECIPE, "example")
+
+    with pytest.raises(InvalidValueError, match="recipe:example has no stored recipe"):
+        build_source(row)
+
+    source = build_source(row, recipe=_RECIPE_TEXT)
+    assert isinstance(source, RecipeSource)
+    assert source.ref == row.ref
+
+
+def test_recipe_source_gets_the_row_company() -> None:
+    row = _row(SourceKind.RECIPE, "example", company="Row Co")
+    page = '<ul><li><a href="/jobs/1/">One</a></li></ul>'
+
+    batch = _fetch(
+        row,
+        lambda _request: httpx.Response(
+            200, content=page.encode(), headers={"Content-Type": "text/html"}
+        ),
+        recipe=_RECIPE_TEXT,
+    )
+
+    assert {draft.company for draft in batch.drafts} == {"Row Co"}
 
 
 def test_manual_kinds_build_the_manual_classes() -> None:
@@ -198,7 +240,7 @@ def test_every_other_kind_has_no_refresh_interval(kind: SourceKind) -> None:
 
 
 def test_workable_host_is_paced_at_three_seconds() -> None:
-    assert HOST_INTERVALS == {"apply.workable.com": 3.0}
+    assert HOST_INTERVALS["apply.workable.com"] == 3.0
 
 
 def test_known_ids_reach_a_detail_feed() -> None:

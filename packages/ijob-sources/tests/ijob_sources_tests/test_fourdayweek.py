@@ -188,9 +188,21 @@ class _RecordingClient(PoliteClient):
         self.conditionals: list[bool] = []
 
     @override
-    async def get(self, url: str, *, conditional: bool = False) -> httpx.Response:
+    async def get(
+        self,
+        url: str,
+        *,
+        conditional: bool = False,
+        follow_redirects: bool = False,
+        max_bytes: int | None = None,
+    ) -> httpx.Response:
         self.conditionals.append(conditional)
-        return await super().get(url, conditional=conditional)
+        return await super().get(
+            url,
+            conditional=conditional,
+            follow_redirects=follow_redirects,
+            max_bytes=max_bytes,
+        )
 
 
 def _fetch(
@@ -424,3 +436,14 @@ def test_description_drops_a_lone_surrogate() -> None:
 def test_description_from_raw_rejects_a_raw_that_is_no_object(raw: str) -> None:
     with pytest.raises(ParseError):
         description_from_raw(raw)
+
+
+def test_rejected_job_is_kept_in_skipped() -> None:
+    bad = {**_JOBS[1], "id": "x1", "title": 5}
+
+    batch = parse_fourdayweek(_page([bad]), _KEY).batch
+
+    (item,) = batch.skipped
+    assert json.loads(item.text) == bad
+    assert item.url == bad["url"]
+    assert "title" in item.reason
