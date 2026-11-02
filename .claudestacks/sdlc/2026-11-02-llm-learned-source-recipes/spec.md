@@ -57,8 +57,13 @@ and the pages in `probe-pages/`.
   `'[Lemon.io](https://lemon.io/for-developers/?utm_source=…) helps companies in the US'`.
 - **Polite fetching.**
   - `PoliteClient.get` (`ijob_sources/polite_http.py:166-224`) checks robots.txt, sends
-    `USER_AGENT` (`polite_http.py:34-37`), retries 429/503, caches, and follows redirects
-    (`polite_http.py:262-264`, `_send(… follow_redirects=True)`, up to five per `:283`).
+    `USER_AGENT` (`polite_http.py:34-37`), retries 429/503 and caches.
+  - `get` follows **no** redirect. It sends with `follow_redirects=False` (`polite_http.py:205`).
+    Its docstring says it "sends one paced request that follows no redirect" (`:168-169`) and
+    raises `HttpStatusError` for "a redirect" (`:190-191`), and
+    `test_3xx_and_5xx_raise_http_status_error` (`test_polite_http.py:290-297`) pins it.
+  - Only robots.txt follows redirects, through `_send_following_redirects` (`:262-264`), up to
+    `_MAX_REDIRECTS = 5` (`:40`, `:147`).
   - robots.txt is fetched through the client's own send callable (`robots.py:51-60`, `:131-135`).
   - No response-size limit exists in `polite_http.py`: a grep for
     `limit|max_bytes|content-length` matched nothing. The same grep finds `robots.py:22`
@@ -275,18 +280,33 @@ output.
   JSON `url`, `next_page` pages, job pages for `detail_description`, robots.txt and redirect hops.
   robots.txt is checked first, ijob's User-Agent is sent, and there is no login and no anti-bot
   bypass.
+- **Redirects.** Recipe fetches follow redirects. Other sources keep today's no-redirect `get` (§1).
+  - `PoliteClient.get` gains a keyword `follow_redirects: bool = False`. Only recipe fetches set it,
+    and they never combine it with `conditional`.
+  - With it set, `get` follows a 301, 302, 303, 307 or 308 response by hand: it resolves the
+    `Location` header against the current URL and fetches it as a new request.
+  - Each hop is checked against its own origin's robots.txt, paced like any request and retried on
+    429/503. The public-address hook sees it, because it is a request of the same client.
+  - At most 5 redirects are followed. A sixth raises `FetchError(<url>, "more than five redirects")`,
+    the case `_send`'s docstring names (`polite_http.py:290-292`). A redirect with no
+    `Location` raises `HttpStatusError`, as today.
+  - The response's URL is the final hop's. Relative URLs in the page resolve against it.
 - **The public-address rule.**
   - It is enforced by an httpx `request` event hook on the client used for recipe sources. The hook
     resolves the request's host and refuses the request unless the scheme is http(s) and every
     resolved address `is_global`.
-  - Probe: the hook fires on every redirect hop. A 302 to `http://10.0.0.1/b` gave the hook
+  - Probe, using a plain `httpx.AsyncClient` with `follow_redirects=True`: the hook fires on every
+    request the client sends. A 302 to `http://10.0.0.1/b` gave the hook
     `['http://example.com/a', 'http://10.0.0.1/b']`. A raising hook stopped that hop before
-    sending: the transport saw only `['http://example.com/a']`.
+    sending: the transport saw only `['http://example.com/a']`. The hand-followed hops above are
+    separate requests of the same client, so the hook sees each one.
   - `is_global` was `False` for `127.0.0.1`, `10.1.2.3`, `192.168.1.5`, `172.16.0.1`,
     `169.254.169.254`, `::1`, `fc00::1` and `100.64.0.1`, and `True` for `8.8.8.8` and
     `2606:4700::1111`. `localhost` resolved to `['127.0.0.1', '::1']`.
-  - A refusal reads `<url> is not a public address`. A host that does not resolve fails as today's
-    fetch errors do.
+  - A refusal reads `<url> is not a public address`, where `<url>` is the refused request's URL. The
+    first request to a new origin is its robots.txt (`robots.py:131-135`), so a refused host is
+    usually named by its `/robots.txt` URL. A host that does not resolve fails as today's fetch
+    errors do.
 - **Hosts never used by a recipe.** Any host with a label `jobstreet`, and `japan-dev.com` or its
   subdomains, are refused with `<host> is read only by its own source kind`. CLAUDE.md:
   "JobStreet is deep-link only", and "JapanDev is read only through its sitemap and JSON-LD".
@@ -382,8 +402,10 @@ output.
   with genuinely no openings gets the same message, which its wording allows for.
 - **`raw`** holds the job's evaluated fields as JSON. When the recipe has `detail_description` and
   no `description`, `raw` also holds that XPath. `describe` (§1) can then fetch the job page under
-  §6's rules and evaluate it on the cleaned page. An empty result means no description, which
-  shows as `no description available`.
+  §6's rules and evaluate it on the cleaned page. `raw` also holds the job's resolved URL under
+  `url`, which `describe` reads, as the other on-demand kinds do (`details.py:158`, `:179`); a
+  `Sighting` has no URL field (`model.py:299-320`). An empty result means no description, which
+  shows as today's `no description published` (`service.py:943`).
 
 ## 10. Placement and storage
 
