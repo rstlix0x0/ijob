@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-01
 depends-on: [08]
 built-on: cae3bcdf3b23
@@ -198,3 +198,30 @@ gate is green. Commit `feat(cli): show judge verdicts in search`.
 
 - `uv run --locked pytest packages/ijob-app` passes.
 - The gate exits 0.
+
+## Review findings
+
+One reviewer covered plans 09 and 10 together. Its full-gate re-run was green: sync, format, check and mypy all 0, and pytest 2642 passed. The TUI directory ran 3 times with 89 passed each time, so there is no flake. Blocking: `cli.py:835` and `cli.py:985`. After the fix round, the coder's full gate was green: format 257 files, ruff ok, mypy 191 files, pytest 2664 passed.
+
+- fixed 🟡 (blocking) `cli.py:835`: the `is_interactive` default `sys.stdin.isatty` was evaluated at import, so with fd 0 closed every `ijob` command died. The default is now `None`, resolved at call time. `test_cli_imports_and_runs_with_stdin_closed` runs a subprocess with fd 0 closed; it failed first and passes now.
+- fixed 🟡 (blocking) `cli.py:985`: `ijob tui` ignored `llm_options` and `--config` for models, cap and tracing. It now opens with `llm_for(home, config)`. Two new tests cover the flag and the default.
+- fixed 🟡 the CLI and TUI text helpers were duplicated and had drifted (cost `.2f` vs `.4f`). They are unified in the new `ijob_app/llm_text.py`, which loads no dspy, and `test_llm_text.py` adds 13 tests. `_llm_failures` is now `llm_failures`, and the `_DB_HELP`/`_CONFIG_HELP` aliases are gone.
+- fixed 🟡 no test guarded the tracing warnings on stderr. New search and score tests found a real bug: `report_notes` printed `warning: warning: …`, because tracing already adds the prefix.
+- fixed 🔵 `cli.py:636`: `except OSError` now wraps only `store_cv`, with a new test. `cli.py:609`: `cv set` and `cv profile` print `report_notes`, so dropped spans show, with two new tests.
+- fixed 🔵 the `_llm_groups` docstring is corrected, and the prompt reads exactly `Store these? [y/N] `.
+- open 🔵 `cli.py:516`: `_print_search` re-runs `effective_filters` and `open_postings` to rebuild filter order. The service should expose that order.
+- open 🔵 the `traces` commands and a no-rules CLI `search` have no subprocess test proving they load no LLM library. The reviewer verified both by hand: LOADED [].
+
+## Deviations
+
+- 2026-11-01: Tasks end in "Commit …", but the instruction to execute did not ask for commits. The work is left uncommitted.
+- 2026-11-01: Tasks 3 and 4 ran as one coder in sequence (they share `cli_llm.py`). Plans 09 and 10 ran side by side and had one review.
+- 2026-11-01: The no-model note `note: profile not built; set [models].cv_profile` goes to stderr, not stdout. `cv set`'s stdout must stay parse-stable for the existing, unmodified tests.
+- 2026-11-01: `is_interactive` was added in Task 2, not Task 1, because ruff ARG001 rejects an unused argument.
+- 2026-11-01: To break the `cli` ↔ `cli_llm` import cycle, `cli.py` passes a `SessionOpener` into `cli_llm`. `instructions show/clear` and `traces` open the service without models.
+- 2026-11-01: Added options:
+  - `--config` on `cv set`, `cv profile` and `instructions set`;
+  - `--db` on `instructions` and `traces`;
+  - `score` takes `--db` and `--config`.
+- 2026-11-01: `instructions set` proposes before the TTY check, as the plan orders. Blank or overlong text therefore exits 2, and nothing actionable exits 1, even without `--yes`.
+- 2026-11-01: `search` re-sorts streamed items into filter order before printing. The service yields cached items first, then items in completion order. Cost prints as `$X.XXXX`. `STATUS_TEXT[...].get(status, status.value)` never raises.

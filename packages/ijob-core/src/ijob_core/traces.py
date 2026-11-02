@@ -282,7 +282,11 @@ class TraceStore:
         """
         path.parent.mkdir(parents=True, exist_ok=True)
         with ExitStack() as cleanup:
-            conn = cleanup.enter_context(closing(sqlite3.connect(path)))
+            # One operation may hand the store to a worker thread to flush and
+            # close it; its callers never use the store from two threads at once.
+            conn = cleanup.enter_context(
+                closing(sqlite3.connect(path, check_same_thread=False))
+            )
             conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
             _migrate(conn)
             cleanup.pop_all()

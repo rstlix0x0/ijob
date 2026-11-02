@@ -49,6 +49,7 @@ def test_setup_creates_the_home_and_reports_each_item(
         f"created\t{home.cache.parent}",
         f"created\t{home.config}",
         f"created\t{home.db}",
+        f"created\t{home.traces}",
     ]
     assert _mode(home.root) == 0o700
     assert _mode(home.cache.parent) == 0o700
@@ -71,6 +72,7 @@ def test_second_setup_reports_everything_already_there(
         f"already there\t{home.cache.parent}",
         f"already there\t{home.config}",
         f"already there\t{home.db}",
+        f"already there\t{home.traces}",
     ]
     assert home.config.read_text(encoding="utf-8") == "# mine\n"
 

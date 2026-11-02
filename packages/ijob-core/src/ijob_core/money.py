@@ -2,6 +2,7 @@
 
 `Money` holds a pay range or a single pay bound in one currency. It validates
 its fields when built, so code that receives a `Money` can trust it.
+`money_text` writes one as text.
 """
 
 import re
@@ -62,3 +63,20 @@ class Money:
         if _CURRENCY_PATTERN.fullmatch(self.currency) is None:
             reason = f"{self.currency!r} is not three uppercase letters"
             raise InvalidValueError("currency", reason)
+
+
+def money_text(money: Money) -> str:
+    """Write a salary range as `120000-150000 USD/year`.
+
+    A range with one bound reads `from 120000 USD` or `up to 150000 USD`; the
+    `/period` is left off when the source states none.
+    """
+    match money.min, money.max:
+        case low, None:
+            amount = f"from {low:f}"
+        case None, high:
+            amount = f"up to {high:f}"
+        case low, high:
+            amount = f"{low:f}-{high:f}"
+    period = f"/{money.period}" if money.period is not None else ""
+    return f"{amount} {money.currency}{period}"

@@ -103,7 +103,11 @@ class TaskOutputError(LlmError):
 
 
 class NothingActionableError(LlmError):
-    """The operation has no postings to act on."""
+    """There is nothing to act on.
+
+    Raised when an operation has no postings to act on, or when the user's
+    instructions give neither a filter nor a rule.
+    """
 
     def __init__(self) -> None:
         """Build the error."""

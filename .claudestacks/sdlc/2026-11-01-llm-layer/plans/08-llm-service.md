@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-01
 depends-on: [01, 04, 05, 06, 07]
 built-on: cae3bcdf3b23
@@ -234,3 +234,39 @@ passes and the gate is green. Commit `feat(app): judge search results by instruc
 
 - `uv run --locked pytest packages/ijob-app` passes.
 - The gate exits 0.
+
+## Review findings
+
+Reviewer verdict: blocking none. The scoped DoD re-run was green: ruff format and check on the 5 files, mypy --strict clean, and `pytest test_llm_ops.py test_service.py` 137 passed. Before the review, the orchestrator's full gate was green: format 251, ruff ok, mypy 185 files, pytest 2560. One fix round followed.
+
+- fixed 🟡 `llm_ops.py:441`: `tracing.finish()` (a flush of up to 5 s plus a prune) ran on the event loop. It now runs as `await asyncio.to_thread(tracing.finish)`. `TraceStore.open` gained `check_same_thread=False`, because callers never use the store from two threads at once. `uv run --locked --no-sync pytest test_traces.py test_llm_ops.py test_service.py ijob_ai_tests/tracing` → 180 passed.
+- fixed ❓ `llm_ops.py:1034`: score used a stale profile after the CV was replaced. The orchestrator decided to rebuild in the same run when the stored `cv_sha256` differs. `test_score_rebuilds_a_profile_read_from_an_earlier_cv` covers it.
+- fixed 🟡 `llm_ops.py:930`: the single-flight profile build was untested. `test_score_builds_one_profile_for_concurrent_items` runs at concurrency 4 and expects 1 profile and 4 score requests.
+- fixed 🟡 `test_llm_ops.py:375`: the cancel test now asserts the root span row that only `finish` writes. It was mutation-checked.
+- fixed 🟡 `test_llm_ops.py:1205`: the close-early test now sleeps and checks the request count. That exposed a real bug: `aclose()` did not close the inner `_stream_run`, so one extra call leaked. Fixed with `contextlib.aclosing`.
+- fixed 🔵 `test_llm_ops.py:349`: a test now checks that verdicts made before a cancel stay stored.
+- fixed 🟡 `pyproject.toml`: ijob-app declares `dspy`, `requests` and `pypdf`. `uv lock` added metadata only.
+- fixed 🔵 the cache-hit `instruction_filters` is a `MappingProxyType`. The docstrings for search and score (`ProviderUnavailableError`) and for `accept_instructions` Raises were corrected. The bare `model_for` call has a comment, and `ItemStatus` has a docstring.
+- open 🔵 `llm_ops.py:89`: `STATUS_TEXT` is keyed by `type[StrEnum]`. Splitting it into `JUDGE_STATUS_TEXT` and `SCORE_STATUS_TEXT` waits until the CLI and TUI are done.
+- open 🔵 `llm_ops.py:299`: callers waiting on the lock after a failed CLI check re-run it, at most `concurrency` times.
+- open 🔵 `llm_ops.py:656`: the instruction text checks are copied from `parse_instructions`.
+- open 🔵 `llm_ops.py:1097`: the trace helpers live in `llm_ops`, which is otherwise about model calls.
+- open 🟡 `service.py:304`: `Service` has 25 public methods. The plan prescribes this; split it later.
+- open 🔵 tests read the private `service._llm`. `llm_fakes.write_cv_pdf` copies the private `PdfWriter._add_object` helper. The seeding helpers live in the test files, not in `llm_fakes.py`.
+
+## Deviations
+
+- 2026-11-01: Tasks end in "Commit …", but the instruction to execute did not ask for commits. The work is left uncommitted.
+- 2026-11-01: Tasks 3 and 4 ran as one coder in sequence, because they share every file. The review DoD was scoped to plan 08's files, since plans 09 and 10 coders were editing CLI and TUI files at the same time. The orchestrator ran the full gate just before.
+- 2026-11-01: Accepted coder deviations:
+  - `Service.__init__` takes `home`.
+  - `run_items(..., on_outcome=)` returns `RunResult`, and a worker's non-`LlmError` propagates as an `ExceptionGroup`.
+  - New `ItemStatus` StrEnum and `StopReason` Literal. `STATUS_TEXT[JudgeStatus][status]` is nested to avoid a key collision.
+  - `profile_operation` takes `at`. `Service.build_profile` returns `(ResumeProfile, OperationReport)`.
+  - `propose_operation` checks blank or overlong text before any call.
+  - `instructions_model(runtime)` was added.
+  - `list_traces`, `read_trace` and `prune_traces` live in `llm_ops`, and their `Service` methods are sync.
+  - `search` and `score` are async generators, so their errors raise on the first iteration. Cached items are yielded first.
+  - With no rules, every item is `not_run` and `last_report` stays `None`, because building a report would import dspy.
+  - When score builds a missing profile, the profile call and the first score share one `try_start`, so the cap can overshoot by at most one call.
+- 2026-11-01: Changed outside plan 08's file list: `packages/ijob-core/src/ijob_core/traces.py` now opens with `check_same_thread=False`. This was needed to take `tracing.finish` off the event loop.

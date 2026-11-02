@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-01
 depends-on: [01, 03, 05]
 built-on: cae3bcdf3b23
@@ -245,3 +245,24 @@ passes and the gate is green. Commit `feat(ai): add CV profile and instruction t
 
 - `uv run --locked pytest packages/ijob-ai packages/ijob-core` passes.
 - The gate exits 0.
+
+## Review findings
+
+One reviewer covered plans 06 and 07 together. Its DoD re-run was green: sync 0, format 0, ruff check 0, mypy 0 issues in 182 files, pytest 2451 passed. Blocking: `cv_text.py:39-48`.
+
+- fixed 🟡 (blocking) `cv_text.py:39-48`: a corrupt PDF raised a raw `AttributeError` (4 of 300 random corruptions). Any other exception at this boundary now becomes `CvTextError("could not read the CV: <reason>")`. New test added. `uv run --locked pytest packages/ijob-ai` → 206 passed.
+- fixed 🟡 `instructions.py:46`: model `companies` are now sanitized, and blank ones dropped. Tests added.
+- fixed 🟡 `outputs.py:13`: pydantic was imported but not declared. `packages/ijob-ai/pyproject.toml` gains `pydantic>=2.14.2,<3`. `uv lock` touched only ijob-ai's metadata.
+- fixed 🔵 `CV_TEXT_LIMIT` is now `Final` and has a docstring. The cv_text layout docstring, the sanitize docstring and the `NothingActionableError` docstring were reworded. `ParsedInstructions.filters` is now a `MappingProxyType`.
+- open 🔵 `outputs.py:15`: an empty `""` list item fails the whole parse, while `"\x00"` is dropped quietly.
+- open 🔵 `text.py:18`: `sanitize` deletes `\t` without leaving a space, so `Python\tSQL` becomes `PythonSQL`. This follows the plan.
+- open 🔵 `tests/.../tasks/pdfs.py:36,42`: uses the private `PdfWriter._add_object` (test only).
+
+## Deviations
+
+- 2026-11-01: Tasks end in "Commit …", but the instruction to execute did not ask for commits (CLAUDE.md: commit only when the user asks). The work is left uncommitted.
+- 2026-11-01: Plans 06 and 07 ran together in two batches. Batch A was 06/T1–T3 and 07/T1–T2; batch B was 06/T4–T5 and 07/T3. There was one review over both plans instead of one per batch. The orchestrator created both `tasks/__init__.py` markers up front, so concurrent coders never shared a file.
+- 2026-11-01: `test_money_text` moved from `test_render.py` to `test_money.py` as `test_money_text_moved`. Under `mypy --strict`, `render` no longer re-exports `money_text`.
+- 2026-11-01: `sanitize` also strips `\r` and `\t`; the rule is C0 except `\n`.
+- 2026-11-01: Role words and companies are sanitized before `re.escape`, and blank ones are dropped, so an empty regex can never match every title. `ParsedInstructions.filters` holds only the keys the model set (`model_dump(exclude_defaults=True)`).
+- 2026-11-01: The judge's rules are appended to `JudgeSig.instructions` through `with_instructions` as a numbered `Rules:` list, and are not sanitized because they sit in the trusted position. Keep/rule consistency is left to core `Verdict`, whose `InvalidValueError` becomes `TaskOutputError`.

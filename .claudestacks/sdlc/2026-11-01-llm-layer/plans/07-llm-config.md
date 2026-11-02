@@ -1,8 +1,9 @@
 ---
-status: approved
+status: done
 created: 2026-11-01
 depends-on: [02, 03]
 built-on: cae3bcdf3b23
+disproves: cae3bcdf3b23
 ---
 
 # LLM Configuration Implementation Plan
@@ -134,3 +135,30 @@ the gate is green. Commit `feat(app): layer filters with instruction precedence`
 
 - `uv run --locked pytest packages/ijob-app` passes.
 - The gate exits 0.
+
+## Review findings
+
+One reviewer covered plans 06 and 07 together. Its DoD re-run was green: sync 0, format 0, ruff check 0, mypy 0 issues in 182 files, pytest 2451 passed. Blocking was in plan 06 only.
+
+- fixed 🟡 `config.py:256`: a flag or user-file value equal to the default counted as unset, so `--no-require-salary` lost to an instruction's `require_salary=true` and no shadow was reported. A field is now "set" when its layer names it explicitly, held in `FilterLayers.user_set` and `flags_set`. New tests cover `--no-require-salary`, the user file's `include = []`, and `effective_filters(layers, None) == read_filters(...)` over 6 cases. `uv run --locked pytest packages/ijob-app` → 413 passed.
+- fixed 🟡 `test_config.py:488-504`: `test_read_filters_unchanged` now asserts full `FilterSpec` equality, `include` included.
+- fixed 🟡 `config.py:456`: the `Money`, `bool`, `re.Pattern` and `RemoteScope` branches of `_value_text` are now tested.
+- fixed 🔵 `ShadowedField.field` is now typed as the `FilterField` Literal.
+- fixed 🟡 plan drift: recorded under Deviations below.
+- open 🔵 `llm_config.py:18,121`: `_Table` and `_only_keys` duplicate helpers in `config.py`. They were kept apart on purpose while `config.py` was being changed.
+
+## Deviations
+
+- 2026-11-01: Tasks end in "Commit …", but the instruction to execute did not ask for commits. The work is left uncommitted.
+- 2026-11-01: **Spec claim contradicted.** Spec §4.3 (spec.md:490), carried into Task 2, says "'Set' means differing from `FilterSpec`'s default".
+  - That contradicts the spec's own precedence, "flag beats instruction". The reviewer reproduced it: `effective_filters` on `FilterFlags(require_salary=False)` (what `--no-require-salary` produces) plus an instruction `require_salary=true` gave `True` with shadowed `()`. A user file's `[filters.role] include = []` lost to the instruction's include the same way.
+  - Built instead: a field is set when its layer explicitly gives it. `FilterLayers` carries `user_set` and `flags_set`, and `read_filter_layers` fills them in.
+  - Frontmatter `disproves: cae3bcdf3b23`. The `design` skill clears it by amending spec §4.3.
+- 2026-11-01: `read_filters` was not re-expressed as the layer merge. A merge keyed on "differs from default" could not represent a user file's `include = []`. `read_filters` keeps its table merge, and its flag step is shared with the layers through `_lay_flags`. With the explicit-set rule, `effective_filters(layers, None)` equals `read_filters(...)`, and a test guards that.
+- 2026-11-01: Template table headers are commented out (`# [models]`), because every template line must be blank or start with `#` (an existing test). `test_template_new_settings_are_valid_once_uncommented` was added beyond the named tests.
+- 2026-11-01: `llm_config` decisions:
+  - an absent config file gives the defaults;
+  - errors name the dotted key (`llm.max_cost_usd`);
+  - `timeout_s` is an int in the file and a float in `LlmSettings`;
+  - `langfuse_endpoint` is parsed with `urlsplit`, and IPv6 `[::1]` is accepted.
+- 2026-11-01: The `cli.py` module docstring now lists `traces.db` among the home files.

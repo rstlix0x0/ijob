@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-01
 depends-on: [08]
 built-on: cae3bcdf3b23
@@ -164,3 +164,27 @@ passes and the gate is green. Commit `feat(tui): edit and confirm instructions`.
 
 - `uv run --locked pytest packages/ijob-app` passes.
 - The gate exits 0.
+
+## Review findings
+
+One reviewer covered plans 09 and 10 together; see plan 09's Review findings for the gate runs. The TUI directory ran 3 times with 89 passed each time. A single `test_inputs_start_from_config` failure seen during concurrent edits did not reproduce. After the fix round the full gate was green: pytest 2664 passed.
+
+- fixed 🟡 the TUI copies of the CLI text helpers (`_verdict_cell`, `_summary`, `_score_summary`, `_profile_text`, `_flat/_value/_shadow_line`) had drifted from the CLI. They now come from `ijob_app/llm_text.py`. The TUI keeps only a thin wrapper that blanks `NOT_RUN`, and cost is `.4f` everywhere.
+- fixed 🟡 (blocking, via plan 09) `IjobApp` reads its cap and the `CvScreen` config path from the `--config` in force (`_llm_config`). `test_cv_key_gives_the_screen_the_config_in_force` guards the wiring and was mutation-checked.
+- fixed 🔵 test helpers moved into `tui/conftest.py` under public names. The function-level `llm_config` import became a top-level import.
+- open 🟡 Task 1 drift: rows arrive in arrival order (cached first, then by completion), not in filter order. With concurrency above 1 the table order is not deterministic, and it differs from the CLI's order.
+- open 🟡 `CvScreen` store and Refresh show no cost and notify only `report.warnings`, not `dropped_spans`. `InstructionsScreen` shows no cost, because `propose_instructions` sets no report (plan 08's API).
+- open 🔵 `app.py:774`: `_search` and `_score` read the shared `service.last_report`. A score that finishes during a no-rules search could show up in the search status.
+- open 🔵 TUI notifications show tracing warnings with their own `warning: ` prefix.
+- open 🔵 `_add_item` runs one `labels([id])` query per streamed row.
+
+## Deviations
+
+- 2026-11-01: Tasks end in "Commit …", but the instruction to execute did not ask for commits. The work is left uncommitted.
+- 2026-11-01: Task 4 ran in parallel with Task 2, since their files are disjoint. Plans 09 and 10 had one review.
+- 2026-11-01: The running status reads `judging… cost ? of $Y` and `scoring… cost ? of $Y`. Plan 08 has no mid-run spend hook, so the spend is unknown until the summary.
+- 2026-11-01: The verdict column is the last column and exists only when rules are stored. `v` is disabled without it.
+- 2026-11-01: Only an input that differs from its prefill goes into the flags layer, so an untouched prefill does not shadow stored instructions.
+- 2026-11-01: `test_g_cached_second_time` asserts 2 engine calls after the first `g`, not 1, because the first score also builds the CV profile. `NoCvError` shows a TUI-specific hint naming `ijob cv set PATH` or `c`.
+- 2026-11-01: `InstructionsScreen` is `Screen[None]`. The app re-runs the search on close only if the stored instructions changed.
+- 2026-11-01: `CvScreen` gained `config_path`, so it checks `[models].cv_profile` without importing dspy.

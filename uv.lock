@@ -873,6 +873,7 @@ dependencies = [
     { name = "ijob-core" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
+    { name = "pydantic" },
     { name = "pypdf" },
     { name = "requests" },
 ]
@@ -884,6 +885,7 @@ requires-dist = [
     { name = "ijob-core", editable = "packages/ijob-core" },
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.45.2,<2" },
     { name = "opentelemetry-sdk", specifier = ">=1.45.2,<2" },
+    { name = "pydantic", specifier = ">=2.14.2,<3" },
     { name = "pypdf", specifier = ">=6.21.4,<7" },
     { name = "requests", specifier = ">=2.34.2,<3" },
 ]
@@ -893,18 +895,24 @@ name = "ijob-app"
 version = "0.1.0"
 source = { editable = "packages/ijob-app" }
 dependencies = [
+    { name = "dspy" },
     { name = "ijob-ai" },
     { name = "ijob-core" },
     { name = "ijob-sources" },
+    { name = "pypdf" },
+    { name = "requests" },
     { name = "textual" },
     { name = "typer" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "dspy", specifier = ">=3.4.1,<3.5" },
     { name = "ijob-ai", editable = "packages/ijob-ai" },
     { name = "ijob-core", editable = "packages/ijob-core" },
     { name = "ijob-sources", editable = "packages/ijob-sources" },
+    { name = "pypdf", specifier = ">=6.21.4,<7" },
+    { name = "requests", specifier = ">=2.34.2,<3" },
     { name = "textual", specifier = ">=8.2.8,<8.3" },
     { name = "typer", specifier = ">=0.27.3,<0.28" },
 ]

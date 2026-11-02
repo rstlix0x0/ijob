@@ -7,6 +7,10 @@ each. Every bad value raises `InvalidValueError` naming the key or flag.
 
 `FilterFlags` holds the filter values a front end collected as text.
 `read_filters` lays the flags it was given over the config file's filters;
+`read_filter_layers` keeps the packaged, user-file and flag filters apart, with
+the fields each one names, and `effective_filters` merges them with the filters
+an instruction derived, by the precedence flag, user file, instruction,
+packaged;
 `spec_from_flags` sets every flag-able field from the flags, so an empty value
 removes that filter, and `flags_from_spec` writes a spec back as the text a
 user would type.
@@ -35,19 +39,31 @@ exclude = ['\bsales\b']
 
 import re
 import tomllib
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from importlib.resources import files
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 from ijob_core.countries import CountryCode, parse_country
 from ijob_core.errors import InvalidValueError
 from ijob_core.filters import FilterSpec
 from ijob_core.model import RemoteScope
 from ijob_core.money import Money, Period
+
+type FilterField = Literal[
+    "include",
+    "exclude",
+    "countries",
+    "remote",
+    "since",
+    "companies",
+    "min_salary",
+    "require_salary",
+]
+"""The name of a `FilterSpec` field a config source can set."""
 
 _DEFAULT_FILE: Final = "default_config.toml"
 _SINCE_PATTERN: Final = re.compile(r"(?P<count>[0-9]+)(?P<unit>[dh])", re.ASCII)
@@ -66,6 +82,15 @@ _FILTER_KEYS: Final = frozenset(
     }
 )
 _ROLE_KEYS: Final = frozenset({"include", "exclude"})
+_ROLE_FIELDS: Final[tuple[FilterField, ...]] = ("include", "exclude")
+_PLAIN_FIELDS: Final[tuple[FilterField, ...]] = (
+    "countries",
+    "remote",
+    "since",
+    "companies",
+    "min_salary",
+    "require_salary",
+)
 _MIN_SALARY_KEYS: Final = frozenset({"amount", "currency", "period"})
 
 type _Table = dict[str, object]
@@ -91,6 +116,48 @@ class FilterFlags:
     companies: tuple[str, ...] = ()
     min_salary: str | None = None
     require_salary: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FilterLayers:
+    """The filters each source sets, kept apart so their origin is known.
+
+    A field a source does not name holds `FilterSpec`'s default for it. Which
+    fields a source names is kept apart from their values, so a value equal to the
+    default (`require_salary = false`, `include = []`) still counts as chosen.
+
+    Attributes:
+        packaged: The filters of the config packaged with ijob.
+        user: The filters of the user's config file; the default spec when
+            there is no file.
+        user_set: The fields the user's file names.
+        flags: The filters the flags set.
+        flags_set: The fields a flag was given for.
+    """
+
+    packaged: FilterSpec
+    user: FilterSpec
+    user_set: frozenset[FilterField]
+    flags: FilterSpec
+    flags_set: frozenset[FilterField]
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowedField:
+    """An instruction-derived filter that a flag or the user's file overrides.
+
+    Attributes:
+        field: The `FilterSpec` field name, e.g. `countries`.
+        used_from: Whether a `flag` or the user's `config` file supplied the
+            value that is used.
+        used_value: The value in force, as text.
+        ignored_value: The instruction's value that is ignored, as text.
+    """
+
+    field: FilterField
+    used_from: Literal["flag", "config"]
+    used_value: str
+    ignored_value: str
 
 
 def load_filters(path: Path, *, explicit: bool) -> FilterSpec:
@@ -143,19 +210,115 @@ def read_filters(
         spec = _build_spec(_read_default())
     else:
         spec = load_filters(path, explicit=config is not None)
-    if flags.countries:
-        spec = replace(spec, countries=_country_codes(flags.countries))
-    if flags.remotes:
-        spec = replace(spec, remote=frozenset(map(parse_remote, flags.remotes)))
-    if flags.since is not None:
-        spec = replace(spec, since=parse_since(flags.since))
-    if flags.companies:
-        spec = replace(spec, companies=_company_names(flags.companies))
-    if flags.min_salary is not None:
-        spec = replace(spec, min_salary=parse_min_salary(flags.min_salary))
-    if flags.require_salary is not None:
-        spec = replace(spec, require_salary=flags.require_salary)
-    return spec
+    return _lay_flags(spec, flags)
+
+
+def read_filter_layers(
+    config: Path | None, flags: FilterFlags, *, default: Path | None = None
+) -> FilterLayers:
+    """Read the packaged, user-file and flag filters as separate layers.
+
+    Args:
+        config: The config file the user named, or `None` to use `default`.
+        flags: The filter values given.
+        default: The file to read when `config` is `None`; it is skipped if it
+            does not exist. With neither given, the user layer is empty.
+
+    Returns:
+        The three layers; `user` holds only what the file itself sets, and
+        `user_set` and `flags_set` name the fields each of them was given.
+
+    Raises:
+        InvalidValueError: The config file or a flag value is unusable; a
+            blank company is one.
+    """
+    path = config or default
+    user = FilterSpec()
+    user_set: frozenset[FilterField] = frozenset()
+    if path is not None and path.exists():
+        table = _read_user(path)
+        user = _build_spec(table)
+        user_set = _given_fields(table)
+    elif config is not None:
+        raise InvalidValueError("config", f"{config} does not exist")
+    return FilterLayers(
+        packaged=_build_spec(_read_default()),
+        user=user,
+        user_set=user_set,
+        flags=_lay_flags(FilterSpec(), flags),
+        flags_set=_flags_given(flags),
+    )
+
+
+def effective_filters(
+    layers: FilterLayers, instruction: Mapping[str, object] | None
+) -> tuple[FilterSpec, tuple[ShadowedField, ...]]:
+    """Merge the filter layers with the filters an instruction derived.
+
+    Each field is taken from the first source that sets it, in the order flag,
+    user file, instruction, packaged. A field is set when its source names it
+    (a flag given, a key present in the file or the instruction), even if the
+    value equals `FilterSpec`'s default.
+
+    Args:
+        layers: The filters read from the packaged config, the user's file and
+            the flags.
+        instruction: The instruction's filters in the shape of the config
+            file's `[filters]` table, or `None` for no instruction.
+
+    Returns:
+        The filters in force, and one `ShadowedField` for each instruction
+        field that a flag or the user's file overrides with a different value,
+        in `FilterSpec` field order.
+
+    Raises:
+        InvalidValueError: A value in `instruction` is unusable; the message
+            names the key under `instructions.filters`.
+    """
+    derived = FilterSpec()
+    derived_set: frozenset[FilterField] = frozenset()
+    if instruction is not None:
+        table: _Table = {"filters": dict(instruction)}
+        derived = _build_spec(table, "instructions.filters")
+        derived_set = _given_fields(table, "instructions.filters")
+    ranked: tuple[
+        tuple[
+            Literal["flag", "config", "instruction"],
+            FilterSpec,
+            frozenset[FilterField],
+        ],
+        ...,
+    ] = (
+        ("flag", layers.flags, layers.flags_set),
+        ("config", layers.user, layers.user_set),
+        ("instruction", derived, derived_set),
+    )
+    shadowed: list[ShadowedField] = []
+
+    def pick[T](name: FilterField, get: Callable[[FilterSpec], T]) -> T:
+        ignored = get(derived)
+        for origin, spec, given in ranked:
+            if name not in given:
+                continue
+            used = get(spec)
+            if origin != "instruction" and name in derived_set and used != ignored:
+                shadowed.append(
+                    ShadowedField(name, origin, _value_text(used), _value_text(ignored))
+                )
+            return used
+        return get(layers.packaged)
+
+    spec = FilterSpec(
+        include=pick("include", lambda each: each.include),
+        exclude=pick("exclude", lambda each: each.exclude),
+        countries=pick("countries", lambda each: each.countries),
+        remote=pick("remote", lambda each: each.remote),
+        since=pick("since", lambda each: each.since),
+        companies=pick("companies", lambda each: each.companies),
+        min_salary=pick("min_salary", lambda each: each.min_salary),
+        require_salary=pick("require_salary", lambda each: each.require_salary),
+    )
+    return spec, tuple(shadowed)
 
 
 def spec_from_flags(base: FilterSpec, flags: FilterFlags) -> FilterSpec:
@@ -314,6 +477,80 @@ def _company_names(values: Sequence[str]) -> tuple[str, ...]:
     return tuple(values)
 
 
+def _lay_flags(spec: FilterSpec, flags: FilterFlags) -> FilterSpec:
+    """Set each filter a flag was given for, and keep the rest of `spec`."""
+    if flags.countries:
+        spec = replace(spec, countries=_country_codes(flags.countries))
+    if flags.remotes:
+        spec = replace(spec, remote=frozenset(map(parse_remote, flags.remotes)))
+    if flags.since is not None:
+        spec = replace(spec, since=parse_since(flags.since))
+    if flags.companies:
+        spec = replace(spec, companies=_company_names(flags.companies))
+    if flags.min_salary is not None:
+        spec = replace(spec, min_salary=parse_min_salary(flags.min_salary))
+    if flags.require_salary is not None:
+        spec = replace(spec, require_salary=flags.require_salary)
+    return spec
+
+
+def _flags_given(flags: FilterFlags) -> frozenset[FilterField]:
+    """Name the fields `_lay_flags` sets from `flags`."""
+    given: set[FilterField] = set()
+    if flags.countries:
+        given.add("countries")
+    if flags.remotes:
+        given.add("remote")
+    if flags.since is not None:
+        given.add("since")
+    if flags.companies:
+        given.add("companies")
+    if flags.min_salary is not None:
+        given.add("min_salary")
+    if flags.require_salary is not None:
+        given.add("require_salary")
+    return frozenset(given)
+
+
+def _given_fields(config: _Table, prefix: str = "filters") -> frozenset[FilterField]:
+    """Name the fields the `filters` table of `config` has a key for.
+
+    `config` must already have passed `_build_spec`.
+    """
+    filters = _table(config.get("filters", {}), prefix)
+    role = _table(filters.get("role", {}), f"{prefix}.role")
+    return frozenset(
+        {field for field in _PLAIN_FIELDS if field in filters}
+        | {field for field in _ROLE_FIELDS if field in role}
+    )
+
+
+def _value_text(value: object) -> str:
+    """Write one `FilterSpec` field's value as text for a message."""
+    match value:
+        case frozenset():
+            return ", ".join(sorted(_item_text(item) for item in value))
+        case tuple():
+            return ", ".join(_item_text(item) for item in value)
+        case timedelta():
+            return _since_text(value)
+        case Money():
+            return _min_salary_text(value) or str(value)
+        case bool():
+            return "true" if value else "false"
+        case _:
+            return str(value)
+
+
+def _item_text(item: object) -> str:
+    """Write one member of a set or tuple field as text."""
+    if isinstance(item, RemoteScope):
+        return item.value
+    if isinstance(item, re.Pattern):
+        return str(item.pattern)
+    return str(item)
+
+
 def _since_text(age: timedelta) -> str:
     """Write an age as `<n>d` for whole days, else as `<n>h`."""
     if age % timedelta(days=1) == timedelta(0):
@@ -367,21 +604,26 @@ def _layer(base: _Table, over: _Table) -> _Table:
     return merged
 
 
-def _build_spec(config: _Table) -> FilterSpec:
-    """Turn the layered config into a `FilterSpec`."""
-    filters = _table(config.get("filters", {}), "filters")
-    _only_keys(filters, _FILTER_KEYS, "filters")
-    role = _table(filters.get("role", {}), "filters.role")
-    _only_keys(role, _ROLE_KEYS, "filters.role")
+def _build_spec(config: _Table, prefix: str = "filters") -> FilterSpec:
+    """Turn the `filters` table of `config` into a `FilterSpec`.
+
+    `prefix` is the key an error names for that table.
+    """
+    filters = _table(config.get("filters", {}), prefix)
+    _only_keys(filters, _FILTER_KEYS, prefix)
+    role = _table(filters.get("role", {}), f"{prefix}.role")
+    _only_keys(role, _ROLE_KEYS, f"{prefix}.role")
     return FilterSpec(
-        include=_patterns(role.get("include", []), "filters.role.include"),
-        exclude=_patterns(role.get("exclude", []), "filters.role.exclude"),
-        countries=_countries(filters.get("countries", [])),
-        remote=_remote(filters.get("remote", [])),
-        since=_since(filters.get("since")),
-        companies=tuple(_strings(filters.get("companies", []), "filters.companies")),
-        min_salary=_min_salary(filters.get("min_salary")),
-        require_salary=_flag(filters.get("require_salary", False)),
+        include=_patterns(role.get("include", []), f"{prefix}.role.include"),
+        exclude=_patterns(role.get("exclude", []), f"{prefix}.role.exclude"),
+        countries=_countries(filters.get("countries", []), f"{prefix}.countries"),
+        remote=_remote(filters.get("remote", []), f"{prefix}.remote"),
+        since=_since(filters.get("since"), f"{prefix}.since"),
+        companies=tuple(_strings(filters.get("companies", []), f"{prefix}.companies")),
+        min_salary=_min_salary(filters.get("min_salary"), f"{prefix}.min_salary"),
+        require_salary=_flag(
+            filters.get("require_salary", False), f"{prefix}.require_salary"
+        ),
     )
 
 
@@ -424,41 +666,36 @@ def _patterns(value: object, key: str) -> tuple[re.Pattern[str], ...]:
     return tuple(compiled)
 
 
-def _countries(value: object) -> frozenset[CountryCode]:
+def _countries(value: object, key: str) -> frozenset[CountryCode]:
     """Read a list of countries."""
-    key = "filters.countries"
     return frozenset(
         parse_country_flag(text, field=key) for text in _strings(value, key)
     )
 
 
-def _remote(value: object) -> frozenset[RemoteScope]:
+def _remote(value: object, key: str) -> frozenset[RemoteScope]:
     """Read a list of remote scopes."""
-    key = "filters.remote"
     return frozenset(parse_remote(text, field=key) for text in _strings(value, key))
 
 
-def _since(value: object) -> timedelta | None:
+def _since(value: object, key: str) -> timedelta | None:
     """Read the optional age limit."""
     if value is None:
         return None
     if not isinstance(value, str):
-        raise InvalidValueError("filters.since", f"{value!r} is not a string")
-    return parse_since(value, field="filters.since")
+        raise InvalidValueError(key, f"{value!r} is not a string")
+    return parse_since(value, field=key)
 
 
-def _flag(value: object) -> bool:
+def _flag(value: object, key: str) -> bool:
     """Read `require_salary`."""
     if not isinstance(value, bool):
-        raise InvalidValueError(
-            "filters.require_salary", f"{value!r} is not true or false"
-        )
+        raise InvalidValueError(key, f"{value!r} is not true or false")
     return value
 
 
-def _min_salary(value: object) -> Money | None:
+def _min_salary(value: object, key: str) -> Money | None:
     """Read the optional salary threshold table."""
-    key = "filters.min_salary"
     if value is None:
         return None
     table = _table(value, key)

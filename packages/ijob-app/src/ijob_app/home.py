@@ -7,6 +7,7 @@ that is unset or empty:
 config.toml         filter settings
 ijob.db             postings, labels and the CV record
 cache/http.sqlite   stored HTTP responses
+traces.db           spans of the model calls
 ```
 
 `resolve_home` locates it, `require_home` refuses to go on when it is not
@@ -24,6 +25,7 @@ from typing import Final
 
 from ijob_core.errors import InvalidValueError
 from ijob_core.store import Store
+from ijob_core.traces import TraceStore
 from ijob_sources.seeds import load_seeds
 
 _HOME_VARIABLE: Final = "IJOB_HOME"
@@ -57,6 +59,11 @@ class IjobHome:
     def cache(self) -> Path:
         """The HTTP cache file, inside its own directory."""
         return self.root / "cache" / "http.sqlite"
+
+    @property
+    def traces(self) -> Path:
+        """The trace database file."""
+        return self.root / "traces.db"
 
 
 class HomeError(InvalidValueError):
@@ -156,18 +163,18 @@ def setup_home(home: IjobHome) -> tuple[SetupItem, ...]:
     through `SetupItem.exposed_mode` when its group or others can enter it. The
     config file is written from the commented template only when absent, so an
     edited one is never overwritten. The database is created, migrated and given
-    the bundled seed sources.
+    the bundled seed sources. The trace database is created and migrated too.
 
     Args:
         home: The home to set up; missing parent directories are created too.
 
     Returns:
-        What happened to the home, its cache directory, the config file and the
-        database, in that order.
+        What happened to the home, its cache directory, the config file, the
+        database and the trace database, in that order.
 
     Raises:
         OSError: A directory or file cannot be created or written.
-        sqlite3.Error: The database cannot be created or migrated.
+        sqlite3.Error: A database cannot be created or migrated.
     """
     cache_dir = home.cache.parent
     return (
@@ -175,6 +182,7 @@ def setup_home(home: IjobHome) -> tuple[SetupItem, ...]:
         _make_private_dir(cache_dir),
         SetupItem(home.config, _write_config_template(home.config)),
         SetupItem(home.db, _create_database(home.db)),
+        SetupItem(home.traces, _create_trace_database(home.traces)),
     )
 
 
@@ -205,4 +213,12 @@ def _create_database(path: Path) -> Outcome:
     outcome = Outcome.PRESENT if path.exists() else Outcome.CREATED
     with Store.open(path) as store:
         store.import_seeds(load_seeds())
+    return outcome
+
+
+def _create_trace_database(path: Path) -> Outcome:
+    """Open the trace database, migrating it, and close it."""
+    outcome = Outcome.PRESENT if path.exists() else Outcome.CREATED
+    with TraceStore.open(path):
+        pass
     return outcome

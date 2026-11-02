@@ -20,3 +20,27 @@
 # [filters.role]
 # include = ['\bengineer', '\bdeveloper', 'エンジニア', '開発']
 # exclude = ['\bsales\b', '\brecruit', '\bmarketing\b', '\baccount executive\b']
+
+# Each model is written <provider>/<model>. A task needs its model set before it
+# runs.
+# [models]
+# cv_profile   = "claude-sdk/claude-sonnet-5-5"
+# instructions = "claude-sdk/claude-haiku-5-5"
+# judge        = "claude-sdk/claude-haiku-5-5"
+# scorer       = "claude-sdk/claude-haiku-5-5"
+
+# Limits on model calls.
+# [llm]
+# max_cost_usd = 0.50         # above 0 and at most 100
+# concurrency  = 4            # 1 to 16
+# timeout_s    = 120          # 10 to 600
+
+# Without cli_path, ijob looks for claude on the PATH.
+# [providers.claude-sdk]
+# cli_path = "/usr/local/bin/claude"
+
+# The trace store is traces.db in the ijob home. A Langfuse endpoint must be on
+# this machine (localhost, 127.0.0.1 or ::1).
+# [tracing]
+# max_size_mb = 256           # 16 to 10240
+# langfuse_endpoint = "http://localhost:3000"

@@ -16,6 +16,7 @@ from ijob_app.home import (
     setup_home,
 )
 from ijob_core.store import Store
+from ijob_core.traces import TraceStore
 
 
 @pytest.fixture
@@ -46,6 +47,7 @@ def test_resolve_home_honours_ijob_home(tmp_path: Path) -> None:
     assert home.config == tmp_path / "h" / "config.toml"
     assert home.db == tmp_path / "h" / "ijob.db"
     assert home.cache == tmp_path / "h" / "cache" / "http.sqlite"
+    assert home.traces == tmp_path / "h" / "traces.db"
 
 
 @pytest.mark.parametrize("environ", [{}, {"IJOB_HOME": ""}])
@@ -130,6 +132,7 @@ def test_setup_creates_the_private_tree(tmp_path: Path) -> None:
         home.cache.parent,
         home.config,
         home.db,
+        home.traces,
     ]
     assert {item.outcome for item in items} == {Outcome.CREATED}
 
@@ -165,6 +168,7 @@ def test_setup_leaves_an_existing_directorys_mode_alone_and_reports_it(
         home.cache.parent: 0o750,
         home.config: None,
         home.db: None,
+        home.traces: None,
     }
 
 
@@ -240,6 +244,22 @@ def test_setup_creates_a_migrated_seeded_database(tmp_path: Path) -> None:
         assert store.sources()
 
 
+def test_traces_path(tmp_path: Path) -> None:
+    assert IjobHome(tmp_path).traces == tmp_path / "traces.db"
+
+
+def test_setup_creates_traces_db_idempotently(tmp_path: Path) -> None:
+    home = IjobHome(tmp_path / "home")
+
+    first = _outcomes(setup_home(home))
+    second = _outcomes(setup_home(home))
+
+    assert first[home.traces] is Outcome.CREATED
+    assert second[home.traces] is Outcome.PRESENT
+    with TraceStore.open(home.traces) as traces:
+        assert traces.summaries(10) == []
+
+
 def test_second_setup_reports_everything_already_there(tmp_path: Path) -> None:
     home = IjobHome(tmp_path / "home")
     setup_home(home)
@@ -271,6 +291,7 @@ def test_setup_fills_in_what_is_missing(tmp_path: Path) -> None:
     assert outcomes[home.cache.parent] is Outcome.CREATED
     assert outcomes[home.config] is Outcome.CREATED
     assert outcomes[home.db] is Outcome.CREATED
+    assert outcomes[home.traces] is Outcome.CREATED
 
 
 def test_setup_under_a_regular_file_raises_os_error(tmp_path: Path) -> None:

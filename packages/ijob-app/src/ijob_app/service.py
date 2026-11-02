@@ -3,21 +3,23 @@
 `Service` owns what a front end does with the stored data: choosing sources,
 fetching the ones that are due, recording what they show, listing the open,
 filtered postings, reading a posting's detail and description, voting on
-postings, keeping the CV and managing the source table. It returns values and
-raises `InvalidValueError` subclasses, `SourcesError` or `OSError`; it neither
-prints nor starts an event loop, so each front end keeps its own output, exit
-codes and loop.
+postings, keeping the CV, judging and scoring postings with a model, reading
+the recorded traces and managing the source table. It returns values and
+raises `InvalidValueError` subclasses, `SourcesError`, the model layer's
+`LlmError` subclasses or `OSError`; it neither prints nor starts an event loop,
+so each front end keeps its own output, exit codes and loop.
 
 `open_service` builds a `Service` over the seeded database and the HTTP cache of
 an ijob home. The store and the cache are bound to the thread that opens them,
 so every `Service` method must run on that thread. The methods that reach the
-network are `async` and run on the caller's event loop.
+network or call a model are `async` and run on the caller's event loop.
 """
 
 import hashlib
+import json
 import sqlite3
 import tempfile
-from collections.abc import Callable, Collection, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Collection, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,14 +31,17 @@ from ijob_core.errors import InvalidValueError
 from ijob_core.filters import FilterSpec, keep
 from ijob_core.model import (
     ExternalId,
+    Instructions,
     Label,
     Posting,
     PostingId,
+    ResumeProfile,
     SourceRef,
     StoredCv,
     Vote,
 )
 from ijob_core.store import SourceOrigin, SourceRow, Store
+from ijob_core.traces import PruneReport, TraceSummary, TraceTree
 from ijob_sources.collect import CollectResult, Source, SourceFailure, collect
 from ijob_sources.details import describe
 from ijob_sources.detect import resolve_url, verify_new_source
@@ -46,7 +51,26 @@ from ijob_sources.polite_http import ConditionalCache, PoliteClient
 from ijob_sources.registry import build_source, refresh_interval
 from ijob_sources.seeds import load_seeds
 
+from ijob_app.config import FilterLayers, effective_filters
 from ijob_app.home import IjobHome
+from ijob_app.llm_ops import (
+    JudgeStatus,
+    LlmOptions,
+    LlmRuntime,
+    OperationReport,
+    Proposal,
+    ScoreItem,
+    SearchItem,
+    accept_proposal,
+    instructions_model,
+    judge_operation,
+    list_traces,
+    profile_operation,
+    propose_operation,
+    prune_traces,
+    read_trace,
+    score_operation,
+)
 
 type ClientFactory = Callable[[ConditionalCache | None], PoliteClient]
 
@@ -284,7 +308,7 @@ class Service:
     methods only on one event loop at a time.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913  # the resources a service is built over, one each
         self,
         store: Store,
         *,
@@ -292,6 +316,8 @@ class Service:
         client_factory: ClientFactory,
         cache: ConditionalCache | None,
         now: Callable[[], datetime],
+        home: IjobHome,
+        llm: LlmOptions,
     ) -> None:
         """Build a service over open resources it does not own.
 
@@ -302,12 +328,18 @@ class Service:
             cache: The HTTP cache the fetching clients revalidate against, or
                 `None` for none.
             now: The wall clock, returning timezone-aware times.
+            home: The ijob home, which holds the trace database.
+            llm: What the model-calling operations are given.
         """
         self._store = store
         self._db_path = db_path
         self._client_factory = client_factory
         self._cache = cache
         self._now = now
+        self._home = home
+        self._llm = llm
+        self._llm_runtime: LlmRuntime | None = None
+        self.last_report: OperationReport | None = None
 
     async def refresh(self, refs: Sequence[SourceRef]) -> RefreshReport:
         """Fetch the chosen sources that are due and record what they show.
@@ -365,6 +397,152 @@ class Service:
         at = self._now()
         postings = self._store.open_postings(now=at, sources=refs or None)
         return [posting for posting in postings if keep(posting, spec, now=at)]
+
+    async def search(
+        self, layers: FilterLayers, refs: Sequence[SourceRef]
+    ) -> AsyncIterator[SearchItem]:
+        """List the open postings that pass the filters, judged by the user's rules.
+
+        The filters in force are `layers` merged with the stored instructions'
+        filters. With no stored rules the postings are yielded as they are listed,
+        with status `not_run`, and no model module is loaded. With rules, a
+        posting whose verdict is stored comes first, as `cached`, and the rest
+        are judged and yielded in the order they finish.
+
+        `last_report` is `None` while the iteration runs and when no rules are
+        stored; otherwise it holds what the judging did once the iteration ends.
+        Abandoning the iteration early cancels the calls still running.
+
+        Args:
+            layers: The filters the packaged config, the user's file and the
+                flags set.
+            refs: The sources to read; empty means every source.
+
+        Yields:
+            One item per posting.
+
+        Raises:
+            UnknownSourceError: A named source has no row or was removed.
+            InvalidValueError: A filter in the stored instructions is unusable,
+                or the config file is unusable.
+            MissingModelError: Rules are stored and no model is set for the
+                `judge` task.
+            ProviderUnavailableError: A variable that redirects model calls is
+                set. A `claude` CLI that is missing or too old does not raise;
+                the items it stops come back as `provider_error`.
+            sqlite3.Error: A store read or write failed.
+        """
+        self.last_report = None
+        stored = self._store.instructions()
+        layer = None if stored is None else json.loads(stored.filters_json)
+        spec, _ = effective_filters(layers, layer)
+        postings = self.open_postings(spec, refs)
+        if stored is None or not stored.rules:
+            for posting in postings:
+                yield SearchItem(
+                    posting, None, JudgeStatus.NOT_RUN, posting.description is None
+                )
+            return
+        async for item in judge_operation(
+            self._runtime(),
+            self._store,
+            postings,
+            stored,
+            now=self._now,
+            on_report=self._keep_report,
+        ):
+            yield item
+
+    async def score(self, ids: Sequence[PostingId]) -> AsyncIterator[ScoreItem]:
+        """Score postings against the stored CV profile, on demand.
+
+        Repeated ids are scored once, in the order they first appear. A posting
+        whose score is stored for this posting text, this profile, this model and
+        this task version comes first, as `cached`; the rest are scored and
+        yielded in the order they finish. When no profile is stored, or the stored
+        one was read from an earlier CV, it is built from the CV first, inside
+        the same budget and trace.
+
+        `last_report` is `None` while the iteration runs and holds what the
+        scoring did once it ends.
+
+        Args:
+            ids: The postings to score.
+
+        Yields:
+            One item per distinct id.
+
+        Raises:
+            UnknownPostingError: An id names no posting; no call is made.
+            NoCvError: No CV is stored.
+            MissingModelError: No model is set for the `scorer` task, or for the
+                `cv_profile` task when the profile must be built.
+            CvTextError: The CV text cannot be read or used.
+            ProviderUnavailableError: A variable that redirects model calls is
+                set. A `claude` CLI that is missing or too old does not raise;
+                the items it stops come back as `provider_error`.
+            InvalidValueError: The config file is unusable.
+            sqlite3.Error: A store read or write failed.
+        """
+        self.last_report = None
+        postings = [
+            self._require_posting(posting_id) for posting_id in dict.fromkeys(ids)
+        ]
+        async for item in score_operation(
+            self._runtime(),
+            self._store,
+            postings,
+            self._db_path.parent / _CV_FILE_NAME,
+            now=self._now,
+            on_report=self._keep_report,
+        ):
+            yield item
+
+    def traces(self, limit: int = 20) -> list[TraceSummary]:
+        """List the recorded traces, newest first.
+
+        Args:
+            limit: The most traces to list.
+
+        Returns:
+            The summaries, newest first.
+
+        Raises:
+            InvalidValueError: `limit` is negative.
+            sqlite3.Error: The trace database cannot be opened or read.
+        """
+        return list_traces(self._home, limit)
+
+    def trace(self, trace_id: str) -> TraceTree:
+        """Read one trace as nested spans.
+
+        Args:
+            trace_id: The trace to read, as `traces` lists it.
+
+        Returns:
+            The trace's spans nested under their parents.
+
+        Raises:
+            UnknownTraceError: No span of that trace is recorded.
+            sqlite3.Error: The trace database cannot be opened or read.
+        """
+        return read_trace(self._home, trace_id)
+
+    def prune_traces(self) -> PruneReport:
+        """Delete the oldest traces until the database fits `[tracing].max_size_mb`.
+
+        Returns:
+            How many traces were deleted and the file size afterwards.
+
+        Raises:
+            InvalidValueError: The config file is unusable.
+            sqlite3.Error: The trace database cannot be opened or pruned.
+        """
+        return prune_traces(self._home, self._llm.config_path)
+
+    def _keep_report(self, report: OperationReport) -> None:
+        """Remember the report of the operation that just ended."""
+        self.last_report = report
 
     async def detail(self, posting_id: PostingId) -> PostingDetail:
         """Read a posting with its sources, label and description.
@@ -492,6 +670,122 @@ class Service:
             The record, or `None` if no CV was stored.
         """
         return self._store.cv()
+
+    def _runtime(self) -> LlmRuntime:
+        """Return the LLM runtime, building it on the first model operation.
+
+        Raises:
+            ProviderUnavailableError: A variable that redirects model calls is set.
+            InvalidValueError: The config file is unreadable, or a setting in it
+                is unknown or out of range.
+        """
+        if self._llm_runtime is None:
+            self._llm_runtime = LlmRuntime.create(self._home, self._llm)
+        return self._llm_runtime
+
+    async def build_profile(
+        self, *, refresh: bool
+    ) -> tuple[ResumeProfile, OperationReport]:
+        """Return the profile of the stored CV, reading the CV only when needed.
+
+        The stored profile is reused while the CV, the task version and the
+        `cv_profile` model are unchanged, unless `refresh`.
+
+        Args:
+            refresh: Whether to read the CV again even if the profile is current.
+
+        Returns:
+            The profile and what the operation did and spent.
+
+        Raises:
+            NoCvError: No CV is stored.
+            MissingModelError: No model is set for the `cv_profile` task.
+            CvTextError: The CV text cannot be read or used.
+            TaskOutputError: The model's answer is unusable.
+            ProviderUnavailableError: The provider cannot be used.
+            ProviderFailedError: The provider failed the call.
+            CostUnknownError: The cost of the call cannot be determined.
+            InvalidValueError: The config file is unusable.
+            sqlite3.Error: The store cannot be read or written.
+        """
+        return await profile_operation(
+            self._runtime(),
+            self._store,
+            self._db_path.parent / _CV_FILE_NAME,
+            refresh=refresh,
+            at=self._now(),
+        )
+
+    def cv_profile(self) -> ResumeProfile | None:
+        """Read the stored CV profile, which may be from an earlier CV.
+
+        Returns:
+            The profile, or `None` if none was built.
+        """
+        stored = self._store.cv_profile()
+        return None if stored is None else stored.profile
+
+    async def propose_instructions(self, layers: FilterLayers, text: str) -> Proposal:
+        """Work out what the user's instructions would set, without storing them.
+
+        Args:
+            layers: The filters the packaged config, the user's file and the
+                flags set.
+            text: The instructions the user wrote.
+
+        Returns:
+            The proposal for the user to confirm with `accept_instructions`.
+
+        Raises:
+            InvalidValueError: `text` is blank or too long, a filter the
+                instructions imply is unusable, or the config file is unusable.
+            MissingModelError: No model is set for the `instructions` task.
+            NothingActionableError: The instructions give neither a filter nor
+                a rule.
+            TaskOutputError: The model's answer is unusable.
+            ProviderUnavailableError: The provider cannot be used.
+            ProviderFailedError: The provider failed the call.
+            CostUnknownError: The cost of the call cannot be determined.
+            sqlite3.Error: The store cannot be read.
+        """
+        return await propose_operation(self._runtime(), self._store, layers, text)
+
+    def accept_instructions(self, proposal: Proposal) -> None:
+        """Store a confirmed proposal as the user's instructions.
+
+        Args:
+            proposal: The proposal `propose_instructions` returned.
+
+        Raises:
+            MissingModelError: No model is set for the `instructions` task.
+            ProviderUnavailableError: A variable that redirects model calls is
+                set.
+            InvalidValueError: The instructions break a limit of the stored
+                form, or the config file is unusable.
+            sqlite3.Error: The store cannot be written.
+        """
+        accept_proposal(
+            self._store,
+            proposal,
+            model=instructions_model(self._runtime()),
+            at=self._now(),
+        )
+
+    def instructions(self) -> Instructions | None:
+        """Read the stored instructions.
+
+        Returns:
+            The instructions, or `None` if none were stored.
+        """
+        return self._store.instructions()
+
+    def clear_instructions(self) -> None:
+        """Remove the stored instructions; clearing with none stored is a no-op.
+
+        Raises:
+            sqlite3.Error: The write failed.
+        """
+        self._store.clear_instructions()
 
     def sources(self) -> list[SourceRow]:
         """List every source that was not removed.
@@ -751,13 +1045,14 @@ class Service:
 
 
 @contextmanager
-def open_service(
+def open_service(  # noqa: PLR0913  # the service's inputs, one each
     home: IjobHome,
     db: Path | None,
     client_factory: ClientFactory,
     *,
     now: Callable[[], datetime],
     use_cache: bool = True,
+    llm: LlmOptions | None = None,
 ) -> Iterator[Service]:
     """Open the seeded database and the HTTP cache and build a service on them.
 
@@ -773,6 +1068,8 @@ def open_service(
             entries by it too.
         use_cache: Whether to open the HTTP cache and hand it to the clients.
             A caller that never revalidates responses leaves it off.
+        llm: What the model-calling operations are given, or `None` for the
+            home's config file, the real engines and the real `PATH`.
 
     Yields:
         The service, valid until the context exits and bound to this thread.
@@ -797,6 +1094,8 @@ def open_service(
                 client_factory=client_factory,
                 cache=cache,
                 now=now,
+                home=home,
+                llm=llm or LlmOptions(config_path=home.config),
             )
     finally:
         if cache is not None:
