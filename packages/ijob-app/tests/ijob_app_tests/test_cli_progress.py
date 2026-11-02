@@ -44,6 +44,17 @@ def test_show_live_prints_only_on_a_terminal() -> None:
     assert "first" in terminal.getvalue()
 
 
+def test_clear_wipes_an_open_line_on_a_terminal() -> None:
+    stream = _Terminal()
+    line = ProgressLine(stream)
+
+    line.show_live("reading")
+    line.clear()
+    line.close()
+
+    assert stream.getvalue() == "\rreading\x1b[K\r\x1b[K"
+
+
 def test_closing_a_line_that_showed_nothing_writes_nothing() -> None:
     stream = _Terminal()
 

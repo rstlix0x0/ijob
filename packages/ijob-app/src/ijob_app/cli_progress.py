@@ -65,6 +65,13 @@ class ProgressLine:
             self._stream.flush()
             self._open = True
 
+    def clear(self) -> None:
+        """Wipe a line left open, so a result can print in its place."""
+        if self._open:
+            self._stream.write(f"\r{_CLEAR_TO_END}")
+            self._stream.flush()
+            self._open = False
+
     def close(self) -> None:
         """End a line left open, so what is printed next starts on its own."""
         if self._open:
