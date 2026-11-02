@@ -8,7 +8,6 @@ from ijob_sources.errors import (
     FetchError,
     NotPublicAddressError,
     ReservedHostError,
-    RobotsDisallowedError,
 )
 from ijob_sources.polite_http import PoliteClient, RequestGuard
 from ijob_sources.public_host import (
@@ -247,7 +246,8 @@ def test_guarded_client_with_undecodable_host_sends_nothing() -> None:
             client.guard_requests(public_host_guard(resolver))
             await client.get("http://xn--japan-dev.com/x")
 
-    with pytest.raises(RobotsDisallowedError):
+    with pytest.raises(FetchError) as caught:
         asyncio.run(run())
+    assert caught.value.reason.startswith("robots.txt could not be read: ")
     assert requested == []
     assert resolver.calls == []

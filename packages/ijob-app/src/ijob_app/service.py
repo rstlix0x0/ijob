@@ -11,7 +11,14 @@ so each front end keeps its own output, exit codes and loop.
 
 A recipe source is read through a client that refuses any request to a
 non-public address, so its page address, its next pages and its job pages are
-checked, while every other source keeps the plain client.
+checked, while a refresh of every other source keeps the plain client. Adding
+by URL and the analysis that learns a recipe for an unrecognized page use such a
+client too, from their first request on, and the analysis stores nothing until
+the caller accepts its proposal.
+
+Every client the service builds shares one record of when each host was last
+requested, so requests to one host are spaced apart even when they come from
+different clients, such as `add_url` followed by `analyze_url`.
 
 `open_service` builds a `Service` over the seeded database and the HTTP cache of
 an ijob home. The store and the cache are bound to the thread that opens them,
@@ -51,9 +58,10 @@ from ijob_core.traces import PruneReport, TraceSummary, TraceTree
 from ijob_sources.collect import CollectResult, Source, SourceFailure, collect
 from ijob_sources.details import describe
 from ijob_sources.detect import resolve_url, verify_new_source
-from ijob_sources.errors import SourcesError
+from ijob_sources.errors import FetchedPage, SourcesError
 from ijob_sources.http_cache import SqliteHttpCache
-from ijob_sources.polite_http import ConditionalCache, PoliteClient
+from ijob_sources.manual import manual_key
+from ijob_sources.polite_http import ConditionalCache, HostPacing, PoliteClient
 from ijob_sources.public_host import (
     HostResolver,
     public_host_guard,
@@ -62,6 +70,7 @@ from ijob_sources.public_host import (
 from ijob_sources.registry import build_source, refresh_interval
 from ijob_sources.seeds import load_seeds
 
+from ijob_app import recipe_ops
 from ijob_app.config import FilterLayers, effective_filters
 from ijob_app.home import IjobHome
 from ijob_app.llm_ops import (
@@ -82,6 +91,7 @@ from ijob_app.llm_ops import (
     read_trace,
     score_operation,
 )
+from ijob_app.recipe_ops import RecipeProposal
 
 type ClientFactory = Callable[[ConditionalCache | None], PoliteClient]
 
@@ -126,6 +136,31 @@ class SourceCompanyError(InvalidValueError):
             company: The company the table already has it for.
         """
         super().__init__("source", f"{ref} is already a source for {company}")
+
+
+class RecipeAlreadyAddedError(SourcesError):
+    """A URL's recipe source is already added and was not removed."""
+
+    def __init__(self, ref: SourceRef) -> None:
+        """Build the error from the source that exists.
+
+        Args:
+            ref: The recipe source that is already added.
+        """
+        super().__init__(f"{ref} is already added; run: ijob sources reanalyze {ref}")
+        self.ref = ref
+
+
+class NoRecipeError(InvalidValueError):
+    """A source that has no recipe was named where a recipe source is needed."""
+
+    def __init__(self, ref: SourceRef) -> None:
+        """Build the error from the source that has no recipe.
+
+        Args:
+            ref: The source that is not a recipe source.
+        """
+        super().__init__("source", f"{ref} has no recipe")
 
 
 class InvalidCvError(InvalidValueError):
@@ -336,7 +371,8 @@ class Service:
         Args:
             store: The open store, with the seed sources imported.
             db_path: The database file the store was opened on.
-            client_factory: Builds the client a fetch goes through.
+            client_factory: Builds the client a fetch goes through; the
+                service has every client it builds share its host pacing.
             cache: The HTTP cache the fetching clients revalidate against, or
                 `None` for none.
             now: The wall clock, returning timezone-aware times.
@@ -353,6 +389,7 @@ class Service:
         self._home = home
         self._llm = llm
         self._resolver = resolver
+        self._pacing = HostPacing()
         self._llm_runtime: LlmRuntime | None = None
         self.last_report: OperationReport | None = None
 
@@ -831,7 +868,7 @@ class Service:
         """
         self._refuse_other_company(ref, company)
         source = build_source(_new_row(ref, company))
-        async with self._client_factory(None) as client:
+        async with self._client(None) as client:
             await verify_new_source(source, client)
         self._store.add_source(ref, company)
         return self._require_source(ref)
@@ -856,7 +893,12 @@ class Service:
         """Work out what a URL is, verify it and add it as a source.
 
         A URL read from a page or feed is already checked by being read; a
-        hiring-system board is fetched once before it is added.
+        hiring-system board is fetched once before it is added. Every request,
+        robots.txt and redirect hops included, goes through a client that
+        refuses a non-public address and a host another source kind reads, so
+        such a URL is refused before anything is sent. A redirect is followed
+        and the source reads the address it ended on, because a refresh follows
+        none; a redirect to a hiring-system board adds that board.
 
         Args:
             url: A board, job page or feed URL.
@@ -869,10 +911,16 @@ class Service:
             SourceCompanyError: The table already holds the resolved reference
                 for another company.
             InvalidValueError: The registry cannot build the resolved source.
-            SourcesError: The URL is unusable, or the source fails its check.
+            UnrecognizedPageError: The page is no hiring system, job posting or
+                feed; `analyze_url` can learn a recipe for it, given the page
+                the error holds.
+            SourcesError: The URL is malformed or unusable, is not a public
+                address, is on a host another source kind reads, its page is
+                over 5 MiB or its robots.txt could not be read, or the source
+                fails its check.
             sqlite3.Error: The write failed.
         """
-        async with self._client_factory(None) as client:
+        async with self._client(None, public_only=True) as client:
             resolution = await resolve_url(url, company=company, client=client)
             self._refuse_other_company(resolution.ref, company)
             if resolution.batch is None:
@@ -880,6 +928,145 @@ class Service:
                 await verify_new_source(source, client)
         self._store.add_source(resolution.ref, company, resolution.target_url)
         return self._require_source(resolution.ref)
+
+    def learns_recipes(self) -> bool:
+        """Say whether a model is set to learn recipes.
+
+        The config is read without loading an LLM library; the runtime is built
+        only when a model is set.
+
+        Returns:
+            Whether `[models].source_recipe` is set.
+
+        Raises:
+            ProviderUnavailableError: A model is set and a variable that
+                redirects model calls is set.
+            InvalidValueError: The config file is unreadable, or a setting in it
+                is unknown or out of range.
+        """
+        from ijob_ai.llm.settings import Task  # noqa: PLC0415
+
+        from ijob_app.llm_config import read_llm_settings  # noqa: PLC0415
+
+        settings = read_llm_settings(self._llm.config_path)
+        if Task.SOURCE_RECIPE not in settings.models:
+            return False
+        self._runtime()
+        return True
+
+    async def analyze_url(
+        self, url: str, company: str, *, page: FetchedPage | None = None
+    ) -> RecipeProposal:
+        """Learn a recipe for a page no source kind recognizes, without storing it.
+
+        Call this after `add_url` raised `UnrecognizedPageError` for the URL,
+        passing the page the error holds so the page is not fetched again.
+        Without `page` it is fetched, through a client that refuses non-public
+        addresses. A JSON address the model names is always fetched that way.
+        The recipe source is named after the address the page ended on, as
+        every other source added by URL is, so two addresses that lead to one
+        page are one source; without `page` it is named after `url`. The
+        source's target stays `url`.
+
+        Args:
+            url: The page's address, as it was added.
+            company: The company the source would belong to.
+            page: The page `add_url` already read, or `None` to fetch it.
+
+        Returns:
+            The proposal for the user to confirm with `accept_recipe`.
+
+        Raises:
+            RecipeAlreadyAddedError: The URL's recipe source is already added
+                and not removed.
+            SourceCompanyError: The table already holds the source for another
+                company, removed or not.
+            MissingModelError: No model is set for the `source_recipe` task.
+            UnsupportedUrlError: `url` is malformed; nothing is fetched.
+            SourcesError: The page or a JSON address it names cannot be
+                fetched, is not a public address, is on a host another source
+                kind reads, is over 5 MiB, is neither HTML nor JSON, or a JSON
+                address serves HTML.
+            TaskOutputError: The model's answer is unusable, or its recipe is
+                invalid.
+            NoTrialJobsError: The recipe reads no job from the page.
+            RecipeCapReachedError: The cost cap was reached before the second
+                call.
+            ProviderUnavailableError: The provider cannot be used.
+            ProviderFailedError: The provider failed a call.
+            CostUnknownError: The cost of a call cannot be determined.
+            InvalidValueError: The config file is unusable.
+            sqlite3.Error: The store cannot be read.
+        """
+        ref = SourceRef(
+            SourceKind.RECIPE, manual_key(url if page is None else page.final_url)
+        )
+        row = self._store.source(ref)
+        if row is not None and not row.removed:
+            raise RecipeAlreadyAddedError(ref)
+        self._refuse_other_company(ref, company)
+        return await self._analyze(ref, url, company, page)
+
+    async def analyze_source(self, ref: SourceRef) -> RecipeProposal:
+        """Learn a recipe again for a recipe source, keeping the stored one.
+
+        The page is the source's stored address and the company is its stored
+        company. The stored recipe stays until `accept_recipe` replaces it.
+
+        Args:
+            ref: The recipe source.
+
+        Returns:
+            The proposal for the user to confirm with `accept_recipe`.
+
+        Raises:
+            UnknownSourceError: The source has no row or was removed.
+            NoRecipeError: The source is not a recipe source, or its row has no
+                address to read.
+            MissingModelError: No model is set for the `source_recipe` task.
+            UnsupportedUrlError: The stored address is malformed.
+            SourcesError: The page or a JSON address it names cannot be
+                fetched, is not a public address, is on a host another source
+                kind reads, is over 5 MiB, is neither HTML nor JSON, or a JSON
+                address serves HTML.
+            TaskOutputError: The model's answer is unusable, or its recipe is
+                invalid.
+            NoTrialJobsError: The recipe reads no job from the page.
+            RecipeCapReachedError: The cost cap was reached before the second
+                call.
+            ProviderUnavailableError: The provider cannot be used.
+            ProviderFailedError: The provider failed a call.
+            CostUnknownError: The cost of a call cannot be determined.
+            InvalidValueError: The config file is unusable.
+            sqlite3.Error: The store cannot be read.
+        """
+        row = self._store.source(ref)
+        if row is None or row.removed:
+            reason = f"unknown source {ref}"
+            raise UnknownSourceError(reason)
+        if ref.kind is not SourceKind.RECIPE or row.target_url is None:
+            raise NoRecipeError(ref)
+        return await self._analyze(ref, row.target_url, row.company, None)
+
+    def accept_recipe(self, proposal: RecipeProposal) -> SourceRow:
+        """Store a confirmed proposal as a source and its recipe.
+
+        A removed source is restored, and a recipe already stored for the
+        source is replaced.
+
+        Args:
+            proposal: The proposal `analyze_url` or `analyze_source` returned.
+
+        Returns:
+            The source's row.
+
+        Raises:
+            InvalidValueError: The recipe or the model reference is empty, or the
+                service's clock gives a time with no timezone.
+            sqlite3.Error: The store cannot be written.
+        """
+        recipe_ops.accept_recipe(self._store, proposal, at=self._now())
+        return self._require_source(proposal.ref)
 
     def posting_sources(self, posting_id: PostingId) -> list[SourceRef]:
         """List the sources that have shown a posting.
@@ -892,6 +1079,16 @@ class Service:
             unknown.
         """
         return self._store.posting_sources(posting_id)
+
+    async def _analyze(
+        self, ref: SourceRef, url: str, company: str, page: FetchedPage | None
+    ) -> RecipeProposal:
+        """Analyze a page through a guarded client that has no cache."""
+        runtime = self._runtime()
+        async with self._client(None, public_only=True) as client:
+            return await recipe_ops.analyze_operation(
+                runtime, client, ref=ref, target_url=url, company=company, page=page
+            )
 
     def _refuse_other_company(self, ref: SourceRef, company: str) -> None:
         """Refuse a reference the table already holds for a different company.
@@ -947,7 +1144,7 @@ class Service:
         """
         failure: str | None = None
         async with (
-            self._client_factory(self._cache) as client,
+            self._client(self._cache) as client,
             AsyncExitStack() as stack,
         ):
             guarded: PoliteClient | None = None
@@ -956,7 +1153,7 @@ class Service:
                 if sighting.source.kind is SourceKind.RECIPE:
                     if guarded is None:
                         guarded = await stack.enter_async_context(
-                            self._guarded_client()
+                            self._client(self._cache, public_only=True)
                         )
                     used = guarded
                 try:
@@ -1029,10 +1226,20 @@ class Service:
         stored = self._store.recipe(row.ref)
         return None if stored is None else stored.recipe
 
-    def _guarded_client(self) -> PoliteClient:
-        """Build a client that refuses any request to a non-public address."""
-        client = self._client_factory(self._cache)
-        client.guard_requests(public_host_guard(self._resolver))
+    def _client(
+        self, cache: ConditionalCache | None, *, public_only: bool = False
+    ) -> PoliteClient:
+        """Build a client that paces by the service's shared host pacing.
+
+        Args:
+            cache: The cache the client revalidates against, or `None`.
+            public_only: Whether the client refuses any request to a non-public
+                address or to a host another source kind reads.
+        """
+        client = self._client_factory(cache)
+        client.share_pacing(self._pacing)
+        if public_only:
+            client.guard_requests(public_host_guard(self._resolver))
         return client
 
     async def _collect(self, sources: list[Source]) -> CollectResult:
@@ -1052,10 +1259,13 @@ class Service:
         others = [
             source for source in sources if source.ref.kind is not SourceKind.RECIPE
         ]
-        async with self._client_factory(self._cache) as client:
+        async with self._client(self._cache) as client:
             if not recipes:
                 return await collect(others, client)
-            async with self._guarded_client() as guarded, asyncio.TaskGroup() as group:
+            async with (
+                self._client(self._cache, public_only=True) as guarded,
+                asyncio.TaskGroup() as group,
+            ):
                 plain = group.create_task(collect(others, client))
                 checked = group.create_task(collect(recipes, guarded))
         first, second = plain.result(), checked.result()

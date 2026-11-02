@@ -105,6 +105,16 @@ def score_answer(score: int = 80, reasons: Sequence[str] = ("fits",)) -> str:
     return json.dumps({"score": {"score": score, "reasons": list(reasons)}})
 
 
+def recipe_answer(recipe: dict[str, object]) -> str:
+    """Return the JSON a model gives when it proposes a recipe."""
+    return json.dumps({"answer": {"recipe": recipe, "json_url": None}})
+
+
+def json_url_answer(json_url: str) -> str:
+    """Return the JSON a model gives when it points at a JSON document instead."""
+    return json.dumps({"answer": {"recipe": None, "json_url": json_url}})
+
+
 def request_text(request: Opaque) -> str:
     """Return every text part of a request's messages, joined."""
     return "".join(
@@ -125,6 +135,7 @@ def write_llm_config(  # noqa: PLR0913  # one knob of the config per argument
     cv_profile: str | None = None,
     instructions: str | None = None,
     scorer: str | None = None,
+    source_recipe: str | None = None,
 ) -> None:
     """Write a config file that names made-up models.
 
@@ -139,6 +150,8 @@ def write_llm_config(  # noqa: PLR0913  # one knob of the config per argument
         instructions: The `[models].instructions` reference, or None to leave it
             unset.
         scorer: The `[models].scorer` reference, or None to leave it unset.
+        source_recipe: The `[models].source_recipe` reference, or None to leave it
+            unset.
     """
     lines: list[str] = []
     models = {
@@ -146,6 +159,7 @@ def write_llm_config(  # noqa: PLR0913  # one knob of the config per argument
         "cv_profile": cv_profile,
         "instructions": instructions,
         "scorer": scorer,
+        "source_recipe": source_recipe,
     }
     named = [f'{task} = "{ref}"' for task, ref in models.items() if ref is not None]
     if named:

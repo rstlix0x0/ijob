@@ -273,11 +273,19 @@ class _RecordingClient(PoliteClient):
 
     @override
     async def get(
-        self, url: str, *, conditional: bool = False, follow_redirects: bool = False
+        self,
+        url: str,
+        *,
+        conditional: bool = False,
+        follow_redirects: bool = False,
+        max_bytes: int | None = None,
     ) -> httpx.Response:
         self.conditionals.append(conditional)
         return await super().get(
-            url, conditional=conditional, follow_redirects=follow_redirects
+            url,
+            conditional=conditional,
+            follow_redirects=follow_redirects,
+            max_bytes=max_bytes,
         )
 
 

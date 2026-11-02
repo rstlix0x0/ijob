@@ -1,15 +1,19 @@
 """The words the command line and the terminal UI use for the LLM operations.
 
-One home for how a verdict, a summary, a profile, a set of instructions and a
-shadowed filter read, so `ijob search`, `ijob score`, `ijob cv`, `ijob
-instructions` and their terminal screens agree. This module imports the
-service's types only, so loading it pulls in neither DSPy nor the Claude SDK.
+One home for how a verdict, a summary, a profile, a set of instructions, a
+shadowed filter, a learned recipe and a cost read, so `ijob search`, `ijob
+score`, `ijob cv`, `ijob instructions`, `ijob sources` and their terminal
+screens agree; the cost line they share is `ijob_app.llm_ops.cost_line`. This
+module imports the service's types only, so loading it pulls in neither DSPy nor
+the Claude SDK.
 """
 
+import unicodedata
 from collections.abc import Iterator, Mapping
 from typing import Final
 
-from ijob_core.model import ResumeProfile
+from ijob_core.model import ResumeProfile, SightingDraft
+from ijob_core.money import money_text
 
 from ijob_app.config import ShadowedField
 from ijob_app.llm_ops import (
@@ -18,7 +22,9 @@ from ijob_app.llm_ops import (
     OperationReport,
     SearchItem,
     StopReason,
+    cost_line,
 )
+from ijob_app.recipe_ops import RecipeProposal
 
 STOP_TEXT: Final[Mapping[StopReason, str]] = {
     "cap": "cap reached",
@@ -31,6 +37,8 @@ _PASSED: Final = "✔"
 _DROPPED: Final = "✘"
 MISSING_MARK: Final = "·"
 """The mark beside an item that has no result, before the reason."""
+
+_PROPOSAL_JOBS_SHOWN: Final = 5
 
 
 def verdict_cell(item: SearchItem) -> str:
@@ -57,7 +65,7 @@ def verdict_cell(item: SearchItem) -> str:
 
 def _cost_and_stop(report: OperationReport) -> str:
     """Write the spend of an operation and, when it stopped early, why."""
-    text = f"cost ${report.spent:.4f} of ${report.cap:.2f}"
+    text = cost_line(report)
     if report.stopped_by is not None:
         text += f"; stopped: {STOP_TEXT[report.stopped_by]}"
     return text
@@ -93,6 +101,45 @@ def score_summary(report: OperationReport) -> str:
         f"scored {report.done}, cached {report.cached}, "
         f"not scored {report.not_done}, {_cost_and_stop(report)}"
     )
+
+
+def _printable(text: str) -> str:
+    """Drop the control and format characters of text a page or a model wrote.
+
+    Terminal escape sequences and bidirectional overrides would otherwise
+    rewrite what the user reads before confirming.
+    """
+    return "".join(
+        char for char in text if unicodedata.category(char) not in {"Cc", "Cf"}
+    )
+
+
+def _job_line(job: SightingDraft) -> str:
+    """Write one job of a proposal as tab-separated cells, each with no controls."""
+    salary = "; ".join(money_text(money) for money in job.salaries) or "-"
+    cells = [job.title, job.company, job.location or "-", salary, job.url]
+    return "\t".join(_printable(cell) for cell in cells)
+
+
+def recipe_proposal_lines(proposal: RecipeProposal) -> list[str]:
+    """Lay a learned recipe out as the lines the user confirms it by.
+
+    Args:
+        proposal: The recipe and what it read from its page.
+
+    Returns:
+        `recipe: <format> at <url>`, then `read N jobs, M invalid`, then a
+        tab-separated line for each of the first five jobs: title, company,
+        location, salary and address, with `-` for a location or salary the
+        job lacks. Control and format characters are dropped from the text the
+        page and the model supplied.
+    """
+    lines = [
+        f"recipe: {proposal.recipe_format} at {_printable(proposal.recipe_url)}",
+        f"read {len(proposal.jobs)} jobs, {proposal.invalid} invalid",
+    ]
+    lines += [_job_line(job) for job in proposal.jobs[:_PROPOSAL_JOBS_SHOWN]]
+    return lines
 
 
 def profile_lines(profile: ResumeProfile) -> list[str]:

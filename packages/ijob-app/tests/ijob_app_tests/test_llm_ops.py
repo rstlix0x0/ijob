@@ -39,6 +39,7 @@ from ijob_app.llm_ops import (
     ScoreStatus,
     SearchItem,
     accept_proposal,
+    cost_line,
     judge_operation,
     profile_operation,
     propose_operation,
@@ -148,6 +149,12 @@ def make_runtime(home: IjobHome, cli: FakeCli) -> _MakeRuntime:
 
 def _statuses(outcomes: tuple[ItemOutcome[int, str], ...]) -> list[ItemStatus]:
     return [outcome.status for outcome in outcomes]
+
+
+def test_cost_line_reads_the_spend_against_the_cap() -> None:
+    report = OperationReport(done=1, not_done=0, spent=0.0123, cap=0.5, stopped_by=None)
+
+    assert cost_line(report) == "cost $0.0123 of $0.50"
 
 
 def test_statuses_follow_the_service_contract() -> None:

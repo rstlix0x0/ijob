@@ -1,16 +1,15 @@
 import asyncio
 import json
-from collections.abc import Callable
-from typing import Any
+from collections.abc import AsyncIterator, Callable
+from typing import Any, override
 
 import httpx
 import pytest
 from ijob_sources.errors import UnsupportedUrlError
-from ijob_sources.polite_http import PoliteClient
+from ijob_sources.polite_http import MAX_BODY_BYTES, PoliteClient
 from ijob_sources.recipe_document import (
     JSON_SAMPLE_CHARS,
     JSON_SAMPLE_ITEMS,
-    MAX_BODY_BYTES,
     MAX_JSON_DEPTH,
     SAMPLE_LIMIT,
     HtmlDocument,
@@ -299,3 +298,43 @@ def test_fetch_document_reads_json_and_refuses_other_types() -> None:
     document = asyncio.run(run())
     assert isinstance(document, JsonDocument)
     assert document.value == [{"a": 1}]
+
+
+class _EndlessPage(httpx.AsyncByteStream):
+    """An HTML body of 100 chunks of 1 MiB that counts the chunks read."""
+
+    def __init__(self) -> None:
+        self.yielded = 0
+
+    @override
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for _ in range(100):
+            self.yielded += 1
+            yield b" " * 1_048_576
+
+
+def test_fetch_document_stops_reading_a_page_over_5_mib() -> None:
+    page = _EndlessPage()
+
+    class _Transport(httpx.AsyncBaseTransport):
+        @override
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/robots.txt":
+                return httpx.Response(404)
+            return httpx.Response(
+                200, headers={"Content-Type": "text/html"}, stream=page
+            )
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    async def run() -> None:
+        async with PoliteClient(transport=_Transport(), sleep=no_sleep) as client:
+            await fetch_document(client, "https://example.org/jobs")
+
+    with pytest.raises(UnsupportedUrlError) as caught:
+        asyncio.run(run())
+
+    assert caught.value.url == "https://example.org/jobs"
+    assert caught.value.reason == "the page is larger than 5 MiB"
+    assert page.yielded == 6

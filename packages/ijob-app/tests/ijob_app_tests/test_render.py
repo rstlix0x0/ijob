@@ -1,9 +1,16 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from ijob_app.render import plain_cell, posting_fields
-from ijob_app.service import PostingDetail
+from ijob_app.render import error_notes, error_text, plain_cell, posting_fields
+from ijob_app.service import (
+    InvalidCvError,
+    NoRecipeError,
+    PostingDetail,
+    SourceCompanyError,
+    UnknownSourceError,
+)
 from ijob_core.countries import CountryCode
+from ijob_core.errors import InvalidValueError
 from ijob_core.model import Posting, PostingId, RemoteScope, parse_source_ref
 from ijob_core.money import Money, Period
 from rich.text import Text
@@ -83,3 +90,37 @@ def test_plain_cell_keeps_markup_as_literal_text() -> None:
         "[bold]a[/bold] [/x] [@click=app.quit]b[/] [link=file:///x]c[/link]"
     )
     assert cell.spans == []
+
+
+def test_error_text_bare_reasons() -> None:
+    ref = parse_source_ref("greenhouse:x")
+
+    assert error_text(NoRecipeError(ref)) == "greenhouse:x has no recipe"
+    assert error_text(UnknownSourceError("unknown source greenhouse:x")) == (
+        "unknown source greenhouse:x"
+    )
+    assert error_text(SourceCompanyError(ref, "Acme")) == (
+        "greenhouse:x is already a source for Acme"
+    )
+    assert error_text(InvalidCvError("resume.pdf is not a PDF")) == (
+        "resume.pdf is not a PDF"
+    )
+
+
+def test_error_text_full_message_for_other_value_errors() -> None:
+    error = InvalidValueError("source", "bad thing")
+
+    assert error_text(error) == str(error)
+    assert error_text(error) != "bad thing"
+
+
+def test_error_notes_lists_the_notes_in_the_order_they_were_added() -> None:
+    error = ValueError("boom")
+    error.add_note("first")
+    error.add_note("second")
+
+    assert error_notes(error) == ["first", "second"]
+
+
+def test_error_notes_of_an_error_with_none_is_empty() -> None:
+    assert error_notes(ValueError("boom")) == []

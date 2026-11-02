@@ -184,6 +184,18 @@ class OperationReport:
     dropped_spans: int = 0
 
 
+def cost_line(report: OperationReport) -> str:
+    """Write what an operation spent against its cap.
+
+    Args:
+        report: What the operation did and spent.
+
+    Returns:
+        `cost $X.XXXX of $Y.YY`.
+    """
+    return f"cost ${report.spent:.4f} of ${report.cap:.2f}"
+
+
 @dataclass(frozen=True, slots=True)
 class ItemOutcome[Item, Result]:
     """How one item ended.

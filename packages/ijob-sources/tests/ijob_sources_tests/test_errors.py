@@ -1,6 +1,7 @@
 import pytest
 from ijob_core.model import SourceKind, SourceRef, parse_source_key
 from ijob_sources.errors import (
+    FetchedPage,
     FetchError,
     HttpStatusError,
     IdentityMismatchError,
@@ -10,9 +11,11 @@ from ijob_sources.errors import (
     RecipeEvaluationError,
     RecipeFailedError,
     ReservedHostError,
+    ResponseTooLargeError,
     RobotsDisallowedError,
     SourceNotFoundError,
     SourcesError,
+    UnrecognizedPageError,
     UnsupportedRecipeVersionError,
     UnsupportedUrlError,
 )
@@ -28,6 +31,7 @@ _REF = SourceRef(SourceKind.GREENHOUSE, parse_source_key("prisma"))
         HttpStatusError(_URL, 500),
         SourceNotFoundError(_URL),
         FetchError(_URL, "connection refused"),
+        ResponseTooLargeError(_URL, 1024),
         ParseError("not JSON"),
         IdentityMismatchError(_REF, "company 'Prisma' not found on the board"),
         UnsupportedUrlError(_URL, "no feed found"),
@@ -118,3 +122,23 @@ def test_recipe_failed_messages() -> None:
         "if the site changed, run: ijob sources reanalyze recipe:example"
     )
     assert isinstance(no_jobs, SourcesError)
+
+
+def test_response_too_large_is_a_fetch_error_naming_url_and_limit() -> None:
+    error = ResponseTooLargeError(_URL, 1024)
+
+    assert isinstance(error, FetchError)
+    assert error.url == _URL
+    assert error.limit == 1024
+    assert _URL in str(error)
+    assert "1024" in str(error)
+
+
+def test_unrecognized_page_carries_the_fetched_page() -> None:
+    page = FetchedPage(body=b"<p>hi</p>", content_type="text/html", final_url=_URL)
+
+    error = UnrecognizedPageError("http://example.test/jobs", page=page)
+
+    assert error.page is page
+    assert error.url == "http://example.test/jobs"
+    assert UnrecognizedPageError(_URL).page is None

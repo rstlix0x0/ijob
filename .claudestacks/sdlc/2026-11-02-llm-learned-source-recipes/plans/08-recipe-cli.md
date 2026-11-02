@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-02
 depends-on: [07]
 built-on: 6ee2c2bd4580
@@ -184,3 +184,55 @@ passes and the CLAUDE.md gate is green. Commit `feat(app): add sources reanalyze
 
 - `uv run --locked pytest packages/ijob-app` passes.
 - The gate exits 0.
+
+## Review findings
+
+Plans 08 and 09 were reviewed together by one reviewer over the combined diff. The fix round's gate: `uv run --locked pytest` → `3131 passed`; `ruff format --check`, `ruff check --no-fix` and `mypy --strict .` exit 0.
+
+- fixed — `cli_recipes.py:110` `sqlite3.Error` from `accept_recipe` was uncaught, so a locked database gave a traceback after the paid analysis and the user's yes. `recipe_failures` now exits 1 with `error: database is locked`. The plan's `recipe_failures` mapping omitted it.
+- fixed — `llm_text.py:115` a job page could put terminal control codes in a title and rewrite what the user sees before the store prompt. Control and format characters (Cc, Cf) are dropped from page-derived cells and the recipe URL.
+- fixed — `cli_recipes.py:144` `add-url` on an unrecognized page with no model loaded `dspy` to say no model is set. `Service.learns_recipes` now reads the settings and returns False without building the runtime. New case in `test_recipe_imports.py`.
+- fixed — tests for `report_notes` on stderr, a store-time failure, and a missing home beating a bad ref. Docstrings at `cli_recipes.py:9` and `llm_text.py:6` corrected.
+- open — `cli.py:667,790,870,1063,1097` nothing fails if `resolver=resolver` is dropped from `cv`, posting, session, `search` or `tui`.
+- open — `cli_recipes.py:103` the second confirmation check is unreachable and untested.
+- open — `cli_recipes.py:151` an analysis that fails after a paid call reports no cost, in the CLI and the TUI.
+- open — `test_cli_recipes.py:415` refused cases assert only the `error: ` prefix; EOF at the prompt is untested (it exits 1 and stores nothing).
+- open — `test_recipe_imports.py:188` no guard for a recognized `add-url`, which loads no LLM library today.
+- open — `service.py` `add_url` the first fetch is unguarded, so a private host is requested once before the analysis client refuses it. Plans 06/07 context; `resolve_url` keeps its own client.
+
+## Deviations
+
+- 2026-11-02 — The board row was not clean at start (another chain, `2026-11-01-llm-layer`, reads `spec disproven by plan 07`); this chain's row was clean.
+- 2026-11-02 — "Seen failing" was not met for Task 3: `reanalyze_command` was wired in the same `cli.py` edit as Task 2, so its tests first ran green apart from one wrong test expectation (the job lines carry the stored company "Other Co"), which was fixed in the test.
+- 2026-11-02 — `make_app` hit ruff PLR0915 (51 statements, limit 50). `app.callback()(_root)` became `typer.Typer(..., callback=_root)`; behaviour is the same.
+- 2026-11-02 — `_llm_groups` takes `llm_for` and returns `None`, with `noqa: PLR0913, PLR0917`; `learn_page` carries `noqa: PLR0913`. `_sources_app`'s `service_on` is a local `def`, and `type _LlmFor` moved above `_sources_app` (ruff F821).
+- 2026-11-02 — `cli_recipes` cannot import from `cli.py` without a cycle, so `reanalyze_command` takes `open_session`, `read_ref` and `is_interactive`.
+- 2026-11-02 — `reanalyze` checks confirmation before entering the service. Without `--yes` and without a terminal, an unknown or removed ref exits 1 for the confirmation, not 2. The exit-2 tests pass `--yes`.
+- 2026-11-02 — Beyond the plan: `confirm_and_store` refuses with the "confirmation needed" error when `--yes` is absent and nobody can be asked.
+- 2026-11-02 — `add-url` builds the LLM options for every URL; a recognized URL still needs no model and no `--yes`.
+- 2026-11-02 — Behaviour change from the C07 fix: with no model set and a redirecting environment variable present, `learns_recipes` returns False rather than raising `ProviderUnavailableError`. The error still appears once a model is set.
+- 2026-11-02 — The task-briefer ledger and briefs were skipped: one coder read the plan's task sections directly.
+- 2026-11-02 — Not committed: the instruction to execute did not ask for commits.
+
+## Follow-up: add-url fixes
+
+Requested by the user on 2026-11-02 after this chain completed: "We need to fix all of add-url issues". Built on top of plans 06–09, with one review and one fix round. Fix round's gate: `uv run --locked pytest` → `3258 passed`; `ruff format --check`, `ruff check --no-fix` and `mypy --strict .` exit 0.
+
+- fixed — every `add_url` request goes through `public_host_guard`, so JobStreet, JapanDev and private addresses receive no request. Adding a feed on `localhost` or a private network no longer works.
+- fixed — `resolve_url` follows redirects on the first fetch. The final address drives hiring-board detection, `manual_key`, parsing and the stored `target_url`, because refresh stays no-redirect. A redirect to a known board counts even when the board's page answers 403, 404 or robots-disallowed.
+- fixed — a `FetchError` on robots.txt is no longer a cached deny-all reported as `RobotsDisallowedError`. It raises `FetchError(<url>, "robots.txt could not be read: <reason>")`, callers already waiting share that one failure, and the next call tries again. 429, 5xx and unparseable answers stay a disallow.
+- fixed — `get(max_bytes=)` streams and stops at the limit (`ResponseTooLargeError`), used by `resolve_url` and `fetch_document`. robots.txt reading, redirect hops included, stops at `PARSE_LIMIT_BYTES`. A non-2xx body over the limit is cut, so its status decides.
+- fixed — an unrecognized page's bytes are reused for analysis (`FetchedPage`), so the HTML path requests the page and its robots.txt once. The JSON path may fetch robots.txt once more, paced.
+- fixed — one `HostPacing` per `Service` is shared by all its clients, with the slot reserved before sleeping and withdrawn on cancellation. This also closes plan 05's open pacing gap and this plan's open `add_url` finding.
+- fixed — errors after a paid analysis carry `cost_line` as an exception note, and the CLI and TUI show it. This closes this plan's open cost finding and plan 03's open 5 MiB finding.
+- fixed — a recipe ref comes from the final address when a page is given, so two forms of one page raise `RecipeAlreadyAddedError` before any model call. `target_url` stays the added URL.
+- fixed — a URL with no host or a non-http(s) scheme gives `UnsupportedUrlError(url, "not an http or https address")` before any request.
+- fixed — the rebuilt response keeps non-ASCII response headers (`response.headers.raw`). `cost_line` moved to `llm_ops.py`, removing an import cycle.
+- open — `recipe_ops.py` the non-DONE branch and `RecipeCapReachedError(started=)` are reached only by a monkeypatched test.
+- fixed — a non-ASCII `Set-Cookie` made httpx's cookie jar build a `Cookie` header it could not encode, so the client's next request ended in `FetchError`, for every source. `PoliteClient` now keeps no cookies. `test_cookies_are_neither_kept_nor_sent`; `uv run --locked pytest` → `3262 passed`.
+
+### Deviations
+
+- 2026-11-02 — The spec's §6 "Other sources keep today's no-redirect `get`" no longer holds for `add_url`'s first fetch, by the user's decision. Refresh stays no-redirect. `spec.md` was not edited; it needs `design` if it is to record this.
+- 2026-11-02 — `HostPacing.record` keeps the later of the old and new times, as a plain write could overwrite a later reservation by another client.
+- 2026-11-02 — `detect.py` has one `UnrecognizedPageError` raise site, not the two the brief named.

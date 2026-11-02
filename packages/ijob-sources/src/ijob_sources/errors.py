@@ -1,5 +1,6 @@
 """Exceptions raised by ijob_sources."""
 
+from dataclasses import dataclass
 from typing import Self
 
 from ijob_core.model import SourceRef
@@ -78,6 +79,24 @@ class FetchError(SourcesError):
         self.reason = reason
 
 
+class ResponseTooLargeError(FetchError):
+    """A response body ran past the size limit before it was fully read.
+
+    Attributes:
+        limit: The most bytes the caller accepted.
+    """
+
+    def __init__(self, url: str, limit: int) -> None:
+        """Build the error from the requested URL and the limit.
+
+        Args:
+            url: The URL that was requested.
+            limit: The most bytes the caller accepted, counted after decoding.
+        """
+        super().__init__(url, f"the response is larger than {limit} bytes")
+        self.limit = limit
+
+
 class ParseError(SourcesError):
     """A response body could not be read.
 
@@ -133,6 +152,44 @@ class UnsupportedUrlError(SourcesError):
         super().__init__(f"cannot use {url}: {reason}")
         self.url = url
         self.reason = reason
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FetchedPage:
+    """A page that was already fetched, so it need not be fetched again.
+
+    Attributes:
+        body: The decoded response body.
+        content_type: The `Content-Type` header value, or `None` if absent.
+        final_url: The address of the response that held the body, after any
+            redirects.
+    """
+
+    body: bytes
+    content_type: str | None
+    final_url: str
+
+
+class UnrecognizedPageError(UnsupportedUrlError):
+    """A fetched page is no hiring system, job posting or feed.
+
+    Unlike its parent, this error means the page was read and matched nothing, so
+    a caller can offer to learn a recipe for it.
+
+    Attributes:
+        page: The page that was read, or `None` when it is not kept.
+    """
+
+    def __init__(self, url: str, *, page: FetchedPage | None = None) -> None:
+        """Build the error from the URL of the unrecognized page.
+
+        Args:
+            url: The URL of the page, as the user gave it.
+            page: The page that was read, which a recipe can be learned from
+                without fetching it again.
+        """
+        super().__init__(url, "no hiring system, job posting or feed found")
+        self.page = page
 
 
 class NotPublicAddressError(SourcesError):

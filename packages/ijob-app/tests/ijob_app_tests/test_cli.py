@@ -6,7 +6,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -127,6 +127,12 @@ def _factory(
         )
 
     return client_factory
+
+
+async def _public(host: str, port: int) -> Sequence[str]:
+    """Resolve every host to one public address, so no test asks the network."""
+    del host, port
+    return ["93.184.216.34"]
 
 
 def _home(tmp_path: Path) -> Path:
@@ -318,6 +324,20 @@ def test_http_and_fetch_failures_reported(
     assert result.exit_code == 1
     assert result.stdout == ""
     assert result.stderr.splitlines() == [expected]
+
+
+def test_unreachable_host_reported_as_unreadable_robots_txt(tmp_path: Path) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        msg = "no route to host"
+        raise httpx.ConnectError(msg)
+
+    result = _search(handler, tmp_path, *_TAILSCALE)
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr.splitlines() == [
+        "failed greenhouse:tailscale: robots.txt could not be read: no route to host"
+    ]
 
 
 def test_parse_failure_reported(tmp_path: Path) -> None:
@@ -607,7 +627,7 @@ def _web(
 
 def _run(handler: _Handler, tmp_path: Path, *args: str, db: bool = True) -> Result:
     """Run `ijob <args>` against a `tmp_path` database with the ijob home isolated."""
-    app: typer.Typer = make_app(_factory(handler))
+    app: typer.Typer = make_app(_factory(handler), resolver=_public)
     argv = [*args, "--db", str(tmp_path / "ijob.db")] if db else list(args)
     return CliRunner().invoke(app, argv, env=_env(tmp_path))
 
@@ -924,6 +944,29 @@ def test_sources_add_url_unsupported(tmp_path: Path) -> None:
     assert result.exit_code == 1
     assert "no hiring system, job posting or feed found" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "url", ["foo", "", "https://", "//a.example/x", "ftp://a.example/x"]
+)
+def test_sources_add_url_of_no_web_address_names_the_url(
+    tmp_path: Path, url: str
+) -> None:
+    requests: list[httpx.Request] = []
+
+    result = _run(
+        _web(requests=requests),
+        tmp_path,
+        "sources",
+        "add-url",
+        url,
+        "--company",
+        "Acme",
+    )
+
+    assert result.exit_code == 1
+    assert result.stderr == f"error: cannot use {url}: not an http or https address\n"
+    assert requests == []
 
 
 def test_sources_add_url_robots_blocked(tmp_path: Path) -> None:

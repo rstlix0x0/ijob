@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import itertools
 import json
 import re
 import sqlite3
@@ -30,6 +31,8 @@ from ijob_app.service import (
     CacheUnavailableError,
     ClientFactory,
     InvalidCvError,
+    NoRecipeError,
+    RecipeAlreadyAddedError,
     Service,
     SourceCompanyError,
     UnknownPostingError,
@@ -45,13 +48,24 @@ from ijob_core.model import (
     RemoteScope,
     Score,
     SightingDraft,
+    SourceKind,
     SourceRef,
     Vote,
     parse_source_ref,
 )
 from ijob_core.store import Store
 from ijob_core.traces import SpanRow, TraceStore, UnknownTraceError
-from ijob_sources.errors import SourcesError
+from ijob_sources.errors import (
+    FetchedPage,
+    FetchError,
+    NotPublicAddressError,
+    ReservedHostError,
+    RobotsDisallowedError,
+    SourcesError,
+    UnrecognizedPageError,
+    UnsupportedUrlError,
+)
+from ijob_sources.manual import manual_key
 from ijob_sources.polite_http import ConditionalCache, PoliteClient
 from ijob_sources.public_host import HostResolver
 from ijob_sources.seeds import load_seeds
@@ -62,7 +76,9 @@ from .llm_fakes import (
     FakeAsyncEngine,
     FakeEngines,
     instructions_answer,
+    json_url_answer,
     profile_answer,
+    recipe_answer,
     request_text,
     score_answer,
     verdict_answer,
@@ -784,7 +800,7 @@ def test_add_url_resolves_greenhouse(opener: _Opener) -> None:
     requests: list[httpx.Request] = []
     url = "https://job-boards.greenhouse.io/acme?gh_src=x"
 
-    with opener(_serving(requests=requests)) as service:
+    with opener(_serving(requests=requests), _Resolver()) as service:
         added = asyncio.run(service.add_url(url, "Tailscale"))
         listed = service.sources()
 
@@ -1649,3 +1665,629 @@ def test_describe_recipe_sighting_is_guarded(opener: _Opener, tmp_path: Path) ->
         == "https://jobs.example.org/robots.txt is not a public address"
     )
     assert requests == []
+
+
+_ADDED_URL = _CAREERS
+_ADDED_REF = SourceRef(SourceKind.RECIPE, manual_key(_ADDED_URL))
+_OLD_RECIPE = json.dumps({**_CAREERS_RECIPE, "items": "//li"})
+
+
+class _RecipeOpener(Protocol):
+    def __call__(
+        self,
+        engines: FakeEngines,
+        *,
+        source_recipe: str | None = MADE_UP_CLAUDE,
+        requests: list[httpx.Request] | None = None,
+        resolver: HostResolver | None = None,
+    ) -> AbstractContextManager[Service]: ...
+
+
+@pytest.fixture
+def recipe_opener(
+    tmp_path: Path,
+    home: IjobHome,
+    clock: Callable[[], datetime],
+    client_factory_for: _ClientFactoryBuilder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> _RecipeOpener:
+    """Open a service over a site that serves one careers page and fake engines."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for name in (
+        "LITELLM_MODEL_COST_MAP_URL",
+        "OPENROUTER_API_BASE",
+        "OPENROUTER_BASE_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    cli = write_fake_cli(tmp_path / "bin")
+
+    @contextmanager
+    def open_with(
+        engines: FakeEngines,
+        *,
+        source_recipe: str | None = MADE_UP_CLAUDE,
+        requests: list[httpx.Request] | None = None,
+        resolver: HostResolver | None = None,
+    ) -> Iterator[Service]:
+        write_llm_config(
+            home.config,
+            judge=None,
+            source_recipe=source_recipe,
+            concurrency=1,
+            cli_path=cli.path,
+        )
+        site = _site({_CAREERS: _CAREERS_PAGE}, requests=requests)
+        with open_service(
+            home,
+            tmp_path / "ijob.db",
+            client_factory_for(site),
+            now=clock,
+            llm=LlmOptions(config_path=home.config, engines=engines),
+            resolver=resolver or _Resolver(),
+        ) as service:
+            yield service
+
+    return open_with
+
+
+def _seed_recipe(
+    db: Path, ref: SourceRef = _ADDED_REF, *, company: str = "Example Co"
+) -> None:
+    with Store.open(db) as store:
+        store.set_recipe_source(
+            ref,
+            company=company,
+            target_url=_ADDED_URL,
+            recipe=_OLD_RECIPE,
+            model="old-model",
+            at=_SEEN,
+        )
+
+
+def _stored_recipe(db: Path, ref: SourceRef = _ADDED_REF) -> str | None:
+    with Store.open(db) as store:
+        stored = store.recipe(ref)
+    return None if stored is None else stored.recipe
+
+
+def _learning_engines() -> FakeEngines:
+    return FakeEngines(FakeAsyncEngine([recipe_answer(_CAREERS_RECIPE)]))
+
+
+def test_analyze_url_proposes_without_storing_then_accept_adds_the_source(
+    recipe_opener: _RecipeOpener, tmp_path: Path
+) -> None:
+    engines = _learning_engines()
+
+    with recipe_opener(engines) as service:
+        proposal = asyncio.run(service.analyze_url(_ADDED_URL, "Example Co"))
+        before = service.sources()
+        row = service.accept_recipe(proposal)
+        after = service.sources()
+
+    assert [job.title for job in proposal.jobs] == [
+        "Platform Engineer",
+        "Data Engineer",
+    ]
+    assert proposal.ref == _ADDED_REF
+    assert proposal.model == MADE_UP_CLAUDE
+    assert _ADDED_REF not in [source.ref for source in before]
+    assert (row.ref, row.company, row.target_url) == (
+        _ADDED_REF,
+        "Example Co",
+        _ADDED_URL,
+    )
+    assert row.removed is False
+    assert row in after
+    assert _stored_recipe(tmp_path / "ijob.db") == proposal.recipe
+    assert len(engines.engine.requests) == 1
+
+
+def test_analyze_url_is_guarded_against_private_addresses(
+    recipe_opener: _RecipeOpener,
+) -> None:
+    engines = _learning_engines()
+    requests: list[httpx.Request] = []
+
+    with (
+        recipe_opener(
+            engines,
+            requests=requests,
+            resolver=_Resolver({"jobs.example.org": "127.0.0.1"}),
+        ) as service,
+        pytest.raises(NotPublicAddressError),
+    ):
+        asyncio.run(service.analyze_url(_ADDED_URL, "Example Co"))
+
+    assert requests == []
+    assert engines.engine.requests == []
+
+
+def test_analyze_url_refuses_active_ref(
+    recipe_opener: _RecipeOpener, tmp_path: Path
+) -> None:
+    _seed_recipe(tmp_path / "ijob.db")
+    engines = _learning_engines()
+    requests: list[httpx.Request] = []
+
+    with (
+        recipe_opener(engines, requests=requests) as service,
+        pytest.raises(RecipeAlreadyAddedError) as caught,
+    ):
+        asyncio.run(service.analyze_url(_ADDED_URL, "Example Co"))
+
+    assert str(caught.value) == (
+        f"{_ADDED_REF} is already added; run: ijob sources reanalyze {_ADDED_REF}"
+    )
+    assert isinstance(caught.value, SourcesError)
+    assert requests == []
+    assert engines.engine.requests == []
+
+
+def test_analyze_url_names_the_recipe_after_the_page_it_ended_on(
+    recipe_opener: _RecipeOpener, tmp_path: Path
+) -> None:
+    _seed_recipe(tmp_path / "ijob.db")
+    engines = _learning_engines()
+    page = FetchedPage(
+        body=_CAREERS_PAGE.encode(), content_type="text/html", final_url=_ADDED_URL
+    )
+
+    with (
+        recipe_opener(engines) as service,
+        pytest.raises(RecipeAlreadyAddedError) as caught,
+    ):
+        asyncio.run(
+            service.analyze_url(
+                "http://jobs.example.org/careers", "Example Co", page=page
+            )
+        )
+
+    assert caught.value.ref == _ADDED_REF
+    assert engines.engine.requests == []
+
+
+def test_analyze_url_given_a_page_keeps_the_added_url_as_the_target(
+    recipe_opener: _RecipeOpener,
+) -> None:
+    added = "http://jobs.example.org/careers"
+    page = FetchedPage(
+        body=_CAREERS_PAGE.encode(), content_type="text/html", final_url=_ADDED_URL
+    )
+
+    with recipe_opener(_learning_engines()) as service:
+        proposal = asyncio.run(service.analyze_url(added, "Example Co", page=page))
+
+    assert proposal.ref == _ADDED_REF
+    assert proposal.target_url == added
+
+
+def test_analyze_url_after_removal_restores_on_accept(
+    recipe_opener: _RecipeOpener, tmp_path: Path
+) -> None:
+    db = tmp_path / "ijob.db"
+    _seed_recipe(db)
+
+    with recipe_opener(_learning_engines()) as service:
+        service.remove_source(_ADDED_REF)
+        assert _ADDED_REF not in [source.ref for source in service.sources()]
+        proposal = asyncio.run(service.analyze_url(_ADDED_URL, "Example Co"))
+        row = service.accept_recipe(proposal)
+        restored = [source.ref for source in service.sources()]
+
+    assert row.removed is False
+    assert _ADDED_REF in restored
+    assert _stored_recipe(db) == proposal.recipe
+    assert proposal.recipe != _OLD_RECIPE
+
+
+def test_analyze_url_other_company_refused(
+    recipe_opener: _RecipeOpener, tmp_path: Path
+) -> None:
+    _seed_recipe(tmp_path / "ijob.db", company="Other Co")
+    engines = _learning_engines()
+    requests: list[httpx.Request] = []
+
+    with recipe_opener(engines, requests=requests) as service:
+        service.remove_source(_ADDED_REF)
+        with pytest.raises(SourceCompanyError):
+            asyncio.run(service.analyze_url(_ADDED_URL, "Example Co"))
+
+    assert requests == []
+    assert engines.engine.requests == []
+
+
+def test_reanalysis_keeps_old_recipe_until_accept(
+    recipe_opener: _RecipeOpener, tmp_path: Path
+) -> None:
+    db = tmp_path / "ijob.db"
+    _seed_recipe(db)
+
+    with recipe_opener(_learning_engines()) as service:
+        proposal = asyncio.run(service.analyze_source(_ADDED_REF))
+        during = _stored_recipe(db)
+        row = service.accept_recipe(proposal)
+
+    assert during == _OLD_RECIPE
+    assert _stored_recipe(db) == proposal.recipe
+    assert proposal.recipe != _OLD_RECIPE
+    assert (proposal.company, proposal.target_url) == ("Example Co", _ADDED_URL)
+    assert (row.company, row.target_url) == ("Example Co", _ADDED_URL)
+
+
+def test_reanalysis_unknown_and_removed_ref(
+    recipe_opener: _RecipeOpener, tmp_path: Path
+) -> None:
+    _seed_recipe(tmp_path / "ijob.db")
+    unknown = parse_source_ref("recipe:unknown")
+
+    with recipe_opener(_learning_engines()) as service:
+        service.remove_source(_ADDED_REF)
+        for ref in (unknown, _ADDED_REF):
+            with pytest.raises(UnknownSourceError) as caught:
+                asyncio.run(service.analyze_source(ref))
+            assert caught.value.reason == f"unknown source {ref}"
+
+
+def test_reanalysis_other_kind_has_no_recipe(
+    recipe_opener: _RecipeOpener, tmp_path: Path
+) -> None:
+    ref = parse_source_ref("greenhouse:x")
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.add_source(ref, "Acme")
+    engines = _learning_engines()
+
+    with (
+        recipe_opener(engines) as service,
+        pytest.raises(NoRecipeError) as caught,
+    ):
+        asyncio.run(service.analyze_source(ref))
+
+    assert caught.value.reason == "greenhouse:x has no recipe"
+    assert engines.engine.requests == []
+
+
+def test_reanalysis_of_a_recipe_row_without_address_has_no_recipe(
+    recipe_opener: _RecipeOpener, tmp_path: Path
+) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.set_recipe_source(
+            _ADDED_REF,
+            company="Example Co",
+            target_url=None,
+            recipe=_OLD_RECIPE,
+            model="old-model",
+            at=_SEEN,
+        )
+    engines = _learning_engines()
+
+    with (
+        recipe_opener(engines) as service,
+        pytest.raises(NoRecipeError) as caught,
+    ):
+        asyncio.run(service.analyze_source(_ADDED_REF))
+
+    assert caught.value.reason == f"{_ADDED_REF} has no recipe"
+    assert engines.engine.requests == []
+
+
+@pytest.mark.parametrize("source_recipe", [MADE_UP_CLAUDE, None])
+def test_learns_recipes_follows_config(
+    recipe_opener: _RecipeOpener, source_recipe: str | None
+) -> None:
+    with recipe_opener(FakeEngines(), source_recipe=source_recipe) as service:
+        learns = service.learns_recipes()
+
+    assert learns == (source_recipe is not None)
+
+
+_HELD_BACK_URLS = [
+    pytest.param(
+        "https://www.jobstreet.com/careers", ReservedHostError, id="jobstreet"
+    ),
+    pytest.param("https://www.japan-dev.com/jobs", ReservedHostError, id="japandev"),
+    pytest.param(
+        "http://169.254.169.254/latest/meta-data", NotPublicAddressError, id="metadata"
+    ),
+    pytest.param("http://127.0.0.1:8080/careers", NotPublicAddressError, id="loopback"),
+]
+
+
+@pytest.mark.parametrize(("url", "error"), _HELD_BACK_URLS)
+def test_add_url_guards_the_very_first_request(
+    opener: _Opener, url: str, error: type[SourcesError]
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+
+    with opener(handler, _Resolver()) as service, pytest.raises(error):
+        asyncio.run(service.add_url(url, "Example Co"))
+
+    assert seen == []
+
+
+def test_add_url_checks_a_hiring_board_through_the_guard(opener: _Opener) -> None:
+    resolver = _Resolver({"boards-api.greenhouse.io": "10.0.0.7"})
+    requests: list[httpx.Request] = []
+
+    with opener(_serving(requests=requests), resolver) as service:
+        with pytest.raises(NotPublicAddressError):
+            asyncio.run(
+                service.add_url("https://job-boards.greenhouse.io/acme", "Tailscale")
+            )
+        sources = [row.ref for row in service.sources()]
+
+    assert requests == []
+    assert _ACME not in sources
+
+
+_JAZZHR = _FIXTURES / "jsonld" / "jazzhr.html"
+
+
+def _redirecting_site(
+    moves: Mapping[str, str], *, served: list[tuple[str, int]] | None = None
+) -> _Handler:
+    """Redirect each URL in `moves` and serve the job page anywhere else.
+
+    Every answer for a page is logged as `(url, status)` in `served`.
+    """
+    body = _JAZZHR.read_bytes()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+        url = str(request.url)
+        target = moves.get(url)
+        response = (
+            httpx.Response(301, headers={"Location": target})
+            if target is not None
+            else httpx.Response(
+                200, content=body, headers={"Content-Type": "text/html"}
+            )
+        )
+        if served is not None:
+            served.append((url, response.status_code))
+        return response
+
+    return handler
+
+
+@pytest.mark.parametrize(
+    ("given", "final"),
+    [
+        pytest.param(
+            "https://careers.example.org/jobs/release-engineer",
+            "https://careers.example.org/jobs/release-engineer/",
+            id="trailing-slash",
+        ),
+        pytest.param(
+            "http://careers.example.org/jobs/release-engineer",
+            "https://careers.example.org/jobs/release-engineer",
+            id="https-upgrade",
+        ),
+    ],
+)
+def test_redirected_source_is_stored_at_its_final_address_and_refreshes(
+    opener: _Opener, given: str, final: str
+) -> None:
+    served: list[tuple[str, int]] = []
+    site = _redirecting_site({given: final}, served=served)
+
+    with opener(site, _Resolver()) as service:
+        row = asyncio.run(service.add_url(given, "Eclipse Foundation"))
+        served.clear()
+        report = asyncio.run(service.refresh([row.ref]))
+
+    assert row.ref == SourceRef(SourceKind.JOBPOSTING, manual_key(final))
+    assert row.target_url == final
+    assert report.fetched == [row.ref]
+    assert report.failures == []
+    assert served == [(final, 200)]
+
+
+def test_adding_a_url_again_in_its_given_form_finds_the_same_source(
+    opener: _Opener,
+) -> None:
+    given = "https://Careers.Example.org/jobs/release-engineer"
+
+    with opener(_redirecting_site({}), _Resolver()) as service:
+        first = asyncio.run(service.add_url(given, "Eclipse Foundation"))
+        again = asyncio.run(service.add_url(given, "Eclipse Foundation"))
+        rows = [row for row in service.sources() if row.ref == first.ref]
+
+    assert first.ref == SourceRef(SourceKind.JOBPOSTING, manual_key(given))
+    assert first.target_url == given
+    assert again == first
+    assert rows == [first]
+
+
+def test_redirect_to_a_hiring_board_adds_that_board(opener: _Opener) -> None:
+    given = "https://careers.example.org/join"
+    board = "https://job-boards.greenhouse.io/acme"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if (
+            request.url.path == "/robots.txt"
+            or request.url.host == "boards-api.greenhouse.io"
+        ):
+            return _serving()(request)
+        if request.url.host == "careers.example.org":
+            return httpx.Response(302, headers={"Location": board})
+        return httpx.Response(200, text="<html>board</html>")
+
+    with opener(handler, _Resolver()) as service:
+        row = asyncio.run(service.add_url(given, "Tailscale"))
+
+    assert row.ref == _ACME
+    assert row.target_url is None
+
+
+def test_redirect_to_a_private_host_is_refused_before_the_hop_is_sent(
+    opener: _Opener,
+) -> None:
+    given = "https://careers.example.org/jobs/release-engineer"
+    served: list[tuple[str, int]] = []
+    seen: list[str] = []
+    inner = _redirecting_site({given: "http://169.254.169.254/latest"}, served=served)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return inner(request)
+
+    with opener(handler, _Resolver()) as service, pytest.raises(NotPublicAddressError):
+        asyncio.run(service.add_url(given, "Eclipse Foundation"))
+
+    assert served == [(given, 301)]
+    assert not any("169.254.169.254" in url for url in seen)
+
+
+def test_add_url_malformed_url_is_unsupported_and_sends_nothing(
+    opener: _Opener,
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200)
+
+    with opener(handler, _Resolver()) as service, pytest.raises(UnsupportedUrlError):
+        asyncio.run(service.add_url("http://[bad/careers", "Example Co"))
+
+    assert seen == []
+
+
+def test_refresh_of_an_unreachable_host_reports_a_fetch_error(
+    opener: _Opener,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        msg = "name or service not known"
+        raise httpx.ConnectError(msg)
+
+    with opener(handler, _Resolver()) as service:
+        report = asyncio.run(service.refresh([_TAILSCALE]))
+
+    [failure] = report.failures
+    assert isinstance(failure.error, FetchError)
+    assert not isinstance(failure.error, RobotsDisallowedError)
+    assert failure.error.reason == (
+        "robots.txt could not be read: name or service not known"
+    )
+    assert report.fetched == []
+
+
+class _Timeline:
+    """A clock that a sleep advances, and the time each request reached the site."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.requests: list[tuple[str, float]] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+_JS_PAGE = (
+    "<html><body><div id='app'>Loading</div><a href='/api/jobs/'>API</a></body></html>"
+)
+_JSON_RECIPE: dict[str, object] = {
+    "version": 1,
+    "format": "json",
+    "url": "https://jobs.example.org/api/jobs/",
+    "items": "jobs",
+    "fields": {"title": "title", "url": "link"},
+}
+
+
+def test_add_url_and_the_json_analysis_that_follows_pace_one_host_together(
+    tmp_path: Path,
+    home: IjobHome,
+    clock: Callable[[], datetime],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    timeline = _Timeline()
+    cli = write_fake_cli(tmp_path / "bin")
+    write_llm_config(
+        home.config,
+        judge=None,
+        source_recipe=MADE_UP_CLAUDE,
+        concurrency=1,
+        cli_path=cli.path,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        timeline.requests.append((request.url.path, timeline.now))
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+        if request.url.path == "/api/jobs/":
+            body = json.dumps({"jobs": [{"title": "Rust Engineer", "link": "/j/1"}]})
+            return httpx.Response(
+                200, text=body, headers={"Content-Type": "application/json"}
+            )
+        return httpx.Response(200, text=_JS_PAGE, headers={"Content-Type": "text/html"})
+
+    def factory(cache: ConditionalCache | None) -> PoliteClient:
+        return PoliteClient(
+            transport=httpx.MockTransport(handler),
+            clock=timeline.clock,
+            sleep=timeline.sleep,
+            cache=cache,
+        )
+
+    engines = FakeEngines(
+        FakeAsyncEngine([json_url_answer("/api/jobs/"), recipe_answer(_JSON_RECIPE)])
+    )
+    url = "https://jobs.example.org/careers"
+    with open_service(
+        home,
+        tmp_path / "ijob.db",
+        factory,
+        now=clock,
+        llm=LlmOptions(config_path=home.config, engines=engines),
+        resolver=_Resolver(),
+    ) as service:
+        with pytest.raises(UnrecognizedPageError) as unrecognized:
+            asyncio.run(service.add_url(url, "Example Co"))
+        proposal = asyncio.run(
+            service.analyze_url(url, "Example Co", page=unrecognized.value.page)
+        )
+
+    assert proposal.recipe_url == "https://jobs.example.org/api/jobs/"
+    paths = [path for path, _ in timeline.requests]
+    assert paths.count("/careers") == 1
+    assert paths[-1] == "/api/jobs/"
+    starts = [at for _, at in timeline.requests]
+    assert all(later - earlier >= 1.0 for earlier, later in itertools.pairwise(starts))
+
+
+def test_analyze_url_given_the_page_does_not_fetch_it_again(
+    recipe_opener: _RecipeOpener,
+) -> None:
+    engines = _learning_engines()
+    requests: list[httpx.Request] = []
+    page = FetchedPage(
+        body=_CAREERS_PAGE.encode(),
+        content_type="text/html",
+        final_url="https://jobs.example.org/careers/",
+    )
+
+    with recipe_opener(engines, requests=requests) as service:
+        proposal = asyncio.run(
+            service.analyze_url(
+                "https://jobs.example.org/careers", "Example Co", page=page
+            )
+        )
+
+    assert requests == []
+    assert [job.title for job in proposal.jobs] == [
+        "Platform Engineer",
+        "Data Engineer",
+    ]
+    assert proposal.target_url == "https://jobs.example.org/careers"
+    assert len(engines.engine.requests) == 1

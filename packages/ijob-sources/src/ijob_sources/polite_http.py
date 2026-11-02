@@ -5,11 +5,15 @@ strictest of a minimum interval, the host's robots.txt `Crawl-delay` and a
 per-host override, and maps failures to the errors of `ijob_sources.errors`. It
 owns the `httpx.AsyncClient` and the `RobotsPolicy` that guards it. The
 monotonic clock, the wall clock and the sleep are injected, so tests need no
-real time. Given a `ConditionalCache`, it can revalidate a stored response with
+real time. Clients that read the same hosts can take turns by sharing one
+`HostPacing`. Given a `ConditionalCache`, it can revalidate a stored response with
 `If-None-Match` and `If-Modified-Since` and replay it when the server answers
 `304 Not Modified`. A `RequestGuard` attached with `guard_requests` sees, and can
 refuse, every request the client sends, and `get` can follow redirects one
-guarded, paced hop at a time.
+guarded, paced hop at a time. `get` can also stop reading a response once it
+passes a size limit. A robots.txt is read the same way, hop by hop through its
+redirects, and only its first 500 KiB. One that cannot be fetched is an error,
+not a refusal: `get` raises `FetchError` and requests nothing else.
 """
 
 import asyncio
@@ -19,6 +23,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from http.cookiejar import DefaultCookiePolicy
 from types import TracebackType
 from typing import Final, Protocol, Self
 from urllib.parse import urlsplit
@@ -28,20 +33,31 @@ import httpx
 from ijob_sources.errors import (
     FetchError,
     HttpStatusError,
+    ResponseTooLargeError,
     RobotsDisallowedError,
     SourceNotFoundError,
 )
-from ijob_sources.robots import RobotsPolicy
+from ijob_sources.robots import PARSE_LIMIT_BYTES, RobotsPolicy
 
 USER_AGENT: Final = (
     f"ijob/{importlib.metadata.version('ijob-sources')}"
     " (+https://github.com/rstlix0x0/ijob)"
 )
 
+MAX_BODY_BYTES: Final = 5 * 1024 * 1024
+"""The most decoded bytes the callers that read a page ask `PoliteClient.get` for.
+
+`get` itself reads without a limit unless it is given `max_bytes`.
+"""
+
+TOO_LARGE_REASON: Final = f"the page is larger than {MAX_BODY_BYTES // 2**20} MiB"
+"""Why a page that passed `MAX_BODY_BYTES` is refused."""
+
 _TIMEOUT_SECONDS: Final = 30.0
 _MAX_REDIRECTS: Final = 5
 _MAX_ATTEMPTS: Final = 3
 _MAX_RETRY_WAIT_SECONDS: Final = 60.0
+_DECODED_BODY_HEADERS: Final = frozenset({b"content-encoding", b"content-length"})
 _REDIRECT_STATUSES: Final = frozenset(
     {
         httpx.codes.MOVED_PERMANENTLY,
@@ -106,16 +122,64 @@ class ConditionalCache(Protocol):
         ...
 
 
+class HostPacing:
+    """When the latest request to each host started, for clients that share it.
+
+    It holds plain state and no lock, so it is safe across event loops; the
+    clients sharing it must run on one loop at a time, as an `asyncio.Lock`
+    they each hold per host is bound to the loop.
+    """
+
+    def __init__(self) -> None:
+        """Build a pacing with no request recorded."""
+        self._started: dict[str, float] = {}
+
+    def last_start(self, host: str) -> float | None:
+        """Return when the latest request to a host started, or `None` if none did.
+
+        Args:
+            host: The lowercase netloc of the requests.
+        """
+        return self._started.get(host)
+
+    def record(self, host: str, started: float) -> None:
+        """Note that a request to a host starts at a time, keeping the later time.
+
+        Args:
+            host: The lowercase netloc of the request.
+            started: Monotonic seconds. A reserved start in the future is
+                kept when an earlier time is recorded after it.
+        """
+        self._started[host] = max(started, self._started.get(host, started))
+
+    def withdraw(self, host: str, *, reserved: float, previous: float) -> None:
+        """Take back a reserved start, unless a later one was made after it.
+
+        Args:
+            host: The lowercase netloc of the request.
+            reserved: The start that was recorded for the request.
+            previous: The latest start that was recorded before it. It is
+                restored only when `reserved` is still the latest.
+        """
+        if self._started.get(host) == reserved:
+            self._started[host] = previous
+
+
 class PoliteClient:
     """An HTTP client that is paced, honest about who it is and obeys robots.txt.
 
     Requests to one host start at least `min_interval` apart, or further if
     that host's robots.txt sets a larger `Crawl-delay` or `host_intervals`
-    names a larger interval for it.
+    names a larger interval for it. Clients given the same `HostPacing` with
+    `share_pacing` keep that spacing between each other's requests too.
 
     A guard attached with `guard_requests` sees every request the client
     sends, robots.txt requests and redirect hops included, before it reaches
-    the network.
+    the network. Only the first 500 KiB of a robots.txt are read, as
+    RFC 9309 parses no more.
+
+    It keeps no cookies: a `Set-Cookie` answer is ignored and no request carries
+    a `Cookie` header.
 
     Use it as an async context manager so the underlying connection pool is
     closed.
@@ -165,8 +229,9 @@ class PoliteClient:
             follow_redirects=False,
             max_redirects=_MAX_REDIRECTS,
         )
+        self._http.cookies.jar.set_policy(DefaultCookiePolicy(allowed_domains=[]))
         self._host_locks: dict[str, asyncio.Lock] = {}
-        self._last_start: dict[str, float] = {}
+        self._pacing = HostPacing()
         self._robots = RobotsPolicy(self._send_following_redirects, clock)
 
     async def __aenter__(self) -> Self:
@@ -187,13 +252,25 @@ class PoliteClient:
 
         Guards run in the order they were attached. An error a guard raises
         reaches the caller of `get` unchanged, and the request is not sent.
-        A guard that raises `FetchError` while robots.txt is being fetched is
-        read as a robots.txt that could not be fetched.
+        A guard that raises `FetchError` while robots.txt is being fetched
+        reaches the caller as a `FetchError` for the page, saying that
+        robots.txt could not be read.
 
         Args:
             guard: The hook to await with each `httpx.Request`.
         """
         self._http.event_hooks["request"].append(guard)
+
+    def share_pacing(self, pacing: HostPacing) -> None:
+        """Pace requests against a record that other clients also write to.
+
+        Call it before the first request. Requests this client already sent
+        are forgotten, and its own wait is counted from the shared record.
+
+        Args:
+            pacing: The record of request starts to share.
+        """
+        self._pacing = pacing
 
     async def get(
         self,
@@ -201,11 +278,15 @@ class PoliteClient:
         *,
         conditional: bool = False,
         follow_redirects: bool = False,
+        max_bytes: int | None = None,
     ) -> httpx.Response:
         """Fetch a source URL politely and return its 2xx response.
 
         Checks robots.txt, sends one paced request, and on 429 or 503 waits
-        for `Retry-After` and resends, at most three attempts in all.
+        for `Retry-After` and resends, at most three attempts in all. A
+        robots.txt that cannot be fetched is an error, not a refusal, and
+        nothing else is requested; a 429, a 5xx or an unparseable robots.txt
+        does disallow the URL.
 
         A 3xx answer is an error unless `follow_redirects` is set. Then a 301,
         302, 303, 307 or 308 answer with a `Location` header is followed, at
@@ -219,12 +300,22 @@ class PoliteClient:
         the stored body, and a 2xx answer carrying `ETag` or `Last-Modified`
         is stored.
 
+        With `max_bytes`, each response is streamed and its decoded bytes are
+        counted; a 2xx body that passes the limit stops the read, closes the
+        response and is an error. A response with any other status is cut at
+        the limit instead, so its status still decides the error. The response
+        returned is rebuilt from the bytes read: `Content-Encoding` is dropped
+        because the body is already decoded, and `Content-Length` is the
+        decoded length.
+
         Args:
             url: The absolute URL to fetch.
             conditional: Whether to revalidate against and update the cache.
                 It has no effect on a client built without a cache.
             follow_redirects: Whether to follow redirects by hand. It cannot
                 be combined with `conditional`.
+            max_bytes: The most decoded body bytes to read from any one
+                response, or `None` for no limit.
 
         Returns:
             The response, whose status is 2xx. When redirects were followed,
@@ -234,6 +325,7 @@ class PoliteClient:
             ValueError: `conditional` and `follow_redirects` are both set.
             RobotsDisallowedError: robots.txt does not allow the URL, or the
                 URL of a hop.
+            ResponseTooLargeError: A 2xx response body passed `max_bytes`.
             SourceNotFoundError: The server answered 404.
             HttpStatusError: The server answered any other non-2xx status,
                 including a redirect when `follow_redirects` is unset, a
@@ -241,8 +333,9 @@ class PoliteClient:
                 entry, or kept answering 429 or 503, or asked for a wait
                 above 60 seconds.
             FetchError: The request failed before a usable response came
-                back, a `Location` header is not a usable URL, or the sixth
-                redirect arrived.
+                back, a `Location` header is not a usable URL, the sixth
+                redirect arrived, or robots.txt could not be read (the
+                reason starts `robots.txt could not be read`).
 
         Any error a request guard raises, other than the `FetchError` case
         `guard_requests` describes, and any error the cache raises, such as
@@ -253,7 +346,9 @@ class PoliteClient:
             raise ValueError(msg)
         redirects = 0
         while True:
-            response = await self._round(url, conditional=conditional)
+            response = await self._round(
+                url, conditional=conditional, max_bytes=max_bytes
+            )
             if not (follow_redirects and response.status_code in _REDIRECT_STATUSES):
                 break
             location = response.headers.get("Location")
@@ -269,7 +364,9 @@ class PoliteClient:
             raise SourceNotFoundError(url)
         raise HttpStatusError(url, response.status_code)
 
-    async def _round(self, url: str, *, conditional: bool) -> httpx.Response:
+    async def _round(
+        self, url: str, *, conditional: bool, max_bytes: int | None
+    ) -> httpx.Response:
         """Run robots.txt, pacing and the 429 or 503 retry for one URL.
 
         Returns:
@@ -278,7 +375,9 @@ class PoliteClient:
 
         Raises:
             RobotsDisallowedError: robots.txt does not allow the URL.
-            FetchError: The request failed before a response came back.
+            FetchError: The request failed before a response came back, or
+                robots.txt could not be read.
+            ResponseTooLargeError: A 2xx response body passed `max_bytes`.
         """
         if not await self._robots.allowed(url):
             raise RobotsDisallowedError(url)
@@ -287,7 +386,9 @@ class PoliteClient:
         headers = self._validators(entry)
         attempt = 1
         while True:
-            response = await self._send(url, follow_redirects=False, headers=headers)
+            response = await self._send(
+                url, follow_redirects=False, headers=headers, max_bytes=max_bytes
+            )
             if response.status_code not in _RETRY_STATUSES or attempt == _MAX_ATTEMPTS:
                 break
             wait = self._retry_wait(response)
@@ -341,8 +442,34 @@ class PoliteClient:
         return max((date - self._now()).total_seconds(), 0.0)
 
     async def _send_following_redirects(self, url: str) -> httpx.Response:
-        """Send a paced request that follows redirects; used for robots.txt."""
-        return await self._send(url, follow_redirects=True)
+        """Send paced, guarded requests along the redirects of a robots.txt.
+
+        Each hop is a whole request of its own, read no further than
+        `PARSE_LIMIT_BYTES`, redirect bodies included, with a longer body cut
+        there rather than refused. At most five redirects are followed.
+
+        Raises:
+            FetchError: A request failed, a `Location` header is not a usable
+                URL, or the sixth redirect arrived.
+        """
+        redirects = 0
+        while True:
+            response = await self._send(
+                url,
+                follow_redirects=False,
+                max_bytes=PARSE_LIMIT_BYTES,
+                keep_prefix=True,
+            )
+            location = response.headers.get("Location")
+            if response.status_code not in _REDIRECT_STATUSES or location is None:
+                return response
+            if redirects == _MAX_REDIRECTS:
+                raise FetchError(url, "more than five redirects")
+            try:
+                url = str(response.request.url.join(location))
+            except httpx.InvalidURL as error:
+                raise FetchError(url, str(error) or type(error).__name__) from error
+            redirects += 1
 
     async def _send(
         self,
@@ -350,32 +477,44 @@ class PoliteClient:
         *,
         follow_redirects: bool,
         headers: Mapping[str, str] | None = None,
+        max_bytes: int | None = None,
+        keep_prefix: bool = False,
     ) -> httpx.Response:
         """Send one paced GET and return the response with its status unmapped.
 
         Waits until the host's interval has passed since the start of the
-        previous request to the same host. That interval is the largest of
-        `min_interval`, the `Crawl-delay` robots.txt sets for the URL (none
-        while the origin's robots.txt is not yet cached) and the host's
-        `host_intervals` entry.
+        previous request to the same host, whichever client sent it when
+        clients share a `HostPacing`. When a wait is due, the start it ends at
+        is recorded before sleeping, so a client that arrives meanwhile waits
+        for it; if the sleep is cancelled, that record is withdrawn. The
+        interval is the largest of `min_interval`, the `Crawl-delay` robots.txt
+        sets for the URL (none while the origin's robots.txt is not yet cached)
+        and the host's `host_intervals` entry.
 
         Args:
             url: The absolute URL to request.
             follow_redirects: Whether to follow redirects, up to five.
             headers: Extra request headers sent with this request only.
+            max_bytes: The most decoded body bytes to read, or `None` for no
+                limit. With a limit the body is streamed and the response
+                returned is rebuilt from the bytes read.
+            keep_prefix: Whether a body that reaches `max_bytes` is cut there
+                and returned instead of refused, even on a 2xx answer.
 
         Returns:
             The response, whatever its status.
 
         Raises:
+            ResponseTooLargeError: A 2xx body passed `max_bytes`, and
+                `keep_prefix` is unset.
             FetchError: The request failed before a usable response came back:
-                a transport failure, a body that could not be decoded, a host
-                name that is not valid IDNA, a `Location` header that is not a
-                usable URL, or more than five redirects.
+                a transport failure, a body that could not be decoded or
+                read, a host name that is not valid IDNA, a `Location` header
+                that is not a usable URL, or more than five redirects.
         """
         host = urlsplit(url).netloc.lower()
         async with self._host_locks.setdefault(host, asyncio.Lock()):
-            last_start = self._last_start.get(host)
+            last_start = self._pacing.last_start(host)
             if last_start is not None:
                 interval = max(
                     self._min_interval,
@@ -384,11 +523,86 @@ class PoliteClient:
                 )
                 wait = interval - (self._clock() - last_start)
                 if wait > 0:
-                    await self._sleep(wait)
-            self._last_start[host] = self._clock()
+                    reserved = self._clock() + wait
+                    self._pacing.record(host, reserved)
+                    try:
+                        await self._sleep(wait)
+                    except asyncio.CancelledError:
+                        self._pacing.withdraw(
+                            host, reserved=reserved, previous=last_start
+                        )
+                        raise
+            self._pacing.record(host, self._clock())
             try:
-                return await self._http.get(
-                    url, headers=headers, follow_redirects=follow_redirects
+                if max_bytes is None:
+                    return await self._http.get(
+                        url, headers=headers, follow_redirects=follow_redirects
+                    )
+                return await self._get_limited(
+                    url,
+                    headers=headers,
+                    follow_redirects=follow_redirects,
+                    max_bytes=max_bytes,
+                    keep_prefix=keep_prefix,
                 )
             except (httpx.RequestError, httpx.InvalidURL, UnicodeError) as error:
                 raise FetchError(url, str(error) or type(error).__name__) from error
+
+    async def _get_limited(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None,
+        follow_redirects: bool,
+        max_bytes: int,
+        keep_prefix: bool,
+    ) -> httpx.Response:
+        """Stream one GET and stop reading once the decoded body reaches the limit.
+
+        A body of a non-2xx response, or of any response when `keep_prefix` is
+        set, is cut at the limit and the read stops there. Any other body that
+        passes the limit is an error.
+
+        Returns:
+            A response with the status, request and body read, whose headers
+            are the original raw ones less `Content-Encoding` and
+            `Content-Length`: the body is the decoded bytes, which `httpx`
+            must not decode a second time, and it gives the rebuilt response a
+            `Content-Length` of its own.
+
+        Raises:
+            ResponseTooLargeError: The decoded body of a 2xx response passed
+                `max_bytes` and `keep_prefix` is unset; the response is closed
+                with the rest of it unread.
+            httpx.RequestError: The request or the body failed; the caller
+                maps it.
+        """
+        request = self._http.build_request("GET", url, headers=headers)
+        response = await self._http.send(
+            request, stream=True, follow_redirects=follow_redirects
+        )
+        try:
+            cut = keep_prefix or not httpx.codes.is_success(response.status_code)
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in response.aiter_bytes():
+                room = max_bytes - size
+                if len(chunk) > room and not cut:
+                    raise ResponseTooLargeError(url, max_bytes)
+                chunks.append(chunk[:room])
+                size += len(chunks[-1])
+                if cut and size == max_bytes:
+                    break
+        finally:
+            await response.aclose()
+        kept = [
+            (name, value)
+            for name, value in response.headers.raw
+            if name.lower() not in _DECODED_BODY_HEADERS
+        ]
+        return httpx.Response(
+            response.status_code,
+            headers=kept,
+            content=b"".join(chunks),
+            request=response.request,
+        )

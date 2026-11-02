@@ -49,6 +49,24 @@ type Opener = Callable[[Handler], AbstractContextManager[Service]]
 type LlmOpener = Callable[[FakeEngines], AbstractContextManager[Service]]
 
 
+class RecipeOpener(Protocol):
+    """Open a service that can learn recipes, over a handler and fake engines."""
+
+    def __call__(
+        self,
+        handler: Handler,
+        engines: FakeEngines,
+        *,
+        model: bool = True,
+        max_cost_usd: float = ...,
+    ) -> AbstractContextManager[Service]:
+        """Open a service.
+
+        `model` says whether `[models].source_recipe` is set, and `max_cost_usd`
+        is the spending cap, which defaults to `COST_CAP`.
+        """
+
+
 class Seeder(Protocol):
     """Record drafts as a source's latest fetch."""
 
@@ -63,6 +81,12 @@ class InstructionStorer(Protocol):
 
     def __call__(self, *, rules: tuple[str, ...] = ..., filters: str = ...) -> None:
         """Store instructions holding `rules` and the `filters_json` text."""
+
+
+async def public_resolver(host: str, port: int) -> Sequence[str]:
+    """Resolve every host to one public address, so no test asks the network."""
+    del host, port
+    return ["93.184.216.34"]
 
 
 SEEN = datetime(2026, 10, 31, 12, 0, tzinfo=UTC)
@@ -174,7 +198,9 @@ def opener(
 
     @contextmanager
     def open_with(handler: Handler) -> Iterator[Service]:
-        with open_service(home, db, client_factory_for(handler), now=clock) as service:
+        with open_service(
+            home, db, client_factory_for(handler), now=clock, resolver=public_resolver
+        ) as service:
             yield service
 
     return open_with
@@ -219,6 +245,60 @@ def llm_opener(
             client_factory_for(lambda _request: httpx.Response(404)),
             now=clock,
             llm=options,
+            resolver=public_resolver,
+        ) as service:
+            yield service
+
+    return open_with
+
+
+@pytest.fixture
+def recipe_opener(
+    db: Path,
+    home: IjobHome,
+    clock: Callable[[], datetime],
+    client_factory_for: ClientFactoryBuilder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> RecipeOpener:
+    """Open a service whose recipe model is answered by the given fake engines.
+
+    The config names a made-up recipe model, a cap of `COST_CAP` dollars and one
+    call at a time, and points at a fake `claude` executable.
+    """
+    tmp_path = db.parent
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for name in (
+        "LITELLM_MODEL_COST_MAP_URL",
+        "OPENROUTER_API_BASE",
+        "OPENROUTER_BASE_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    cli = write_fake_cli(tmp_path / "bin")
+
+    @contextmanager
+    def open_with(
+        handler: Handler,
+        engines: FakeEngines,
+        *,
+        model: bool = True,
+        max_cost_usd: float = COST_CAP,
+    ) -> Iterator[Service]:
+        write_llm_config(
+            home.config,
+            judge=None,
+            source_recipe=MADE_UP_CLAUDE if model else None,
+            max_cost_usd=max_cost_usd,
+            concurrency=1,
+            cli_path=cli.path,
+        )
+        options = LlmOptions(config_path=home.config, engines=engines)
+        with open_service(
+            home,
+            db,
+            client_factory_for(handler),
+            now=clock,
+            llm=options,
+            resolver=public_resolver,
         ) as service:
             yield service
 

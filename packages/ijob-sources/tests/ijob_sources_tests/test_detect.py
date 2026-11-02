@@ -1,8 +1,8 @@
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from importlib.resources import files
-from typing import Any
+from typing import Any, override
 
 import httpx
 import pytest
@@ -10,9 +10,13 @@ from ijob_core.model import SourceKind, SourceRef, parse_source_key
 from ijob_sources.collect import Source, SourceBatch
 from ijob_sources.detect import Resolution, resolve_url, verify_new_source
 from ijob_sources.errors import (
+    FetchError,
+    HttpStatusError,
     IdentityMismatchError,
     ParseError,
     RobotsDisallowedError,
+    SourceNotFoundError,
+    UnrecognizedPageError,
     UnsupportedUrlError,
 )
 from ijob_sources.greenhouse import GreenhouseBoard
@@ -297,6 +301,32 @@ def test_unsupported_rejected() -> None:
     assert caught.value.reason == "no hiring system, job posting or feed found"
 
 
+def test_unrecognized_page_is_distinct() -> None:
+    server = _Server(_serving(b"<html><body><p>Hello</p></body></html>"))
+
+    with pytest.raises(UnrecognizedPageError) as caught:
+        _resolve(_PAGE_URL, server)
+
+    assert isinstance(caught.value, UnsupportedUrlError)
+    assert caught.value.url == _PAGE_URL
+    assert str(caught.value) == (
+        f"cannot use {_PAGE_URL}: no hiring system, job posting or feed found"
+    )
+
+
+def test_empty_feed_is_not_unrecognized() -> None:
+    body = (
+        b'<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>'
+        b"</channel></rss>"
+    )
+    server = _Server(_serving(body))
+
+    with pytest.raises(UnsupportedUrlError) as caught:
+        _resolve(_FEED_URL, server)
+
+    assert not isinstance(caught.value, UnrecognizedPageError)
+
+
 def test_robots_applies() -> None:
     server = _Server(
         _serving(_fixture("jsonld", "jazzhr.html")),
@@ -346,3 +376,295 @@ def test_verify_parse_error_propagates() -> None:
 
     with pytest.raises(ParseError):
         _verify(source, server)
+
+
+def _redirecting(
+    moves: dict[str, str], body: bytes, content_type: str = "text/html"
+) -> _Handler:
+    """Redirect each URL in `moves` to its target; any other URL answers `body`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        target = moves.get(str(request.url))
+        if target is not None:
+            return httpx.Response(301, headers={"Location": target})
+        return httpx.Response(200, content=body, headers={"Content-Type": content_type})
+
+    return handler
+
+
+@pytest.mark.parametrize(
+    ("given", "final"),
+    [
+        (
+            "https://careers.example.test/careers",
+            "https://careers.example.test/careers/",
+        ),
+        (
+            "http://careers.example.test/careers/",
+            "https://careers.example.test/careers/",
+        ),
+    ],
+    ids=["trailing-slash", "https-upgrade"],
+)
+def test_jobposting_redirect_is_followed_and_the_final_address_kept(
+    given: str, final: str
+) -> None:
+    server = _Server(_redirecting({given: final}, _fixture("jsonld", "jazzhr.html")))
+
+    resolution = _resolve(given, server, company="Eclipse Foundation")
+
+    assert resolution.ref == SourceRef(SourceKind.JOBPOSTING, manual_key(final))
+    assert resolution.target_url == final
+    assert resolution.batch is not None
+    assert resolution.batch.drafts[0].url != given
+    assert [str(request.url) for request in server.page_requests] == [given, final]
+
+
+def test_feed_redirect_keeps_the_final_address() -> None:
+    final = "https://feed.example.test/rss.xml"
+    given = "http://feed.example.test/rss"
+    server = _Server(
+        _redirecting(
+            {given: final}, _fixture("rss", "golang.xml"), "application/rss+xml"
+        )
+    )
+
+    resolution = _resolve(given, server, company="Golang Projects")
+
+    assert resolution.ref == SourceRef(SourceKind.FEED, manual_key(final))
+    assert resolution.target_url == final
+    assert resolution.batch is not None
+
+
+def test_redirect_to_a_hiring_board_resolves_to_that_board() -> None:
+    given = "https://careers.example.test/join"
+    board = "https://job-boards.greenhouse.io/tailscale?gh_src=x"
+    server = _Server(_redirecting({given: board}, b"<html></html>"))
+
+    resolution = _resolve(given, server, company="Tailscale")
+
+    assert resolution == Resolution(
+        ref=_ref(SourceKind.GREENHOUSE, "tailscale"), target_url=None, batch=None
+    )
+
+
+def test_unrecognized_page_after_a_redirect_keeps_the_url_given_and_the_page() -> None:
+    given = "http://careers.example.test/team"
+    final = "https://careers.example.test/team/"
+    body = b"<html><body><p>Hello</p></body></html>"
+    server = _Server(_redirecting({given: final}, body))
+
+    with pytest.raises(UnrecognizedPageError) as caught:
+        _resolve(given, server)
+
+    assert caught.value.url == given
+    assert str(caught.value) == (
+        f"cannot use {given}: no hiring system, job posting or feed found"
+    )
+    page = caught.value.page
+    assert page is not None
+    assert page.body == body
+    assert page.content_type == "text/html"
+    assert page.final_url == final
+
+
+def test_unrecognized_page_without_a_redirect_keeps_the_page() -> None:
+    server = _Server(_redirecting({}, b"<p>Hello</p>", "text/html; charset=utf-8"))
+
+    with pytest.raises(UnrecognizedPageError) as caught:
+        _resolve(_PAGE_URL, server)
+
+    page = caught.value.page
+    assert page is not None
+    assert page.final_url == _PAGE_URL
+    assert page.content_type == "text/html; charset=utf-8"
+
+
+_BOARD_HOP = "https://jobs.lever.co/acme"
+
+
+def _redirecting_to_a_board_that_answers(given: str, status: int) -> _Handler:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == given:
+            return httpx.Response(301, headers={"Location": _BOARD_HOP})
+        return httpx.Response(status)
+
+    return handler
+
+
+@pytest.mark.parametrize("status", [403, 404])
+def test_redirect_to_a_board_whose_page_cannot_be_read_still_names_the_board(
+    status: int,
+) -> None:
+    given = "https://careers.example.test/join"
+    server = _Server(_redirecting_to_a_board_that_answers(given, status))
+
+    resolution = _resolve(given, server, company="Acme")
+
+    assert resolution == Resolution(
+        ref=_ref(SourceKind.LEVER, "acme"), target_url=None, batch=None
+    )
+    assert [str(request.url) for request in server.page_requests] == [given, _BOARD_HOP]
+
+
+def test_redirect_to_a_board_that_robots_txt_disallows_still_names_the_board() -> None:
+    given = "https://careers.example.test/join"
+    server = _Server(
+        _redirecting({given: _BOARD_HOP}, b""),
+        robots="User-agent: *\nDisallow: /acme\n",
+    )
+
+    resolution = _resolve(given, server, company="Acme")
+
+    assert resolution.ref == _ref(SourceKind.LEVER, "acme")
+    assert [str(request.url) for request in server.page_requests] == [given]
+
+
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [(403, HttpStatusError), (404, SourceNotFoundError)],
+)
+def test_redirect_to_a_page_that_is_no_board_keeps_the_error(
+    status: int, error: type[HttpStatusError]
+) -> None:
+    given = "https://careers.example.test/join"
+    hop = "https://careers.example.test/team"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == given:
+            return httpx.Response(301, headers={"Location": hop})
+        return httpx.Response(status)
+
+    with pytest.raises(error) as caught:
+        _resolve(given, _Server(handler))
+
+    assert caught.value.url == hop
+
+
+def test_redirect_to_a_page_that_robots_txt_disallows_keeps_the_error() -> None:
+    given = "https://careers.example.test/join"
+    server = _Server(
+        _redirecting({given: "https://careers.example.test/team"}, b""),
+        robots="User-agent: *\nDisallow: /team\n",
+    )
+
+    with pytest.raises(RobotsDisallowedError):
+        _resolve(given, server)
+
+
+def test_a_given_page_that_fails_keeps_its_error_even_on_a_known_system() -> None:
+    server = _Server(lambda _request: httpx.Response(404))
+
+    with pytest.raises(SourceNotFoundError) as caught:
+        _resolve("https://careers.example.test/join", server)
+
+    assert caught.value.url == "https://careers.example.test/join"
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        "https://Feed.Example.test/rss.xml",
+        "https://feed.example.test:443/rss.xml",
+        "https://feed.example.test/my feed.xml",
+        "https://feed.example.test/caf\u00e9.xml",
+    ],
+)
+def test_a_url_without_a_redirect_is_kept_as_given(given: str) -> None:
+    server = _Server(_serving(_fixture("rss", "golang.xml")))
+
+    resolution = _resolve(given, server, company="Golang Projects")
+
+    assert resolution.ref == SourceRef(SourceKind.FEED, manual_key(given))
+    assert resolution.target_url == given
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["foo", "", "https://", "//a.example/x", "ftp://a.example/x", "mailto:a@b.c"],
+)
+def test_a_url_that_is_not_an_http_address_is_refused_before_any_request(
+    url: str,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200)
+
+    with pytest.raises(UnsupportedUrlError) as caught:
+        _resolve(url, _Server(handler))
+
+    assert caught.value.url == url
+    assert caught.value.reason == "not an http or https address"
+    assert requests == []
+
+
+def test_a_page_over_5_mib_is_refused_after_reading_only_that_much() -> None:
+    chunks_read: list[int] = []
+
+    class _Page(httpx.AsyncByteStream):
+        @override
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            for _ in range(100):
+                chunks_read.append(1)
+                yield b" " * 1_048_576
+
+    class _Transport(httpx.AsyncBaseTransport):
+        @override
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/robots.txt":
+                return httpx.Response(404)
+            return httpx.Response(200, stream=_Page())
+
+    async def run() -> None:
+        fake_time = _FakeTime()
+        async with PoliteClient(
+            transport=_Transport(), clock=fake_time.clock, sleep=fake_time.sleep
+        ) as client:
+            await resolve_url(_PAGE_URL, company="Acme", client=client)
+
+    with pytest.raises(UnsupportedUrlError) as caught:
+        asyncio.run(run())
+
+    assert caught.value.url == _PAGE_URL
+    assert caught.value.reason == "the page is larger than 5 MiB"
+    assert len(chunks_read) == 6
+
+
+@pytest.mark.parametrize("url", ["http://[bad/careers", "http://[::1/careers"])
+def test_malformed_url_is_unsupported_and_nothing_is_fetched(url: str) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200)
+
+    with pytest.raises(UnsupportedUrlError) as caught:
+        _resolve(url, _Server(handler))
+
+    assert caught.value.url == url
+    assert not isinstance(caught.value, UnrecognizedPageError)
+    assert requests == []
+
+
+def test_unreachable_host_is_a_fetch_error_not_a_robots_refusal() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        msg = "name or service not known"
+        raise httpx.ConnectError(msg)
+
+    async def run() -> None:
+        fake_time = _FakeTime()
+        async with PoliteClient(
+            transport=httpx.MockTransport(handler),
+            clock=fake_time.clock,
+            sleep=fake_time.sleep,
+        ) as client:
+            await resolve_url(_PAGE_URL, company="Acme", client=client)
+
+    with pytest.raises(FetchError) as caught:
+        asyncio.run(run())
+
+    assert caught.value.url == _PAGE_URL
+    assert "name or service not known" in caught.value.reason
+    assert not isinstance(caught.value, RobotsDisallowedError)

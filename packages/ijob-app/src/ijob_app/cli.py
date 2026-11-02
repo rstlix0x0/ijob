@@ -61,7 +61,29 @@ it, and `remove` drops one. `add` and `add-url` refuse, before that fetch, a
 reference already in the table for another company, since the table keeps the
 company it first had. For those commands the exit status is `0` on success, `1`
 when a source fails its check or its fetch, and `2` for a reference, company or
-removal that cannot be acted on.
+removal that cannot be acted on. `add-url` sends every request, robots.txt and
+redirect hops included, through a check that refuses a malformed URL, a host
+that is not a public address and the hosts another source kind reads, before
+anything is sent, and it stores the address a redirect ends on. A host whose
+robots.txt cannot be fetched is reported as `robots.txt could not be read`, not
+as disallowed.
+
+When `add-url` finds a page that is no hiring system, job posting or feed and
+`[models].source_recipe` is set, that model learns a recipe for the page. It is
+tried on the page and shown as `recipe: <format> at <url>`, `read N jobs, M
+invalid` and up to five tab-separated job lines on stdout, with `cost $X of $Y`
+on stderr, and the source is stored after you answer `y` or `yes` to `Store this
+source? [y/N]` or pass `--yes`; any other answer prints `not stored` and exits
+`1`. The page that was found unrecognized is read once, not fetched again. Without
+`--yes` and without a terminal it exits `1` with `error:
+confirmation needed; pass --yes`, before any model call; without a model it
+exits `1` with the usual error and a `note:` naming `[models].source_recipe`.
+When the model was paid and the analysis then fails, the `cost $X of $Y` line
+follows the `error:` line on stderr.
+`ijob sources reanalyze REF [--yes]` learns a recipe source's page again the
+same way and replaces the stored recipe on confirmation, exiting `2` for a
+source that is unknown, removed or has no recipe. `--db` and `--config` apply to
+both.
 
 `ijob show ID` prints one stored posting: title, company, one `name: value` line
 for each other field, the vote and note when it is labelled, then its
@@ -121,7 +143,6 @@ import sys
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime
-from functools import partial
 from pathlib import Path
 from typing import Annotated, Final
 
@@ -144,8 +165,10 @@ from ijob_sources.errors import (
     RobotsDisallowedError,
     SourceNotFoundError,
     SourcesError,
+    UnrecognizedPageError,
 )
 from ijob_sources.polite_http import ConditionalCache, PoliteClient
+from ijob_sources.public_host import HostResolver, system_resolver
 from ijob_sources.registry import HOST_INTERVALS, refresh_interval
 
 from ijob_app.cli_llm import (
@@ -160,6 +183,7 @@ from ijob_app.cli_llm import (
     stop_exits,
     traces_app,
 )
+from ijob_app.cli_recipes import learn_page, reanalyze_command
 from ijob_app.config import (
     FilterFlags,
     FilterLayers,
@@ -176,15 +200,13 @@ from ijob_app.home import (
 from ijob_app.llm_config import read_llm_settings
 from ijob_app.llm_ops import LlmOptions, SearchItem
 from ijob_app.llm_text import profile_lines, search_summary, verdict_cell
-from ijob_app.render import posting_fields
+from ijob_app.render import error_text, posting_fields
 from ijob_app.service import (
     CacheUnavailableError,
     ClientFactory,
-    InvalidCvError,
     PostingDetail,
     RefreshReport,
     Service,
-    SourceCompanyError,
     UnknownSourceError,
     open_service,
 )
@@ -301,21 +323,6 @@ def _read_company(text: str) -> str:
     return company
 
 
-def _error_text(error: InvalidValueError) -> str:
-    """Say why the service refused, as the command line reports it.
-
-    Args:
-        error: What the service raised.
-
-    Returns:
-        The bare reason for the service's own refusals of a source or a CV, and
-        the full message for any other value error.
-    """
-    if isinstance(error, UnknownSourceError | SourceCompanyError | InvalidCvError):
-        return error.reason
-    return str(error)
-
-
 @contextmanager
 def _refusals() -> Iterator[None]:
     """Turn what a service call refuses into a message and an exit status.
@@ -332,7 +339,7 @@ def _refusals() -> Iterator[None]:
         typer.echo(f"error: {error.reason}", err=True)
         raise typer.Exit(code=_EXIT_REFUSED) from error
     except InvalidValueError as error:
-        typer.echo(f"error: {_error_text(error)}", err=True)
+        typer.echo(f"error: {error_text(error)}", err=True)
         raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
 
 
@@ -349,33 +356,61 @@ def _source_failures() -> Iterator[None]:
     try:
         yield
     except InvalidValueError as error:
-        typer.echo(f"error: {_error_text(error)}", err=True)
+        typer.echo(f"error: {error_text(error)}", err=True)
         raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
     except SourcesError as error:
         typer.echo(f"error: {error}", err=True)
         raise typer.Exit(code=_EXIT_REFUSED) from error
 
 
+type _LlmFor = Callable[[IjobHome, Path | None], LlmOptions]
+
+
 def _sources_app(
-    client_factory: ClientFactory, now: Callable[[], datetime]
+    client_factory: ClientFactory,
+    now: Callable[[], datetime],
+    llm_for: _LlmFor,
+    is_interactive: Callable[[], bool],
+    resolver: HostResolver,
 ) -> typer.Typer:
     """Build the `sources` command group.
 
     Args:
         client_factory: Builds the client a verification fetch goes through.
         now: The wall clock, returning timezone-aware times.
+        llm_for: Gives the LLM options for a home and the `--config` value.
+        is_interactive: Whether the user can be asked a question.
+        resolver: Looks up the addresses of a host for the check that keeps a
+            recipe source on public hosts.
 
     Returns:
-        The group, with `list`, `add`, `remove` and `add-url`.
+        The group, with `list`, `add`, `remove`, `add-url` and `reanalyze`.
     """
     sources = typer.Typer(
-        add_completion=False, help="List, add and remove job sources."
+        add_completion=False,
+        help="List, add, remove and reanalyze job sources.",
     )
 
-    # Opens the service for a command that never reads through the cache.
-    service_on = partial(
-        open_service, client_factory=client_factory, now=now, use_cache=False
-    )
+    def service_on(
+        home: IjobHome, db: Path | None, llm: LlmOptions | None = None
+    ) -> AbstractContextManager[Service]:
+        """Open the service for a command that never reads through the cache."""
+        return open_service(
+            home,
+            db,
+            client_factory,
+            now=now,
+            use_cache=False,
+            llm=llm,
+            resolver=resolver,
+        )
+
+    def recipe_session(
+        db: Path | None, config: Path | None
+    ) -> AbstractContextManager[Service]:
+        """Locate the home, then give the context that opens the service for a model."""
+        home = _require_home()
+        return service_on(home, db, llm_for(home, config))
 
     @sources.command("list")
     def list_sources(
@@ -426,14 +461,40 @@ def _sources_app(
         company: Annotated[
             str, typer.Option(help="The company the source belongs to.")
         ],
+        *,
+        yes: Annotated[
+            bool,
+            typer.Option("--yes", help="Store a learned recipe without asking."),
+        ] = False,
         db: Annotated[Path | None, typer.Option(help=DB_HELP)] = None,
+        config: Annotated[Path | None, typer.Option(help=CONFIG_HELP)] = None,
     ) -> None:
-        """Work out what a URL is, verify it and add it as a source."""
+        """Work out what a URL is, verify it and add it as a source.
+
+        A page that is no hiring system, job posting or feed is read by the
+        `source_recipe` model, which proposes a recipe to confirm.
+        """
         home = _require_home()
         name = _read_company(company)
-        with _source_failures(), service_on(home, db) as service:
-            added = asyncio.run(service.add_url(url, name))
+        with (
+            _source_failures(),
+            service_on(home, db, llm_for(home, config)) as service,
+        ):
+            try:
+                added = asyncio.run(service.add_url(url, name))
+            except UnrecognizedPageError as error:
+                learn_page(
+                    service, url, name, error, yes=yes, is_interactive=is_interactive
+                )
+                return
         typer.echo(f"added {added.ref}")
+
+    reanalyze_command(
+        sources,
+        open_session=recipe_session,
+        read_ref=_read_ref,
+        is_interactive=is_interactive,
+    )
 
     return sources
 
@@ -563,9 +624,6 @@ def _print_search(
     return stop_exits(report)
 
 
-type _LlmFor = Callable[[IjobHome, Path | None], LlmOptions]
-
-
 def _llm_resolver(
     llm_options: Callable[[IjobHome, Path], LlmOptions] | None,
 ) -> _LlmFor:
@@ -593,6 +651,7 @@ def _cv_app(
     client_factory: ClientFactory,
     now: Callable[[], datetime],
     llm_for: _LlmFor,
+    resolver: HostResolver,
 ) -> typer.Typer:
     """Build the `cv` command group.
 
@@ -601,6 +660,8 @@ def _cv_app(
             request.
         now: The wall clock, returning timezone-aware times.
         llm_for: Gives the LLM options for a home and the `--config` value.
+        resolver: Looks up the addresses of a host for the service's public-host
+            check.
 
     Returns:
         The group, with `set`, `show` and `profile`.
@@ -611,7 +672,15 @@ def _cv_app(
         home: IjobHome, db: Path | None, llm: LlmOptions | None = None
     ) -> AbstractContextManager[Service]:
         """Open the service for a command that never reads through the cache."""
-        return open_service(home, db, client_factory, now=now, use_cache=False, llm=llm)
+        return open_service(
+            home,
+            db,
+            client_factory,
+            now=now,
+            use_cache=False,
+            llm=llm,
+            resolver=resolver,
+        )
 
     def show_profile(service: Service, *, refresh: bool) -> None:
         """Build or read the profile, print it and report what the call cost."""
@@ -709,7 +778,10 @@ def _detail_lines(detail: PostingDetail) -> list[str]:
 
 
 def _posting_commands(
-    app: typer.Typer, client_factory: ClientFactory, now: Callable[[], datetime]
+    app: typer.Typer,
+    client_factory: ClientFactory,
+    now: Callable[[], datetime],
+    resolver: HostResolver,
 ) -> None:
     """Add the `show` and `label` commands, which act on one stored posting.
 
@@ -717,11 +789,13 @@ def _posting_commands(
         app: The application to add the commands to.
         client_factory: Builds the client a description fetch goes through.
         now: The wall clock, returning timezone-aware times.
+        resolver: Looks up the addresses of a host for the check that keeps a
+            description fetch of a recipe source on public hosts.
     """
 
     def service_on(home: IjobHome, db: Path | None) -> AbstractContextManager[Service]:
         """Open the service with the HTTP cache, which description fetches use."""
-        return open_service(home, db, client_factory, now=now)
+        return open_service(home, db, client_factory, now=now, resolver=resolver)
 
     @app.command()
     def show(
@@ -776,6 +850,7 @@ def _session_opener(
     client_factory: ClientFactory,
     now: Callable[[], datetime],
     llm_for: _LlmFor,
+    resolver: HostResolver,
 ) -> SessionOpener:
     """Build the function that opens the service for an LLM command.
 
@@ -784,6 +859,8 @@ def _session_opener(
             request.
         now: The wall clock, returning timezone-aware times.
         llm_for: Gives the LLM options for a home and the `--config` value.
+        resolver: Looks up the addresses of a host for the service's public-host
+            check.
 
     Returns:
         A function that locates the ijob home, then opens the service on it with
@@ -799,7 +876,13 @@ def _session_opener(
         with (
             _refusals(),
             open_service(
-                home, db, client_factory, now=now, use_cache=False, llm=llm
+                home,
+                db,
+                client_factory,
+                now=now,
+                use_cache=False,
+                llm=llm,
+                resolver=resolver,
             ) as service,
         ):
             yield LlmSession(service, config, home.config)
@@ -812,13 +895,14 @@ def _stdin_is_terminal() -> bool:
     return sys.stdin is not None and sys.stdin.isatty()
 
 
-def _llm_groups(
+def _llm_groups(  # noqa: PLR0913, PLR0917 - the application and what its groups share
     app: typer.Typer,
     client_factory: ClientFactory,
     now: Callable[[], datetime],
-    llm_options: Callable[[IjobHome, Path], LlmOptions] | None,
+    llm_for: _LlmFor,
     is_interactive: Callable[[], bool],
-) -> _LlmFor:
+    resolver: HostResolver,
+) -> None:
     """Add the `cv`, `instructions` and `traces` groups and the `score` command.
 
     Args:
@@ -826,21 +910,16 @@ def _llm_groups(
         client_factory: Builds the client the service holds; no command makes a
             request.
         now: The wall clock, returning timezone-aware times.
-        llm_options: Builds the LLM options for a home and a config file, or
-            `None` for the real engines.
+        llm_for: Gives the LLM options for a home and the `--config` value.
         is_interactive: Whether the user can be asked a question.
-
-    Returns:
-        The function that gives the LLM options for a home and the `--config`
-        value, for the commands that call a model beside these.
+        resolver: Looks up the addresses of a host for the service's public-host
+            check.
     """
-    llm_for = _llm_resolver(llm_options)
-    app.add_typer(_cv_app(client_factory, now, llm_for), name="cv")
-    opener = _session_opener(client_factory, now, llm_for)
+    app.add_typer(_cv_app(client_factory, now, llm_for, resolver), name="cv")
+    opener = _session_opener(client_factory, now, llm_for, resolver)
     app.add_typer(instructions_app(opener, is_interactive), name="instructions")
     app.add_typer(traces_app(opener), name="traces")
     score_command(app, opener)
-    return llm_for
 
 
 def _root() -> None:
@@ -854,6 +933,7 @@ def make_app(
     now: Callable[[], datetime] = _utc_now,
     llm_options: Callable[[IjobHome, Path], LlmOptions] | None = None,
     is_interactive: Callable[[], bool] | None = None,
+    resolver: HostResolver = system_resolver,
 ) -> typer.Typer:
     """Build the `ijob` application.
 
@@ -866,23 +946,29 @@ def make_app(
             in use, which tests use to inject fake engines; `None` for the real
             engines.
         is_interactive: Whether the user can be asked a question, which tests
-            replace because their input is never a terminal; `instructions set`
-            asks for confirmation only when it is true. `None` asks the process
-            at the time of the question: true when standard input is a terminal.
+            replace because their input is never a terminal; `instructions set`,
+            `sources add-url` and `sources reanalyze` ask for confirmation only
+            when it is true. `None` asks the process at the time of the question:
+            true when standard input is a terminal.
+        resolver: Looks up the addresses of a host for the check that keeps a
+            recipe source on public hosts, which tests replace so that none
+            resolves a name; the default asks the system.
 
     Returns:
         The application, with its `setup`, `search`, `show`, `label`, `score` and
         `tui` commands and its `sources`, `cv`, `instructions` and `traces`
         groups.
     """
-    app = typer.Typer(add_completion=False, help="Collect and list job postings.")
-    app.add_typer(_sources_app(client_factory, now), name="sources")
-    llm_for = _llm_groups(
-        app, client_factory, now, llm_options, is_interactive or _stdin_is_terminal
+    app = typer.Typer(
+        add_completion=False, help="Collect and list job postings.", callback=_root
     )
-    _posting_commands(app, client_factory, now)
-
-    app.callback()(_root)
+    ask = is_interactive or _stdin_is_terminal
+    llm_for = _llm_resolver(llm_options)
+    app.add_typer(
+        _sources_app(client_factory, now, llm_for, ask, resolver), name="sources"
+    )
+    _llm_groups(app, client_factory, now, llm_for, ask, resolver)
+    _posting_commands(app, client_factory, now, resolver)
 
     @app.command()
     def setup() -> None:
@@ -983,7 +1069,12 @@ def make_app(
         try:
             with (
                 open_service(
-                    home, db, client_factory, now=now, llm=llm_for(home, config)
+                    home,
+                    db,
+                    client_factory,
+                    now=now,
+                    llm=llm_for(home, config),
+                    resolver=resolver,
                 ) as service,
                 _print_rejections(enabled=verbose),
             ):
@@ -1012,7 +1103,12 @@ def make_app(
         with (
             _refusals(),
             open_service(
-                home, db, client_factory, now=now, llm=llm_for(home, config)
+                home,
+                db,
+                client_factory,
+                now=now,
+                llm=llm_for(home, config),
+                resolver=resolver,
             ) as service,
         ):
             IjobApp(service, config, default_config=home.config).run()

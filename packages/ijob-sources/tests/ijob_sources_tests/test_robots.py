@@ -122,9 +122,43 @@ def test_500_disallows_all() -> None:
     assert _allowed(_policy(_serving("", status=500)), _ORIGIN + "/jobs") is False
 
 
-def test_fetch_error_disallows_all() -> None:
-    send = _FakeSend(lambda url: FetchError(url, "too many redirects"))
-    assert _allowed(_policy(send), _ORIGIN + "/jobs") is False
+def test_unreadable_robots_txt_raises_fetch_error_naming_the_page() -> None:
+    cause = FetchError(_ORIGIN + "/robots.txt", "connection refused")
+    send = _FakeSend(lambda _: cause)
+    with pytest.raises(FetchError) as caught:
+        _allowed(_policy(send), _ORIGIN + "/jobs")
+    assert caught.value.url == _ORIGIN + "/jobs"
+    assert caught.value.reason == "robots.txt could not be read: connection refused"
+    assert caught.value.__cause__ is cause
+
+
+def test_unreadable_robots_txt_is_not_cached() -> None:
+    replies: list[httpx.Response | FetchError] = [
+        FetchError(_ORIGIN + "/robots.txt", "timed out"),
+        httpx.Response(200, text="User-agent: *\nCrawl-delay: 2"),
+    ]
+    send = _FakeSend(lambda _: replies.pop(0))
+    policy = _policy(send)
+    with pytest.raises(FetchError):
+        _allowed(policy, _ORIGIN + "/jobs")
+    assert policy.crawl_delay(_ORIGIN + "/jobs") is None
+
+    assert _allowed(policy, _ORIGIN + "/jobs") is True
+    assert send.urls == [_ORIGIN + "/robots.txt"] * 2
+    assert policy.crawl_delay(_ORIGIN + "/jobs") == 2.0
+
+
+def test_failed_refetch_of_an_expired_entry_raises() -> None:
+    replies: list[httpx.Response | FetchError] = [
+        httpx.Response(200, text=""),
+        FetchError(_ORIGIN + "/robots.txt", "timed out"),
+    ]
+    clock = _FakeClock()
+    policy = _policy(_FakeSend(lambda _: replies.pop(0)), clock)
+    assert _allowed(policy, _ORIGIN + "/jobs") is True
+    clock.now = 25 * _HOUR
+    with pytest.raises(FetchError, match=r"robots\.txt could not be read: timed out"):
+        _allowed(policy, _ORIGIN + "/jobs")
 
 
 def test_parse_value_error_disallows_all(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -179,6 +213,80 @@ def test_concurrent_cold_calls_fetch_once() -> None:
 
     assert asyncio.run(both()) == [True, True]
     assert len(send.urls) == 1
+
+
+def test_callers_waiting_on_a_dead_origin_share_its_failure() -> None:
+    cause = FetchError(_ORIGIN + "/robots.txt", "timed out")
+    send = _FakeSend(lambda _: cause)
+    policy = _policy(send)
+    urls = [f"{_ORIGIN}/jobs/{number}" for number in range(5)]
+
+    async def all_at_once() -> list[object]:
+        return list(
+            await asyncio.gather(
+                *(policy.allowed(url) for url in urls), return_exceptions=True
+            )
+        )
+
+    results = asyncio.run(all_at_once())
+
+    assert send.urls == [_ORIGIN + "/robots.txt"]
+    assert all(isinstance(result, FetchError) for result in results)
+    errors = [result for result in results if isinstance(result, FetchError)]
+    assert [error.url for error in errors] == urls
+    assert {error.reason for error in errors} == {
+        "robots.txt could not be read: timed out"
+    }
+    assert all(error.__cause__ is cause for error in errors)
+
+
+def test_a_call_after_the_failed_attempt_tries_again_and_can_succeed() -> None:
+    replies: list[httpx.Response | FetchError] = [
+        FetchError(_ORIGIN + "/robots.txt", "timed out"),
+        httpx.Response(200, text="User-agent: *\nCrawl-delay: 2"),
+    ]
+    send = _FakeSend(lambda _: replies.pop(0))
+    policy = _policy(send)
+
+    async def run() -> list[object]:
+        first = await asyncio.gather(
+            policy.allowed(_ORIGIN + "/a"),
+            policy.allowed(_ORIGIN + "/b"),
+            return_exceptions=True,
+        )
+        later = await policy.allowed(_ORIGIN + "/c")
+        return [*first, later]
+
+    results = asyncio.run(run())
+
+    assert [type(result) for result in results] == [FetchError, FetchError, bool]
+    assert results[2] is True
+    assert send.urls == [_ORIGIN + "/robots.txt"] * 2
+
+
+def test_a_failure_on_one_origin_does_not_fail_callers_of_another() -> None:
+    send = _FakeSend(
+        lambda url: (
+            FetchError(url, "timed out")
+            if url.startswith(_ORIGIN)
+            else httpx.Response(200)
+        )
+    )
+    policy = _policy(send)
+
+    async def run() -> list[object]:
+        return list(
+            await asyncio.gather(
+                policy.allowed(_ORIGIN + "/a"),
+                policy.allowed("https://other.example.test/a"),
+                return_exceptions=True,
+            )
+        )
+
+    results = asyncio.run(run())
+
+    assert isinstance(results[0], FetchError)
+    assert results[1] is True
 
 
 def test_crawl_delay_read() -> None:

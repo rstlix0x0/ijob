@@ -1,6 +1,8 @@
+import dataclasses
 import subprocess
 import sys
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 from ijob_app.config import ShadowedField
@@ -9,12 +11,27 @@ from ijob_app.llm_text import (
     STOP_TEXT,
     instruction_lines,
     profile_lines,
+    recipe_proposal_lines,
     score_summary,
     search_summary,
     shadow_line,
     verdict_cell,
 )
-from ijob_core.model import Posting, PostingId, ResumeProfile, Seniority, Verdict
+from ijob_app.recipe_ops import RecipeProposal
+from ijob_core.model import (
+    ExternalId,
+    Posting,
+    PostingId,
+    ResumeProfile,
+    Seniority,
+    SightingDraft,
+    SourceKind,
+    SourceRef,
+    Verdict,
+    parse_source_key,
+)
+from ijob_core.money import Money, Period
+from ijob_sources.recipe_document import RecipeFormat
 
 _AT = datetime(2026, 10, 31, 12, 0, tzinfo=UTC)
 
@@ -71,6 +88,101 @@ def test_verdict_cell_marks_a_missing_description() -> None:
     )
 
     assert verdict_cell(kept) == "✔ (no description)"
+
+
+def test_summaries_unchanged() -> None:
+    assert search_summary(_report("cap")).endswith(
+        "not judged 4, cost $0.0123 of $0.50; stopped: cap reached"
+    )
+    assert score_summary(_report()).endswith("cost $0.0123 of $0.50")
+
+
+_REF = SourceRef(SourceKind.RECIPE, parse_source_key("careers"))
+
+
+def _draft(
+    number: int, *, location: str | None = None, salaries: tuple[Money, ...] = ()
+) -> SightingDraft:
+    return SightingDraft(
+        source=_REF,
+        external_id=ExternalId(f"job-{number}"),
+        title=f"Engineer {number}",
+        company="Example",
+        location=location,
+        url=f"https://jobs.example.test/{number}",
+        posted_at=None,
+        raw="{}",
+        salaries=salaries,
+    )
+
+
+def _proposal(jobs: tuple[SightingDraft, ...], invalid: int = 0) -> RecipeProposal:
+    return RecipeProposal(
+        ref=_REF,
+        target_url="https://jobs.example.test/careers",
+        company="Example",
+        recipe="{}",
+        recipe_format=RecipeFormat.HTML,
+        recipe_url="https://jobs.example.test/careers",
+        jobs=jobs,
+        invalid=invalid,
+        model="claude-sdk/made-up-model",
+        report=_report(),
+    )
+
+
+def test_recipe_proposal_lines() -> None:
+    salary = Money(Decimal(50000), Decimal(74999), "USD", Period.YEAR)
+    other = Money(Decimal(1), None, "EUR", None)
+    jobs = (
+        _draft(1),
+        _draft(2, location="Berlin", salaries=(salary, other)),
+        *(_draft(number) for number in range(3, 8)),
+    )
+
+    lines = recipe_proposal_lines(_proposal(jobs, invalid=3))
+
+    assert len(lines) == 2 + 5
+    assert lines[0] == "recipe: html at https://jobs.example.test/careers"
+    assert lines[1] == "read 7 jobs, 3 invalid"
+    assert lines[2] == "Engineer 1\tExample\t-\t-\thttps://jobs.example.test/1"
+    assert lines[3] == (
+        "Engineer 2\tExample\tBerlin\t50000-74999 USD/year; from 1 EUR"
+        "\thttps://jobs.example.test/2"
+    )
+    assert lines[-1].startswith("Engineer 5\t")
+
+
+def test_recipe_proposal_lines_with_few_jobs() -> None:
+    lines = recipe_proposal_lines(_proposal((_draft(1),)))
+
+    assert lines[1] == "read 1 jobs, 0 invalid"
+    assert len(lines) == 3
+
+
+def test_recipe_proposal_lines_strip_control_characters() -> None:
+    hostile = SightingDraft(
+        source=_REF,
+        external_id=ExternalId("job-x"),
+        title="Rust\x1b]0;pwn\x07 Engineer\x1b[2J\u202e",
+        company="Ex\x9bample\tCo",
+        location="Ber\nlin",
+        url="https://jobs.example.test/\x1b[31mx",
+        posted_at=None,
+        raw="{}",
+    )
+    proposal = dataclasses.replace(
+        _proposal((hostile,)), recipe_url="https://jobs.example.test/\x1b[2Jc"
+    )
+
+    lines = recipe_proposal_lines(proposal)
+
+    assert lines[0] == "recipe: html at https://jobs.example.test/[2Jc"
+    assert lines[2] == (
+        "Rust]0;pwn Engineer[2J\tExampleCo\tBerlin\t-\thttps://jobs.example.test/[31mx"
+    )
+    assert lines[2].count("\t") == 4
+    assert all(char.isprintable() or char == "\t" for line in lines for char in line)
 
 
 def test_search_summary_counts_and_cost() -> None:

@@ -18,10 +18,9 @@ from typing import Any, Final, assert_never
 import lxml.html
 from lxml import etree
 
-from ijob_sources.errors import UnsupportedUrlError
-from ijob_sources.polite_http import PoliteClient
+from ijob_sources.errors import ResponseTooLargeError, UnsupportedUrlError
+from ijob_sources.polite_http import MAX_BODY_BYTES, TOO_LARGE_REASON, PoliteClient
 
-MAX_BODY_BYTES: Final = 5 * 1024 * 1024
 SAMPLE_LIMIT: Final = 50_000
 JSON_SAMPLE_ITEMS: Final = 3
 JSON_SAMPLE_CHARS: Final = 300
@@ -98,7 +97,7 @@ def load_document(body: bytes, content_type: str | None, url: str) -> Document:
             HTML that cannot be parsed.
     """
     if len(body) > MAX_BODY_BYTES:
-        raise UnsupportedUrlError(url, "the page is larger than 5 MiB")
+        raise UnsupportedUrlError(url, TOO_LARGE_REASON)
     recipe_format = _format_of(body, content_type, url)
     match recipe_format:
         case RecipeFormat.JSON:
@@ -112,8 +111,8 @@ def load_document(body: bytes, content_type: str | None, url: str) -> Document:
 async def fetch_document(client: PoliteClient, url: str) -> tuple[Document, str]:
     """Fetch a page, following redirects, and load it as a document.
 
-    Addresses inside the page resolve against the returned final address, not
-    the requested one.
+    The page is read no further than 5 MiB. Addresses inside the page resolve
+    against the returned final address, not the requested one.
 
     Args:
         client: The client the request goes through.
@@ -123,10 +122,16 @@ async def fetch_document(client: PoliteClient, url: str) -> tuple[Document, str]
         The document, and the address of the response that held it.
 
     Raises:
-        UnsupportedUrlError: The response is not a usable document.
+        UnsupportedUrlError: The response is not a usable document, or is
+            larger than 5 MiB.
         SourcesError: The client could not complete the request.
     """
-    response = await client.get(url, follow_redirects=True)
+    try:
+        response = await client.get(
+            url, follow_redirects=True, max_bytes=MAX_BODY_BYTES
+        )
+    except ResponseTooLargeError as error:
+        raise UnsupportedUrlError(url, TOO_LARGE_REASON) from error
     final_url = str(response.url)
     document = load_document(
         response.content, response.headers.get("Content-Type"), final_url

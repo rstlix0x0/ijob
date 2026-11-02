@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-02
 depends-on: [05, 06]
 built-on: 6ee2c2bd4580
@@ -239,3 +239,35 @@ passes and the CLAUDE.md gate is green. Commit `feat(app): propose, reanalyze an
 
 - `uv run --locked pytest packages/ijob-sources packages/ijob-app` passes.
 - The gate exits 0.
+
+## Review findings
+
+Plans 06 and 07 were reviewed together by one reviewer over the combined diff. The fix round's gate: `uv run --locked pytest` → `3071 passed`; `ruff format --check`, `ruff check --no-fix` and `mypy --strict .` exit 0.
+
+- fixed — `recipe_ops.py:264` a malformed model `json_url` raised `ValueError` outside the worker's `try` and crashed analysis with an `ExceptionGroup`. It is now a `RecipeOutputError` before any fetch, as is a non-http(s) or host-less address. `test_unusable_json_url_is_recipe_output_error`.
+- fixed — `service.py:1048` no test caught removal of the guard in `Service._analyze`. `test_analyze_url_is_guarded_against_private_addresses` fails with `DID NOT RAISE NotPublicAddressError` when `guard_requests` is replaced by `pass`.
+- fixed — `recipe_ops.py:174` no analysis test served a redirect. `test_html_redirect_resolves_jobs_against_final_address`, `test_json_redirects_resolve_against_final_addresses`.
+- fixed — `recipe_ops.py:154` a malformed added URL raised a raw `ValueError`. It is now `UnsupportedUrlError` before any fetch. `test_malformed_added_url_refused_before_fetch`.
+- fixed — `recipe_errors.py` docstring made true of the code; `Raises` on both `accept_recipe`s lists both refusals.
+- fixed — `analyze_source` docstring states the `target_url` `None` case. `test_reanalysis_of_a_recipe_row_without_address_has_no_recipe`.
+- open — `recipe_document.py:129` the 5 MiB check runs after the whole body is downloaded, so a page or model-chosen address can make ijob buffer an unbounded body. Not new in this plan.
+- open — `service.py:1047` `cli.py:253` builds a new `PoliteClient` per factory call, so pacing does not carry over from `add_url`: the analysis robots.txt request goes out with no wait. The plan's "The polite client paces the second request" does not hold across clients.
+- open — `detect.py:86` `resolve_url` follows no redirect, so a redirecting page raises `HttpStatusError`, not `UnrecognizedPageError`, and never reaches analysis. This is the spec's "other sources keep today's no-redirect `get`".
+- open — `service.py:1047` repeats `_guarded_client`'s two lines; `recipe_ops.py:42` imports the private `_run_single` (the plan prescribes it); `recipe_ops.py:294` `_format_of` lacks `match`/`assert_never`; `recipe_ops.py:49` reanalysis traces as `ijob sources add` (the plan prescribes it).
+- open — no service-level test covers a failed analysis storing nothing; it holds by construction (`analyze_operation` takes no store).
+
+## Deviations
+
+- 2026-11-02 — The board row was not clean at start (another chain, `2026-11-01-llm-layer`, reads `spec disproven by plan 07`); this chain's row was clean.
+- 2026-11-02 — The trial recipe's `url` is the added `target_url` on the HTML path and the resolved JSON address on the JSON path. `read_page` uses the final URL of whichever document is read.
+- 2026-11-02 — HTML at the JSON address gives `UnsupportedUrlError(<resolved JSON URL>, "expected JSON")`. The plan wrote `json_url`; the absolute address fetched is clearer.
+- 2026-11-02 — Step 5's "other than a `RecipeOutputError`" exclusion was not added: at that time the worker never raised one, so the check would be dead code.
+- 2026-11-02 — `UnsupportedRecipeVersionError` has no `.reason`, so its `str()` becomes the `RecipeOutputError` reason. The model path cannot reach it today, because `RecipeOut` forces version 1.
+- 2026-11-02 — Beyond the plan: `analyze_source` raises `NoRecipeError` for a RECIPE row whose `target_url` is `None`, as `accept_recipe` always writes one.
+- 2026-11-02 — `RecipeProposal.recipe_format` is the `RecipeFormat` enum, not a string.
+- 2026-11-02 — `test_provider_errors_propagate` checks the error type and message only, because `analyze_operation` takes no store.
+- 2026-11-02 — Beyond the plan: a non-http(s) resolved JSON address (`ftp://`, `mailto:`) gives `RecipeOutputError`, not the guard's `NotPublicAddressError`, whose `mailto` message read "/robots.txt is not a public address".
+- 2026-11-02 — "Seen failing" was not met for `test_recipe_errors.py`, written together with `recipe_errors.py`. Its first run was green.
+- 2026-11-02 — One full-suite run had a single failure, `tui/test_app.py::test_burst_of_filter_changes_reloads_once`, while another pytest ran at the same time. It passes alone; clean reruns gave 3061 and 3071 passed. Not changed.
+- 2026-11-02 — The task-briefer ledger and briefs were skipped: one coder read the plan's task sections directly.
+- 2026-11-02 — Not committed: the instruction to execute did not ask for commits.

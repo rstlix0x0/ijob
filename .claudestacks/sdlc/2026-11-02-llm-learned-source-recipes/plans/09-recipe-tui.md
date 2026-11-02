@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-02
 depends-on: [07, 08]
 built-on: 6ee2c2bd4580
@@ -127,3 +127,26 @@ passes and the CLAUDE.md gate is green. Commit `test(app): guard recipe sources 
 
 - `uv run --locked pytest packages/ijob-app` passes.
 - The gate exits 0.
+
+## Review findings
+
+Plans 08 and 09 were reviewed together by one reviewer over the combined diff. The fix round's gate: `uv run --locked pytest` → `3131 passed`; `ruff format --check`, `ruff check --no-fix` and `mypy --strict .` exit 0.
+
+- fixed — `tui/recipe.py:24` at 80x24 with long job lines the buttons fell below the screen. The lines now scroll in `#lines` with `max-height: 60vh`, and the buttons stay outside the scroll. The buttons can still clip below about 18 rows.
+- fixed — `tui/sources.py:64` `#error` was one row and auto width, cutting long errors and the `run: ijob sources reanalyze <ref>` hint. It is now `width: 1fr; height: auto`.
+- fixed — `tui/recipe.py:16` Accept took focus on open, so a stray Enter stored. `AUTO_FOCUS = "#cancel"`.
+- fixed — `tui/sources.py:143,156,184` Add or Add URL during an analysis could cancel it, leave `analyzing <url>…` showing, start a second paid call or stack a second modal. One `_adding` flag refuses a press with `an analysis is running; wait for it to finish`, held until the modal closes.
+- fixed — `tui/sources.py:184` `report.warnings` and `dropped_spans` were dropped; they now go to `notify(..., severity="warning", markup=False)`.
+- fixed — `tui/sources.py:39` the second copy of the error text delegates to `render.error_text`.
+- fixed — `tui/sources.py:161,169,181` tests for the `sqlite3.Error` catch and the status and error clears. Docstrings at `tui/sources.py:80,196` corrected.
+
+## Deviations
+
+- 2026-11-02 — The board row was not clean at start (another chain, `2026-11-01-llm-layer`, reads `spec disproven by plan 07`); this chain's row was clean.
+- 2026-11-02 — Task 2's tests passed on first run, as they guard existing behaviour. Adding `import dspy` to the script prelude failed all three with `'True' != 'False'`; that probe was reverted.
+- 2026-11-02 — Beyond the plan: `_error_text` and `_add_url` cover `sqlite3.Error`, as `accept_recipe` writes the store and an uncaught worker exception ends the app. Any caught error clears `#status`.
+- 2026-11-02 — Beyond the plan: Add and Add URL are refused during a run rather than cancelling it. `exclusive=True` stays on the workers, as this plan requires. Remove is not refused during an analysis.
+- 2026-11-02 — `conftest.py` has three `open_service` calls, all with a fake resolver; a `RecipeOpener` Protocol carries the `model=` keyword. The test helper `_wait_for_modal` pauses once more after the modal appears, because clicking at once raced its compose (`NoMatches '#cancel'`).
+- 2026-11-02 — `FBT003` noqa on the two `dismiss(True/False)` calls.
+- 2026-11-02 — The task-briefer ledger and briefs were skipped: one coder read the plan's task sections directly.
+- 2026-11-02 — Not committed: the instruction to execute did not ask for commits.
