@@ -131,3 +131,37 @@ class UnsupportedUrlError(SourcesError):
         super().__init__(f"cannot use {url}: {reason}")
         self.url = url
         self.reason = reason
+
+
+class NotPublicAddressError(SourcesError):
+    """A request was refused because it does not go to a public address.
+
+    Attributes:
+        url: The URL of the refused request.
+    """
+
+    def __init__(self, url: str) -> None:
+        """Build the error from the refused request's URL.
+
+        Args:
+            url: The URL of the refused request.
+        """
+        super().__init__(f"{url} is not a public address")
+        self.url = url
+
+
+class ReservedHostError(SourcesError):
+    """A host is reserved for the source kind that reads it by its own rules.
+
+    Attributes:
+        host: The refused host name.
+    """
+
+    def __init__(self, host: str) -> None:
+        """Build the error from the refused host name.
+
+        Args:
+            host: The refused host name.
+        """
+        super().__init__(f"{host} is read only by its own source kind")
+        self.host = host

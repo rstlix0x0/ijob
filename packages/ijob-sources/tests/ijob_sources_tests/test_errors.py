@@ -4,7 +4,9 @@ from ijob_sources.errors import (
     FetchError,
     HttpStatusError,
     IdentityMismatchError,
+    NotPublicAddressError,
     ParseError,
+    ReservedHostError,
     RobotsDisallowedError,
     SourceNotFoundError,
     SourcesError,
@@ -25,6 +27,8 @@ _REF = SourceRef(SourceKind.GREENHOUSE, parse_source_key("prisma"))
         ParseError("not JSON"),
         IdentityMismatchError(_REF, "company 'Prisma' not found on the board"),
         UnsupportedUrlError(_URL, "no feed found"),
+        NotPublicAddressError(_URL),
+        ReservedHostError("www.jobstreet.com"),
     ],
 )
 def test_every_error_is_a_sources_error(error: SourcesError) -> None:
@@ -67,3 +71,12 @@ def test_unsupported_url_error_fields() -> None:
     assert error.reason == "no feed found"
     assert _URL in str(error)
     assert "no feed found" in str(error)
+
+
+def test_error_messages() -> None:
+    not_public = NotPublicAddressError(_URL)
+    assert str(not_public) == f"{_URL} is not a public address"
+    assert not_public.url == _URL
+    reserved = ReservedHostError("www.jobstreet.com")
+    assert str(reserved) == "www.jobstreet.com is read only by its own source kind"
+    assert reserved.host == "www.jobstreet.com"

@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-02
 built-on: 6ee2c2bd4580
 ---
@@ -150,3 +150,21 @@ passes and the CLAUDE.md gate is green. Commit `feat(sources): add public host r
 
 - `uv run --locked pytest packages/ijob-sources` passes.
 - The gate exits 0.
+
+## Review findings
+
+- fixed — `polite_http.py:244` a host-less absolute `Location` (`javascript:alert(1)`, `mailto:a@b.c`) raised raw `httpx.InvalidURL`; `_send` now maps it to `FetchError`. `uv run --locked pytest packages/ijob-sources` → `1635 passed`.
+- fixed — `polite_http.py:266` the unreached `except httpx.InvalidURL` around the `Location` join was removed (fix above makes it dead).
+- fixed — `public_host.py:62` trailing-dot bypass (`https://japan-dev.com./jobs`); the host is now `.lower().rstrip(".")` before both reserved checks. Same run as above.
+- open — `polite_http.py:185` no test checks guard order, or a guard's `FetchError` on robots.txt turning into deny-all, through `PoliteClient`.
+- fixed — `public_host.py:60` an invalid punycode host (`http://xn--japan-dev.com/x`) raised `idna` errors (a `UnicodeError`). httpx raises it while building the request, before any guard runs. `PoliteClient._send` now maps `UnicodeError` to `FetchError`, so a page or redirect to such a host is a `FetchError` (a `RobotsDisallowedError` when it is the robots.txt fetch) and nothing is sent. `refuse_reserved_host` compares `raw_host` (ASCII) and no longer decodes. `uv run --locked pytest` → `2764 passed`.
+- fixed — `public_host.py:115` NAT64 `64:ff9b::/96` addresses are global only when their embedded IPv4 address is (`64:ff9b::a00:1` refused, `64:ff9b::808:808` passes, both resolved and as a literal). `::ffff:10.0.0.1`, `64:ff9b:1::a00:1` and `2002:a00:1::` were already refused by `is_global` and are now pinned by tests. Same run as above.
+
+## Deviations
+
+- 2026-11-02 — The board row was not clean at start (another chain, `2026-11-01-llm-layer`, reads `spec disproven by plan 07`); this chain's row was clean.
+- 2026-11-02 — Architecture says a guard's errors pass through unwrapped. That holds for `NotPublicAddressError` and `ReservedHostError`, but `robots.py` `_fetch` treats a `FetchError` on robots.txt as deny-all. So an unresolvable host reaches a `PoliteClient` caller as `RobotsDisallowedError`. `test_unresolvable_host_is_fetch_error` calls the guard hook directly. The `guard_requests` docstring states this.
+- 2026-11-02 — Beyond the plan: an empty resolver answer is refused with `NotPublicAddressError` (otherwise "every address is global" passes vacuously). An unusable `Location` gives `FetchError`.
+- 2026-11-02 — Test doubles in `test_kalibrr.py`, `test_fourdayweek.py` and `test_mycareersfuture.py` override `get`; their signature gained `follow_redirects` so mypy accepts the override (`mypy --strict .` reported `Signature of "get" incompatible with supertype` in all three).
+- 2026-11-02 — Plans 01 and 02 were reviewed together by one reviewer over the combined diff. The task-briefer ledger and briefs were skipped: the coders read the plan's task sections directly.
+- 2026-11-02 — Not committed: the instruction to execute did not ask for commits.
