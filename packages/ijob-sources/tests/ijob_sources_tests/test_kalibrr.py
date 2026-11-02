@@ -272,9 +272,13 @@ class _RecordingClient(PoliteClient):
         self.conditionals: list[bool] = []
 
     @override
-    async def get(self, url: str, *, conditional: bool = False) -> httpx.Response:
+    async def get(
+        self, url: str, *, conditional: bool = False, follow_redirects: bool = False
+    ) -> httpx.Response:
         self.conditionals.append(conditional)
-        return await super().get(url, conditional=conditional)
+        return await super().get(
+            url, conditional=conditional, follow_redirects=follow_redirects
+        )
 
 
 def _serving(

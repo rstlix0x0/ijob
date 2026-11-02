@@ -11,6 +11,7 @@ from ijob_sources.errors import (
     HttpStatusError,
     RobotsDisallowedError,
     SourceNotFoundError,
+    SourcesError,
 )
 from ijob_sources.polite_http import USER_AGENT, CachedResponse, PoliteClient
 
@@ -499,3 +500,226 @@ def test_host_override_key_is_case_insensitive() -> None:
     )
     asyncio.run(_get_each(client, _WORKABLE, _WORKABLE))
     assert fake_time.waits == [3.0, 3.0]
+
+
+class _RefusedError(SourcesError):
+    """A stub guard's refusal."""
+
+
+class _Recorder:
+    """A request guard that records every URL it sees."""
+
+    def __init__(self) -> None:
+        self.urls: list[str] = []
+
+    async def __call__(self, request: httpx.Request) -> None:
+        self.urls.append(str(request.url))
+
+
+class _Pages:
+    """A transport handler serving a fixed table of page replies by URL.
+
+    robots.txt allows everything unless `robots` holds a body for its host.
+    """
+
+    def __init__(
+        self, pages: dict[str, httpx.Response], robots: dict[str, str] | None = None
+    ) -> None:
+        self._pages = pages
+        self._robots = robots or {}
+        self.received: list[str] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        self.received.append(url)
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text=self._robots.get(request.url.host, ""))
+        return self._pages[url]
+
+
+async def _get_following(client: PoliteClient, url: str) -> httpx.Response:
+    async with client:
+        return await client.get(url, follow_redirects=True)
+
+
+def _redirect(location: str, status: int = 302) -> httpx.Response:
+    return httpx.Response(status, headers={"Location": location})
+
+
+def test_guard_sees_robots_and_page() -> None:
+    recorder = _Recorder()
+    client = _client(_Site(httpx.Response(200)), _FakeTime())
+    client.guard_requests(recorder)
+    asyncio.run(_get(client))
+    assert recorder.urls == ["https://boards.example.test/robots.txt", _BOARD]
+
+
+def test_raising_guard_stops_before_sending() -> None:
+    received: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received.append(request)
+        return httpx.Response(200)
+
+    async def refuse(_: httpx.Request) -> None:
+        raise _RefusedError
+
+    client = _client(handler, _FakeTime())
+    client.guard_requests(refuse)
+    with pytest.raises(_RefusedError):
+        asyncio.run(_get(client))
+    assert received == []
+
+
+def test_follow_redirects_reaches_final_url() -> None:
+    pages = _Pages(
+        {
+            "http://example.com/a": _redirect("/jobs/"),
+            "http://example.com/jobs/": httpx.Response(200, text="jobs"),
+        }
+    )
+    response = asyncio.run(
+        _get_following(_client(pages, _FakeTime()), "http://example.com/a")
+    )
+    assert response.text == "jobs"
+    assert str(response.url).endswith("/jobs/")
+
+
+def test_redirect_hop_checks_robots_of_new_origin() -> None:
+    pages = _Pages(
+        {"http://example.com/a": _redirect("http://other.test/x")},
+        robots={"other.test": "User-agent: *\nDisallow: /"},
+    )
+    with pytest.raises(RobotsDisallowedError) as caught:
+        asyncio.run(_get_following(_client(pages, _FakeTime()), "http://example.com/a"))
+    assert caught.value.url == "http://other.test/x"
+    assert "http://other.test/robots.txt" in pages.received
+    assert "http://other.test/x" not in pages.received
+
+
+def test_guard_refusing_a_hop_stops_it_before_the_transport() -> None:
+    pages = _Pages({"http://example.com/a": _redirect("http://10.0.0.1/b")})
+    seen: list[str] = []
+
+    async def refuse_private(request: httpx.Request) -> None:
+        seen.append(str(request.url))
+        if request.url.host == "10.0.0.1":
+            raise _RefusedError
+
+    client = _client(pages, _FakeTime())
+    client.guard_requests(refuse_private)
+    with pytest.raises(_RefusedError):
+        asyncio.run(_get_following(client, "http://example.com/a"))
+    assert "http://10.0.0.1/robots.txt" in seen
+    assert not any("10.0.0.1" in url for url in pages.received)
+
+
+def test_guard_sees_each_redirect_hop() -> None:
+    pages = _Pages(
+        {
+            "http://example.com/a": _redirect("http://10.0.0.1/b"),
+            "http://10.0.0.1/b": httpx.Response(200),
+        }
+    )
+    recorder = _Recorder()
+    client = _client(pages, _FakeTime())
+    client.guard_requests(recorder)
+    asyncio.run(_get_following(client, "http://example.com/a"))
+    page_urls = [url for url in recorder.urls if not url.endswith("/robots.txt")]
+    assert page_urls == ["http://example.com/a", "http://10.0.0.1/b"]
+
+
+def test_sixth_redirect_is_fetch_error() -> None:
+    pages = _Pages(
+        {f"http://example.com/{n}": _redirect(f"/{n + 1}") for n in range(6)}
+    )
+    with pytest.raises(FetchError) as caught:
+        asyncio.run(_get_following(_client(pages, _FakeTime()), "http://example.com/0"))
+    assert caught.value.reason == "more than five redirects"
+    assert caught.value.url == "http://example.com/5"
+    assert "http://example.com/6" not in pages.received
+
+
+def test_fifth_redirect_is_followed() -> None:
+    pages = _Pages(
+        {
+            **{f"http://example.com/{n}": _redirect(f"/{n + 1}") for n in range(5)},
+            "http://example.com/5": httpx.Response(200, text="end"),
+        }
+    )
+    response = asyncio.run(
+        _get_following(_client(pages, _FakeTime()), "http://example.com/0")
+    )
+    assert response.text == "end"
+
+
+def test_redirect_without_location_is_http_status_error() -> None:
+    pages = _Pages({"http://example.com/a": httpx.Response(302)})
+    with pytest.raises(HttpStatusError) as caught:
+        asyncio.run(_get_following(_client(pages, _FakeTime()), "http://example.com/a"))
+    assert caught.value.status == 302
+
+
+def test_unusable_location_is_fetch_error() -> None:
+    pages = _Pages({"http://example.com/a": _redirect("http://example.com:abc/")})
+    with pytest.raises(FetchError):
+        asyncio.run(_get_following(_client(pages, _FakeTime()), "http://example.com/a"))
+
+
+@pytest.mark.parametrize("location", ["javascript:alert(1)", "mailto:a@b.c"])
+def test_hostless_absolute_location_is_fetch_error(location: str) -> None:
+    pages = _Pages({"http://example.com/a": _redirect(location)})
+    with pytest.raises(FetchError) as caught:
+        asyncio.run(_get_following(_client(pages, _FakeTime()), "http://example.com/a"))
+    assert isinstance(caught.value.__cause__, httpx.InvalidURL)
+
+
+def test_redirect_to_undecodable_host_is_fetch_error() -> None:
+    pages = _Pages({"http://example.com/a": _redirect("http://xn--japan-dev.com/x")})
+    with pytest.raises(FetchError) as caught:
+        asyncio.run(_get_following(_client(pages, _FakeTime()), "http://example.com/a"))
+    assert isinstance(caught.value.__cause__, UnicodeError)
+
+
+def test_undecodable_host_is_a_sources_error() -> None:
+    pages = _Pages({})
+    with pytest.raises(RobotsDisallowedError):
+        asyncio.run(_client(pages, _FakeTime()).get("http://xn--japan-dev.com/x"))
+
+
+def test_redirect_status_outside_the_followed_set_is_http_status_error() -> None:
+    pages = _Pages({"http://example.com/a": _redirect("/b", status=300)})
+    with pytest.raises(HttpStatusError) as caught:
+        asyncio.run(_get_following(_client(pages, _FakeTime()), "http://example.com/a"))
+    assert caught.value.status == 300
+
+
+def test_redirect_hop_is_paced_and_retried() -> None:
+    fake_time = _FakeTime()
+    replies = iter(
+        [
+            _redirect("/b"),
+            httpx.Response(429, headers={"Retry-After": "2"}),
+            httpx.Response(200, text="b"),
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="")
+        return next(replies)
+
+    response = asyncio.run(
+        _get_following(_client(handler, fake_time), "http://example.com/a")
+    )
+    assert response.text == "b"
+    assert fake_time.waits == [1.0, 1.0, 2.0]
+
+
+def test_conditional_with_follow_redirects_refused() -> None:
+    async def run() -> None:
+        async with _client(_ok, _FakeTime()) as client:
+            await client.get(_BOARD, conditional=True, follow_redirects=True)
+
+    with pytest.raises(ValueError, match="conditional"):
+        asyncio.run(run())

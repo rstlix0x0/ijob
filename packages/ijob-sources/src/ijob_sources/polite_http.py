@@ -7,7 +7,9 @@ owns the `httpx.AsyncClient` and the `RobotsPolicy` that guards it. The
 monotonic clock, the wall clock and the sleep are injected, so tests need no
 real time. Given a `ConditionalCache`, it can revalidate a stored response with
 `If-None-Match` and `If-Modified-Since` and replay it when the server answers
-`304 Not Modified`.
+`304 Not Modified`. A `RequestGuard` attached with `guard_requests` sees, and can
+refuse, every request the client sends, and `get` can follow redirects one
+guarded, paced hop at a time.
 """
 
 import asyncio
@@ -40,9 +42,22 @@ _TIMEOUT_SECONDS: Final = 30.0
 _MAX_REDIRECTS: Final = 5
 _MAX_ATTEMPTS: Final = 3
 _MAX_RETRY_WAIT_SECONDS: Final = 60.0
+_REDIRECT_STATUSES: Final = frozenset(
+    {
+        httpx.codes.MOVED_PERMANENTLY,
+        httpx.codes.FOUND,
+        httpx.codes.SEE_OTHER,
+        httpx.codes.TEMPORARY_REDIRECT,
+        httpx.codes.PERMANENT_REDIRECT,
+    }
+)
 _RETRY_STATUSES: Final = frozenset(
     {httpx.codes.TOO_MANY_REQUESTS, httpx.codes.SERVICE_UNAVAILABLE}
 )
+
+
+type RequestGuard = Callable[[httpx.Request], Awaitable[None]]
+"""A hook awaited before a request is sent; raising an error refuses the request."""
 
 
 def _utc_now() -> datetime:
@@ -97,6 +112,10 @@ class PoliteClient:
     Requests to one host start at least `min_interval` apart, or further if
     that host's robots.txt sets a larger `Crawl-delay` or `host_intervals`
     names a larger interval for it.
+
+    A guard attached with `guard_requests` sees every request the client
+    sends, robots.txt requests and redirect hops included, before it reaches
+    the network.
 
     Use it as an async context manager so the underlying connection pool is
     closed.
@@ -163,12 +182,36 @@ class PoliteClient:
         """Close the connection pool."""
         await self._http.aclose()
 
-    async def get(self, url: str, *, conditional: bool = False) -> httpx.Response:
+    def guard_requests(self, guard: RequestGuard) -> None:
+        """Run a guard before every request this client sends.
+
+        Guards run in the order they were attached. An error a guard raises
+        reaches the caller of `get` unchanged, and the request is not sent.
+        A guard that raises `FetchError` while robots.txt is being fetched is
+        read as a robots.txt that could not be fetched.
+
+        Args:
+            guard: The hook to await with each `httpx.Request`.
+        """
+        self._http.event_hooks["request"].append(guard)
+
+    async def get(
+        self,
+        url: str,
+        *,
+        conditional: bool = False,
+        follow_redirects: bool = False,
+    ) -> httpx.Response:
         """Fetch a source URL politely and return its 2xx response.
 
-        Checks robots.txt, sends one paced request that follows no redirect,
-        and on 429 or 503 waits for `Retry-After` and resends, at most three
-        attempts in all.
+        Checks robots.txt, sends one paced request, and on 429 or 503 waits
+        for `Retry-After` and resends, at most three attempts in all.
+
+        A 3xx answer is an error unless `follow_redirects` is set. Then a 301,
+        302, 303, 307 or 308 answer with a `Location` header is followed, at
+        most five times. The location is resolved against the URL that
+        answered, and each hop is a whole new round: robots.txt of the hop's
+        origin, pacing, the 429 or 503 retry and every request guard.
 
         With `conditional` and a cache, a stored entry for the URL adds
         whichever of `If-None-Match` and `If-Modified-Since` it holds to
@@ -180,20 +223,62 @@ class PoliteClient:
             url: The absolute URL to fetch.
             conditional: Whether to revalidate against and update the cache.
                 It has no effect on a client built without a cache.
+            follow_redirects: Whether to follow redirects by hand. It cannot
+                be combined with `conditional`.
 
         Returns:
-            The response, whose status is 2xx.
+            The response, whose status is 2xx. When redirects were followed,
+            its `url` is the final hop's.
+
+        Raises:
+            ValueError: `conditional` and `follow_redirects` are both set.
+            RobotsDisallowedError: robots.txt does not allow the URL, or the
+                URL of a hop.
+            SourceNotFoundError: The server answered 404.
+            HttpStatusError: The server answered any other non-2xx status,
+                including a redirect when `follow_redirects` is unset, a
+                redirect with no `Location` header or a 304 with no stored
+                entry, or kept answering 429 or 503, or asked for a wait
+                above 60 seconds.
+            FetchError: The request failed before a usable response came
+                back, a `Location` header is not a usable URL, or the sixth
+                redirect arrived.
+
+        Any error a request guard raises, other than the `FetchError` case
+        `guard_requests` describes, and any error the cache raises, such as
+        `sqlite3.Error` from `SqliteHttpCache`, propagates unmapped.
+        """
+        if conditional and follow_redirects:
+            msg = "conditional cannot be combined with follow_redirects"
+            raise ValueError(msg)
+        redirects = 0
+        while True:
+            response = await self._round(url, conditional=conditional)
+            if not (follow_redirects and response.status_code in _REDIRECT_STATUSES):
+                break
+            location = response.headers.get("Location")
+            if location is None:
+                raise HttpStatusError(url, response.status_code)
+            if redirects == _MAX_REDIRECTS:
+                raise FetchError(url, "more than five redirects")
+            url = str(response.request.url.join(location))
+            redirects += 1
+        if httpx.codes.is_success(response.status_code):
+            return response
+        if response.status_code == httpx.codes.NOT_FOUND:
+            raise SourceNotFoundError(url)
+        raise HttpStatusError(url, response.status_code)
+
+    async def _round(self, url: str, *, conditional: bool) -> httpx.Response:
+        """Run robots.txt, pacing and the 429 or 503 retry for one URL.
+
+        Returns:
+            The last response, whatever its status, except that a `304`
+            answered to a stored entry comes back as the 200 replay of it.
 
         Raises:
             RobotsDisallowedError: robots.txt does not allow the URL.
-            SourceNotFoundError: The server answered 404.
-            HttpStatusError: The server answered any other non-2xx status,
-                including a redirect or a 304 with no stored entry, or kept
-                answering 429 or 503, or asked for a wait above 60 seconds.
-            FetchError: The request failed before a usable response came back.
-
-        Any error the cache raises, such as `sqlite3.Error` from
-        `SqliteHttpCache`, propagates unmapped.
+            FetchError: The request failed before a response came back.
         """
         if not await self._robots.allowed(url):
             raise RobotsDisallowedError(url)
@@ -214,13 +299,9 @@ class PoliteClient:
             return httpx.Response(
                 httpx.codes.OK, content=entry.body, request=response.request
             )
-        if httpx.codes.is_success(response.status_code):
-            if cache is not None:
-                self._remember(cache, url, response)
-            return response
-        if response.status_code == httpx.codes.NOT_FOUND:
-            raise SourceNotFoundError(url)
-        raise HttpStatusError(url, response.status_code)
+        if cache is not None and httpx.codes.is_success(response.status_code):
+            self._remember(cache, url, response)
+        return response
 
     @staticmethod
     def _validators(entry: CachedResponse | None) -> dict[str, str]:
@@ -288,8 +369,9 @@ class PoliteClient:
 
         Raises:
             FetchError: The request failed before a usable response came back:
-                a transport failure, a body that could not be decoded, or more
-                than five redirects.
+                a transport failure, a body that could not be decoded, a host
+                name that is not valid IDNA, a `Location` header that is not a
+                usable URL, or more than five redirects.
         """
         host = urlsplit(url).netloc.lower()
         async with self._host_locks.setdefault(host, asyncio.Lock()):
@@ -308,5 +390,5 @@ class PoliteClient:
                 return await self._http.get(
                     url, headers=headers, follow_redirects=follow_redirects
                 )
-            except httpx.RequestError as error:
+            except (httpx.RequestError, httpx.InvalidURL, UnicodeError) as error:
                 raise FetchError(url, str(error) or type(error).__name__) from error
