@@ -845,12 +845,23 @@ def test_clicking_a_title_with_a_click_action_votes_nothing(
     assert asyncio.run(run()) is None
 
 
+class _HeldTimer:
+    """A timer that fires when the test says, so a slow machine cannot fire it early."""
+
+    def __init__(self, callback: Callable[[], object]) -> None:
+        self.callback = callback
+        self.stopped = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
 def test_burst_of_filter_changes_reloads_once(
     opener: Opener, seed: Seeder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seed_three(seed)
 
-    async def run() -> tuple[int, int, list[str]]:
+    async def run() -> tuple[int, int, int, int, list[str]]:
         with opener(_no_requests([])) as service:
             reads: list[int] = []
             original = service.open_postings
@@ -865,15 +876,32 @@ def test_burst_of_filter_changes_reloads_once(
                 await pilot.pause(_PAST_DEBOUNCE)
                 await _settle(app, pilot)
                 before = len(reads)
+                timers: list[_HeldTimer] = []
+
+                def hold(_delay: float, callback: Callable[[], object]) -> _HeldTimer:
+                    timers.append(_HeldTimer(callback))
+                    return timers[-1]
+
+                monkeypatch.setattr(app, "set_timer", hold)
                 app.query_one("#country", Input).focus()
                 await pilot.press(*"SG,JP")
                 typing = len(reads) - before
-                await pilot.pause(_PAST_DEBOUNCE)
+                waiting = [timer for timer in timers if not timer.stopped]
+                for timer in waiting:
+                    timer.callback()
                 await _settle(app, pilot)
-                return typing, len(reads) - before, sorted(titles(app))
+                return (
+                    typing,
+                    len(timers),
+                    len(waiting),
+                    len(reads) - before,
+                    sorted(titles(app)),
+                )
 
-    typing, total, listed = asyncio.run(run())
+    typing, started, waiting, total, listed = asyncio.run(run())
     assert typing == 0
+    assert started == len("SG,JP")
+    assert waiting == 1
     assert total == 1
     assert listed == ["Backend Engineer", "Platform Engineer"]
 
