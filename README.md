@@ -1,42 +1,29 @@
 # ijob
 
-An agentic job-hunting CLI and TUI for software engineers.
+An R&D project and portfolio piece: exploring how to build an agentic job search for software
+engineers with LLMs. It is a personal research project, not a product.
 
-## What it does
+## What it explores
 
-ijob is in early development. None of the features below exist yet; they describe what is planned.
-
-- Collect postings from hiring-system APIs (Greenhouse, Lever, Ashby and others), job boards and
-  URLs the user adds.
-- Filter by role, posting date, company, salary, country and free-form custom instructions.
-- Rank postings against a PDF CV and explain each ranking.
-
-## Engineering highlights
-
-Planned:
-
-- **DSPy modules behind a provider registry.** Two providers: the Claude Agent SDK, which uses the
-  local Claude Code login, and OpenRouter, through `OPENROUTER_API_KEY`. Each task picks its model
-  from configuration.
-- **DeepEval evaluations** of every LLM step, run locally and never in CI.
-- **GEPA optimization of cheap models**, measured against a frontier-model baseline on a labeled
-  set, to show how close an optimized small model gets.
-- **OpenTelemetry tracing** into a local Langfuse stack.
+- **Collecting at scale.** Job postings from hiring-system APIs, job boards and feeds, read politely
+  and stored locally.
+- **LLM tasks as DSPy signatures, behind a provider registry.** Reading a CV, turning instructions
+  into filters and rules, judging and scoring postings, reading free-form posts as jobs, and
+  learning how to read a new careers page. Two providers: the Claude Agent SDK, which uses the local
+  Claude Code login, and OpenRouter. Each task picks its model from configuration, with a cost cap
+  per operation.
+- **Tracing.** Every model call emits OpenTelemetry spans with model, tokens and cost, kept in a local
+  store that `ijob traces` reads, with optional export to a local Langfuse.
 - **Polite sourcing.** ijob sends its own User-Agent, follows robots.txt with longest-match
   semantics, and never bypasses anti-bot protection.
 
-## Status
+## Research milestones
 
-Early development. The work is split into seven milestones:
-
-1. Foundation: the workspace, the quality gate, CI and project docs.
-2. Core and sources: the domain model, local storage, polite HTTP, and the first source adapters
-   behind a search command that uses no LLM.
-3. TUI: a terminal interface over search and results.
-4. LLM layer: providers, CV profiling, judging and scoring.
-5. Quality loop: evaluations, tracing and prompt optimization.
-6. Agents: source discovery and agents that follow custom instructions.
-7. Reach: more sources, headless page extraction and a CV coaching loop.
+1. Ranked search: narrow postings by title, then score them against a CV and rank them.
+2. Evaluation: DeepEval suites that measure the judge and the scorer.
+3. Optimization: GEPA and other DSPy optimizers tuning cheap models against a frontier baseline.
+4. Observability: evaluation and optimization runs recorded in Langfuse.
+5. Agents: agents for source discovery and for following custom instructions.
 
 ## Workspace layout
 
