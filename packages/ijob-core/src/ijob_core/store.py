@@ -10,7 +10,9 @@ removable, and stamped with the time each was last fetched. It also keeps a
 posting's description, the user's vote on each posting and the one CV the user
 stored. For the assessment tasks it keeps the profile read from that CV, the
 user's standing instructions, and the verdicts and scores already made, each
-keyed by what it was made from so a repeat call is a cache hit.
+keyed by what it was made from so a repeat call is a cache hit. A source can be
+stored together with its recipe, kept as opaque JSON text that outlives the
+source's removal.
 
 The schema version lives in `PRAGMA user_version`; opening a database applies
 every migration newer than that version, each in one transaction.
@@ -44,6 +46,7 @@ from ijob_core.model import (
     SightingDraft,
     SourceRef,
     StoredCv,
+    StoredRecipe,
     Verdict,
     Vote,
     parse_source_ref,
@@ -139,6 +142,14 @@ _MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
             model TEXT NOT NULL, task_version TEXT NOT NULL,
             score INTEGER NOT NULL, reasons TEXT NOT NULL, made_at TEXT NOT NULL,
             PRIMARY KEY (posting_id, input_sha256, profile_sha256, model, task_version)
+        ) STRICT
+        """,
+    ),
+    (
+        """
+        CREATE TABLE source_recipes (
+            ref TEXT PRIMARY KEY REFERENCES sources(ref),
+            recipe TEXT NOT NULL, model TEXT NOT NULL, created_at TEXT NOT NULL
         ) STRICT
         """,
     ),
@@ -1168,6 +1179,74 @@ class Store:
                 "VALUES (?, ?, ?, ?) ON CONFLICT (ref) DO UPDATE SET removed = 0",
                 (str(ref), company, target_url, SourceOrigin.USER.value),
             )
+
+    def set_recipe_source(  # noqa: PLR0913  # the source's fields and the recipe's
+        self,
+        ref: SourceRef,
+        *,
+        company: str,
+        target_url: str | None,
+        recipe: str,
+        model: str,
+        at: datetime,
+    ) -> None:
+        """Add a source together with its recipe, in one transaction.
+
+        The source row is written as `add_source` does: a new ref gets a `user`
+        row, and a ref already in the table keeps its row and only has `removed`
+        cleared. The recipe row is inserted, or its recipe, model and time are
+        replaced. If either write fails neither is kept.
+
+        Args:
+            ref: The source to add.
+            company: The company the source belongs to.
+            target_url: The page the source is read from, if any.
+            recipe: The recipe as JSON text; it is stored, not parsed.
+            model: The model that learned the recipe.
+            at: When the recipe was learned, timezone-aware.
+
+        Raises:
+            InvalidValueError: If `at` has no timezone, or `recipe` or `model` is
+                empty.
+            sqlite3.Error: If a write fails.
+        """
+        stamp = _stamp("at", at)
+        record = StoredRecipe(ref=ref, recipe=recipe, model=model, created_at=at)
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO sources (ref, company, target_url, origin) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT (ref) DO UPDATE SET removed = 0",
+                (str(ref), company, target_url, SourceOrigin.USER.value),
+            )
+            self._conn.execute(
+                "INSERT INTO source_recipes (ref, recipe, model, created_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT (ref) DO UPDATE SET "
+                "recipe = excluded.recipe, model = excluded.model, "
+                "created_at = excluded.created_at",
+                (str(ref), record.recipe, record.model, stamp),
+            )
+
+    def recipe(self, ref: SourceRef) -> StoredRecipe | None:
+        """Read the recipe stored for a source, removed or not.
+
+        Args:
+            ref: The source to read.
+
+        Returns:
+            The stored recipe, or `None` if the source has none.
+        """
+        row = self._conn.execute(
+            "SELECT ref, recipe, model, created_at FROM source_recipes WHERE ref = ?",
+            (str(ref),),
+        ).fetchone()
+        if row is None:
+            return None
+        return StoredRecipe(
+            ref=parse_source_ref(row[0]),
+            recipe=row[1],
+            model=row[2],
+            created_at=_from_text(row[3]),
+        )
 
     def remove_source(self, ref: SourceRef) -> None:
         """Mark a source removed; an unknown ref is ignored.

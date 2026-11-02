@@ -12,7 +12,8 @@ may be worked from. A draft and a `Posting` can also carry salaries (`Money`), a
 description in Markdown.
 
 `Label` records the user's `Vote` on a posting, and `StoredCv` describes the CV
-the user keeps in the store.
+the user keeps in the store. `StoredRecipe` holds the recipe learned for a source,
+as JSON text the model never parses.
 
 `ResumeProfile`, `Instructions`, `Verdict` and `Score` hold what the assessment
 tasks read and produce. Each validates its limits when built, using only the
@@ -380,6 +381,37 @@ class StoredCv:
             raise InvalidValueError("size", f"{self.size} is negative")
         if self.stored_at.utcoffset() is None:
             raise InvalidValueError("stored_at", "has no timezone")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StoredRecipe:
+    """The recipe the store holds for a source, as opaque JSON text.
+
+    Attributes:
+        ref: The source the recipe reads.
+        recipe: The recipe as JSON text; the store never parses it.
+        model: The model that learned the recipe.
+        created_at: When the recipe was stored, timezone-aware.
+    """
+
+    ref: SourceRef
+    recipe: str
+    model: str
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        """Reject a recipe record that cannot describe a learned recipe.
+
+        Raises:
+            InvalidValueError: If `recipe` or `model` is empty, or `created_at`
+                has no timezone.
+        """
+        if not self.recipe:
+            raise InvalidValueError("recipe", "is empty")
+        if not self.model:
+            raise InvalidValueError("model", "is empty")
+        if self.created_at.utcoffset() is None:
+            raise InvalidValueError("created_at", "has no timezone")
 
 
 class Seniority(StrEnum):

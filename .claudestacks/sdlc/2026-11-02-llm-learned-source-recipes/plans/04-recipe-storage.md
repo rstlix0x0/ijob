@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-02
 built-on: 6ee2c2bd4580
 ---
@@ -84,3 +84,17 @@ Commit `feat(core): store source recipes`.
 
 - `uv run --locked pytest packages/ijob-core` passes.
 - The gate exits 0.
+
+## Review findings
+
+- open — `store.py:1217` the `sources` upsert SQL in `set_recipe_source` is a copy of `add_source`'s (`:1178`).
+- open — `test_store.py` the empty `recipe` / empty `model` refusals of `set_recipe_source` are untested, and `test_set_recipe_source_is_atomic` matches `"x"`, which almost any message contains.
+- open — `model.py:16` the module doc's "the model never parses" reads ambiguously next to `StoredRecipe.model`.
+
+## Deviations
+
+- 2026-11-02 — The board row was not clean at start (`2026-11-01-llm-layer` reads `spec disproven by plan 07`); this chain's row was clean.
+- 2026-11-02 — `set_recipe_source` validates its inputs as `StoredRecipe` does before writing: a naive `at` raises `InvalidValueError("at")`, an empty recipe or model raises `InvalidValueError`. It carries `# noqa: PLR0913`, as `put_verdict` and `put_score` do.
+- 2026-11-02 — `test_fresh_database_is_version_4` was renamed `test_fresh_database_is_version_5`. No `user_version == 4` assertion exists outside `test_store.py`.
+- 2026-11-02 — Reviewed together with plan 03 by one reviewer; the task-briefer was skipped.
+- 2026-11-02 — Not committed: the instruction to execute did not ask for commits.

@@ -23,6 +23,7 @@ from ijob_core.model import (
     SourceKind,
     SourceRef,
     StoredCv,
+    StoredRecipe,
     Verdict,
     Vote,
     parse_source_key,
@@ -338,6 +339,50 @@ def test_stored_cv_holds_its_fields() -> None:
 def test_stored_cv_rejects_bad_fields(overrides: dict[str, Any]) -> None:
     with pytest.raises(InvalidValueError):
         _cv(**overrides)
+
+
+def _stored_recipe(**overrides: Any) -> StoredRecipe:  # noqa: ANN401  # forwards arbitrary field overrides
+    values: dict[str, Any] = {
+        "ref": SourceRef(SourceKind.GREENHOUSE, parse_source_key("acme")),
+        "recipe": '{"steps": []}',
+        "model": "model-a",
+        "created_at": _AWARE,
+    }
+    values.update(overrides)
+    return StoredRecipe(**values)
+
+
+def test_stored_recipe_holds_its_fields() -> None:
+    recipe = _stored_recipe()
+    assert recipe.ref == SourceRef(SourceKind.GREENHOUSE, parse_source_key("acme"))
+    assert (recipe.recipe, recipe.model, recipe.created_at) == (
+        '{"steps": []}',
+        "model-a",
+        _AWARE,
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "field"),
+    [
+        ({"recipe": ""}, "recipe"),
+        ({"model": ""}, "model"),
+        ({"created_at": datetime(2026, 10, 1, 8, 0)}, "created_at"),  # noqa: DTZ001  # naive on purpose
+    ],
+)
+def test_stored_recipe_validation(overrides: dict[str, Any], field: str) -> None:
+    with pytest.raises(InvalidValueError, match=field):
+        _stored_recipe(**overrides)
+
+
+def test_stored_recipe_is_keyword_only() -> None:
+    with pytest.raises(TypeError):
+        StoredRecipe(  # type: ignore[call-arg]
+            SourceRef(SourceKind.GREENHOUSE, parse_source_key("acme")),
+            "{}",
+            "model-a",
+            _AWARE,
+        )
 
 
 def _profile(**overrides: Any) -> ResumeProfile:  # noqa: ANN401  # forwards arbitrary field overrides
