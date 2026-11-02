@@ -9,18 +9,23 @@ raises `InvalidValueError` subclasses, `SourcesError`, the model layer's
 `LlmError` subclasses or `OSError`; it neither prints nor starts an event loop,
 so each front end keeps its own output, exit codes and loop.
 
+A recipe source is read through a client that refuses any request to a
+non-public address, so its page address, its next pages and its job pages are
+checked, while every other source keeps the plain client.
+
 `open_service` builds a `Service` over the seeded database and the HTTP cache of
 an ijob home. The store and the cache are bound to the thread that opens them,
 so every `Service` method must run on that thread. The methods that reach the
 network or call a model are `async` and run on the caller's event loop.
 """
 
+import asyncio
 import hashlib
 import json
 import sqlite3
 import tempfile
 from collections.abc import AsyncIterator, Callable, Collection, Iterator, Sequence
-from contextlib import contextmanager, suppress
+from contextlib import AsyncExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +41,7 @@ from ijob_core.model import (
     Posting,
     PostingId,
     ResumeProfile,
+    SourceKind,
     SourceRef,
     StoredCv,
     Vote,
@@ -48,6 +54,11 @@ from ijob_sources.detect import resolve_url, verify_new_source
 from ijob_sources.errors import SourcesError
 from ijob_sources.http_cache import SqliteHttpCache
 from ijob_sources.polite_http import ConditionalCache, PoliteClient
+from ijob_sources.public_host import (
+    HostResolver,
+    public_host_guard,
+    system_resolver,
+)
 from ijob_sources.registry import build_source, refresh_interval
 from ijob_sources.seeds import load_seeds
 
@@ -318,6 +329,7 @@ class Service:
         now: Callable[[], datetime],
         home: IjobHome,
         llm: LlmOptions,
+        resolver: HostResolver = system_resolver,
     ) -> None:
         """Build a service over open resources it does not own.
 
@@ -330,6 +342,8 @@ class Service:
             now: The wall clock, returning timezone-aware times.
             home: The ijob home, which holds the trace database.
             llm: What the model-calling operations are given.
+            resolver: Looks up the addresses of a host for the check that keeps
+                a recipe source on public hosts.
         """
         self._store = store
         self._db_path = db_path
@@ -338,6 +352,7 @@ class Service:
         self._now = now
         self._home = home
         self._llm = llm
+        self._resolver = resolver
         self._llm_runtime: LlmRuntime | None = None
         self.last_report: OperationReport | None = None
 
@@ -927,13 +942,25 @@ class Service:
         Returns:
             The description and `None`, or `None` and the reason there is none:
             the message of the first source error, or that no source publishes
-            a description.
+            a description. A recipe source's job page is fetched through the
+            client that refuses non-public addresses.
         """
         failure: str | None = None
-        async with self._client_factory(self._cache) as client:
+        async with (
+            self._client_factory(self._cache) as client,
+            AsyncExitStack() as stack,
+        ):
+            guarded: PoliteClient | None = None
             for sighting in self._store.sightings_of(posting_id):
+                used = client
+                if sighting.source.kind is SourceKind.RECIPE:
+                    if guarded is None:
+                        guarded = await stack.enter_async_context(
+                            self._guarded_client()
+                        )
+                    used = guarded
                 try:
-                    text = await describe(sighting, client)
+                    text = await describe(sighting, used)
                 except SourcesError as error:
                     failure = failure or str(error)
                     continue
@@ -977,30 +1004,65 @@ class Service:
             rows: The sources to build.
 
         Returns:
-            The adapters, and the reason each refused row could not be built.
+            The adapters, and the reason each refused row could not be built. A
+            recipe row with no stored recipe is refused.
         """
         sources: list[Source] = []
         refused: dict[SourceRef, InvalidValueError] = {}
         for row in rows:
             try:
                 sources.append(
-                    build_source(row, known=self._store.external_ids(row.ref))
+                    build_source(
+                        row,
+                        known=self._store.external_ids(row.ref),
+                        recipe=self._recipe_text(row),
+                    )
                 )
             except InvalidValueError as error:
                 refused[row.ref] = error
         return sources, refused
 
+    def _recipe_text(self, row: SourceRow) -> str | None:
+        """Return the recipe stored for a recipe row, or `None` for any other row."""
+        if row.ref.kind is not SourceKind.RECIPE:
+            return None
+        stored = self._store.recipe(row.ref)
+        return None if stored is None else stored.recipe
+
+    def _guarded_client(self) -> PoliteClient:
+        """Build a client that refuses any request to a non-public address."""
+        client = self._client_factory(self._cache)
+        client.guard_requests(public_host_guard(self._resolver))
+        return client
+
     async def _collect(self, sources: list[Source]) -> CollectResult:
-        """Fetch every source with one client, opened and closed on this loop.
+        """Fetch every source with clients opened and closed on this loop.
+
+        The recipe sources go through a client that refuses non-public
+        addresses, concurrently with the rest; no such client is opened when
+        there is no recipe source.
 
         Args:
             sources: The sources to fetch.
 
         Returns:
-            What `collect` returned for the sources.
+            What `collect` returned for the sources, merged.
         """
+        recipes = [source for source in sources if source.ref.kind is SourceKind.RECIPE]
+        others = [
+            source for source in sources if source.ref.kind is not SourceKind.RECIPE
+        ]
         async with self._client_factory(self._cache) as client:
-            return await collect(sources, client)
+            if not recipes:
+                return await collect(others, client)
+            async with self._guarded_client() as guarded, asyncio.TaskGroup() as group:
+                plain = group.create_task(collect(others, client))
+                checked = group.create_task(collect(recipes, guarded))
+        first, second = plain.result(), checked.result()
+        return CollectResult(
+            batches={**first.batches, **second.batches},
+            failures=[*first.failures, *second.failures],
+        )
 
     def _record(
         self, rows: list[SourceRow], result: CollectResult, seen_at: datetime
@@ -1053,6 +1115,7 @@ def open_service(  # noqa: PLR0913  # the service's inputs, one each
     now: Callable[[], datetime],
     use_cache: bool = True,
     llm: LlmOptions | None = None,
+    resolver: HostResolver = system_resolver,
 ) -> Iterator[Service]:
     """Open the seeded database and the HTTP cache and build a service on them.
 
@@ -1070,6 +1133,8 @@ def open_service(  # noqa: PLR0913  # the service's inputs, one each
             A caller that never revalidates responses leaves it off.
         llm: What the model-calling operations are given, or `None` for the
             home's config file, the real engines and the real `PATH`.
+        resolver: Looks up the addresses of a host for the check that keeps a
+            recipe source on public hosts; the default asks the system.
 
     Yields:
         The service, valid until the context exits and bound to this thread.
@@ -1096,6 +1161,7 @@ def open_service(  # noqa: PLR0913  # the service's inputs, one each
                 now=now,
                 home=home,
                 llm=llm or LlmOptions(config_path=home.config),
+                resolver=resolver,
             )
     finally:
         if cache is not None:

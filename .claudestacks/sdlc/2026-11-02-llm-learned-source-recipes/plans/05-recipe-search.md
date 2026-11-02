@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-02
 depends-on: [02, 03, 04]
 built-on: 6ee2c2bd4580
@@ -201,3 +201,25 @@ passes and the CLAUDE.md gate is green. Commit `feat(app): read recipe sources t
 
 - `uv run --locked pytest packages/ijob-core packages/ijob-sources packages/ijob-app` passes.
 - The gate exits 0.
+
+## Review findings
+
+- open — `service.py:1038` the guarded and plain clients keep separate per-host pacing and robots caches. A recipe source on a host a native source also reads can be paced closer than `min_interval`/Crawl-delay, and robots.txt is fetched twice. This follows from the plan's second client; sharing pacing is a later change.
+- open — `service.py:1038` no test proves both clients close when one `collect` raises (the plan's riskiest step). The nesting is correct today.
+- open — `service.py:936` a failing detail XPath shows the bare engine text as the description reason, with no ref and no reanalyze hint. The plan asks for no wrapping; revisit with plan 07's user-facing errors.
+- open — nits:
+  - the `refresh` Raises section does not name the nested `ExceptionGroup`;
+  - `_is_web_url` is the third copy of the http(s)-plus-host check;
+  - nothing tests a pagination loop arriving through a redirect (`final_url` in `seen`);
+  - `_is_format` is not a `match` closed with `assert_never`;
+  - `test_stops_at_five_pages` builds seven pages, not six.
+
+## Deviations
+
+- 2026-11-02 — The board row was not clean at start (`2026-11-01-llm-layer` reads `spec disproven by plan 07`); this chain's row was clean.
+- 2026-11-02 — `collect`'s `ExceptionGroup` for an adapter bug arrives nested in the TaskGroup's group when a recipe source is present. No caller catches it by type (CLI search, TUI `_refresh`).
+- 2026-11-02 — A page-1 format mismatch is found by a document-type check before `read_page`, because `read_page` reports a mismatch as `RecipeEvaluationError` and the `expected` message must differ from `failed`.
+- 2026-11-02 — An invalid stored recipe reads `recipe for <ref> failed: invalid recipe: <reason>; run: ijob sources reanalyze <ref>`.
+- 2026-11-02 — `test_model.py` was not edited; `list(SourceKind)` already covers the recipe ref round trip.
+- 2026-11-02 — Both tasks ran in one coder, sequentially; the task-briefer was skipped.
+- 2026-11-02 — Not committed: the instruction to execute did not ask for commits.

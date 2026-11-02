@@ -5,12 +5,12 @@ import re
 import sqlite3
 import subprocess
 import sys
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, closing, contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 import pytest
@@ -52,6 +52,8 @@ from ijob_core.model import (
 from ijob_core.store import Store
 from ijob_core.traces import SpanRow, TraceStore, UnknownTraceError
 from ijob_sources.errors import SourcesError
+from ijob_sources.polite_http import ConditionalCache, PoliteClient
+from ijob_sources.public_host import HostResolver
 from ijob_sources.seeds import load_seeds
 
 from .llm_fakes import (
@@ -91,7 +93,17 @@ _HUGGINGFACE = parse_source_ref("workable:huggingface")
 
 type _Handler = Callable[[httpx.Request], httpx.Response]
 type _ClientFactoryBuilder = Callable[[_Handler], ClientFactory]
-type _Opener = Callable[[_Handler], AbstractContextManager[Service]]
+
+
+class _Opener(Protocol):
+    def __call__(
+        self, handler: _Handler, resolver: HostResolver | None = None
+    ) -> AbstractContextManager[Service]: ...
+
+
+async def _no_dns(host: str, port: int) -> Sequence[str]:
+    msg = f"unexpected DNS lookup of {host}:{port}"
+    raise AssertionError(msg)
 
 
 def _serving(
@@ -122,9 +134,17 @@ def opener(
     """Open a service over a temporary database that a handler answers for."""
 
     @contextmanager
-    def open_with(handler: _Handler) -> Iterator[Service]:
+    def open_with(
+        handler: _Handler, resolver: HostResolver | None = None
+    ) -> Iterator[Service]:
         factory: ClientFactory = client_factory_for(handler)
-        with open_service(home, tmp_path / "ijob.db", factory, now=clock) as service:
+        with open_service(
+            home,
+            tmp_path / "ijob.db",
+            factory,
+            now=clock,
+            resolver=resolver or _no_dns,
+        ) as service:
             yield service
 
     return open_with
@@ -1400,3 +1420,232 @@ def test_prune_traces_keeps_the_store_within_the_configured_size(
     assert report.removed > 0
     assert report.size_bytes <= 16 * 2**20
     assert len(remaining) == 20 - report.removed
+
+
+_PUBLIC_ADDRESS = "93.184.216.34"
+_CAREERS = "https://jobs.example.org/careers/"
+_CAREERS_REF = parse_source_ref("recipe:careers")
+_CAREERS_PAGE = (
+    '<ul><li class="job"><a href="/careers/1/">Platform Engineer</a></li>'
+    '<li class="job"><a href="/careers/2/">Data Engineer</a></li></ul>'
+)
+_CAREERS_RECIPE: dict[str, object] = {
+    "version": 1,
+    "format": "html",
+    "url": _CAREERS,
+    "items": "//li[@class='job']",
+    "fields": {"title": ".//a", "url": ".//a/@href"},
+    "next_page": "//a[@rel='next']/@href",
+}
+
+
+class _Resolver:
+    """A resolver that answers from a table, falling back to a public address."""
+
+    def __init__(self, answers: Mapping[str, str] | None = None) -> None:
+        self._answers = answers or {}
+        self.hosts: list[str] = []
+
+    async def __call__(self, host: str, _port: int) -> Sequence[str]:
+        self.hosts.append(host)
+        return [self._answers.get(host, _PUBLIC_ADDRESS)]
+
+
+def _site(
+    pages: Mapping[str, str] | None = None,
+    *,
+    requests: list[httpx.Request] | None = None,
+) -> _Handler:
+    """Serve robots.txt, the Greenhouse board and each page in `pages` by URL."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow:\n")
+        if requests is not None:
+            requests.append(request)
+        if request.url.host == "boards-api.greenhouse.io":
+            return httpx.Response(200, content=_BODY)
+        page = (pages or {}).get(str(request.url))
+        if page is None:
+            return httpx.Response(404)
+        return httpx.Response(
+            200, content=page.encode(), headers={"Content-Type": "text/html"}
+        )
+
+    return handler
+
+
+def _add_recipe_source(
+    db: Path,
+    recipe: Mapping[str, object] | None = None,
+    ref: SourceRef = _CAREERS_REF,
+) -> None:
+    with Store.open(db) as store:
+        store.import_seeds(load_seeds())
+        store.set_recipe_source(
+            ref,
+            company="Example Co",
+            target_url=None,
+            recipe=json.dumps(_CAREERS_RECIPE if recipe is None else recipe),
+            model="made-up-model",
+            at=_SEEN,
+        )
+
+
+def test_search_reads_recipe_source(opener: _Opener, tmp_path: Path) -> None:
+    _add_recipe_source(tmp_path / "ijob.db")
+    resolver = _Resolver()
+
+    with opener(_site({_CAREERS: _CAREERS_PAGE}), resolver) as service:
+        report = asyncio.run(service.refresh([_CAREERS_REF]))
+        postings = service.open_postings(FilterSpec(), [_CAREERS_REF])
+
+    assert report.fetched == [_CAREERS_REF]
+    assert report.failures == []
+    assert sorted(posting.title for posting in postings) == [
+        "Data Engineer",
+        "Platform Engineer",
+    ]
+    assert {posting.company for posting in postings} == {"Example Co"}
+    assert set(resolver.hosts) == {"jobs.example.org"}
+
+
+def test_recipe_source_private_host_fails_alone(
+    opener: _Opener, tmp_path: Path
+) -> None:
+    _add_recipe_source(tmp_path / "ijob.db")
+    resolver = _Resolver({"jobs.example.org": "10.0.0.1"})
+
+    with opener(_site({_CAREERS: _CAREERS_PAGE}), resolver) as service:
+        report = asyncio.run(service.refresh([_CAREERS_REF, _TAILSCALE]))
+
+    assert report.fetched == [_TAILSCALE]
+    assert [failure.ref for failure in report.failures] == [_CAREERS_REF]
+    assert (
+        str(report.failures[0].error)
+        == "https://jobs.example.org/robots.txt is not a public address"
+    )
+    assert "boards-api.greenhouse.io" not in resolver.hosts
+
+
+def test_recipe_source_reserved_host_fails_alone(
+    opener: _Opener, tmp_path: Path
+) -> None:
+    recipe = {**_CAREERS_RECIPE, "url": "https://www.japan-dev.com/jobs/"}
+    _add_recipe_source(tmp_path / "ijob.db", recipe)
+
+    with opener(_site(), _Resolver()) as service:
+        report = asyncio.run(service.refresh([_CAREERS_REF, _TAILSCALE]))
+
+    assert report.fetched == [_TAILSCALE]
+    assert [failure.ref for failure in report.failures] == [_CAREERS_REF]
+    assert (
+        str(report.failures[0].error)
+        == "www.japan-dev.com is read only by its own source kind"
+    )
+
+
+def test_page_two_private_host_keeps_page_one(opener: _Opener, tmp_path: Path) -> None:
+    link = '<a rel="next" href="https://elsewhere.example.net/p2">n</a>'
+    _add_recipe_source(tmp_path / "ijob.db")
+    resolver = _Resolver({"elsewhere.example.net": "10.0.0.1"})
+
+    with opener(_site({_CAREERS: _CAREERS_PAGE + link}), resolver) as service:
+        report = asyncio.run(service.refresh([_CAREERS_REF]))
+        postings = service.open_postings(FilterSpec(), [_CAREERS_REF])
+
+    assert report.fetched == [_CAREERS_REF]
+    assert report.failures == []
+    assert len(postings) == 2
+    assert "elsewhere.example.net" in resolver.hosts
+
+
+def test_non_recipe_sources_are_not_guarded(
+    tmp_path: Path,
+    home: IjobHome,
+    clock: Callable[[], datetime],
+    client_factory_for: _ClientFactoryBuilder,
+) -> None:
+    opened: list[ConditionalCache | None] = []
+    build = client_factory_for(_serving())
+
+    def counting(cache: ConditionalCache | None) -> PoliteClient:
+        opened.append(cache)
+        return build(cache)
+
+    with open_service(
+        home, tmp_path / "ijob.db", counting, now=clock, resolver=_no_dns
+    ) as service:
+        report = asyncio.run(service.refresh([_TAILSCALE]))
+
+    assert report.fetched == [_TAILSCALE]
+    assert len(opened) == 1
+
+
+def test_recipe_row_without_recipe_is_refused(opener: _Opener, tmp_path: Path) -> None:
+    orphan = parse_source_ref("recipe:orphan")
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.import_seeds(load_seeds())
+        store.add_source(orphan, "Nowhere")
+    requests: list[httpx.Request] = []
+
+    with opener(_site(requests=requests), _Resolver()) as service:
+        report = asyncio.run(service.refresh([orphan]))
+
+    assert list(report.refused) == [orphan]
+    assert "has no stored recipe" in str(report.refused[orphan])
+    assert report.fetched == []
+    assert report.failures == []
+    assert requests == []
+
+
+def test_recipe_failure_carries_reanalyze_hint(opener: _Opener, tmp_path: Path) -> None:
+    _add_recipe_source(tmp_path / "ijob.db")
+
+    with opener(_site({_CAREERS: "<ul></ul>"}), _Resolver()) as service:
+        report = asyncio.run(service.refresh([_CAREERS_REF]))
+
+    expected = (
+        "recipe for recipe:careers found no jobs; "
+        "if the site changed, run: ijob sources reanalyze recipe:careers"
+    )
+    assert [str(failure.error) for failure in report.failures] == [expected]
+    assert report.fetched == []
+
+
+_JOB_PAGE_URL = "https://jobs.example.org/careers/1/"
+_JOB_PAGE = "<div id='d'><p>Build the platform.</p></div>"
+
+
+def _recipe_posting(db: Path) -> PostingId:
+    raw = json.dumps({"url": _JOB_PAGE_URL, "detail_description": "//div[@id='d']"})
+    [posting_id] = _seed(db, _draft(_CAREERS_REF, "1", raw=raw))
+    return posting_id
+
+
+def test_describe_recipe_sighting_reads_the_job_page(
+    opener: _Opener, tmp_path: Path
+) -> None:
+    posting_id = _recipe_posting(tmp_path / "ijob.db")
+
+    with opener(_site({_JOB_PAGE_URL: _JOB_PAGE}), _Resolver()) as service:
+        detail = asyncio.run(service.detail(posting_id))
+
+    assert detail.description == "Build the platform."
+    assert detail.unavailable_reason is None
+
+
+def test_describe_recipe_sighting_is_guarded(opener: _Opener, tmp_path: Path) -> None:
+    posting_id = _recipe_posting(tmp_path / "ijob.db")
+    requests: list[httpx.Request] = []
+    site = _site({_JOB_PAGE_URL: _JOB_PAGE}, requests=requests)
+
+    with opener(site, _Resolver({"jobs.example.org": "127.0.0.1"})) as service:
+        detail = asyncio.run(service.detail(posting_id))
+
+    assert detail.description is None
+    assert (
+        detail.unavailable_reason
+        == "https://jobs.example.org/robots.txt is not a public address"
+    )
+    assert requests == []
