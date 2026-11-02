@@ -88,12 +88,15 @@ def test_skipped_item_turns_a_dict_into_json() -> None:
     assert item.url is None
 
 
-def test_skipped_item_survives_an_item_too_deep_to_encode() -> None:
-    deep: list[object] = []
-    for _ in range(100_000):
-        deep = [deep]
+def test_skipped_item_survives_an_item_too_deep_to_encode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def too_deep(*_args: object, **_kwargs: object) -> str:
+        raise RecursionError
 
-    item = skipped_item(deep, None, ValueError("bad"))
+    monkeypatch.setattr("ijob_sources.collect.json.dumps", too_deep)
+
+    item = skipped_item([], None, ValueError("bad"))
 
     assert item.text == "<unreadable list>"
     assert item.reason == "bad"

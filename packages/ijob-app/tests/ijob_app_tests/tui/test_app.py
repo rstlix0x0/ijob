@@ -29,7 +29,7 @@ from ijob_core.traces import TraceStore
 from ijob_sources.polite_http import ConditionalCache, PoliteClient
 from textual.pilot import Pilot
 from textual.widgets import Checkbox, DataTable, Input, Markdown, Static
-from textual.worker import WorkerState
+from textual.worker import WorkerCancelled, WorkerState
 from typer.testing import CliRunner
 
 from ..llm_fakes import (
@@ -95,7 +95,12 @@ def _labels(app: IjobApp) -> list[str]:
 
 
 async def _settle(app: IjobApp, pilot: Pilot[None]) -> None:
-    await app.workers.wait_for_complete()
+    while True:
+        try:
+            await app.workers.wait_for_complete()
+        except WorkerCancelled:  # a newer worker replaced it, so wait for that one
+            continue
+        break
     await pilot.pause()
 
 

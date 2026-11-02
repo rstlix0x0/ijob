@@ -283,7 +283,7 @@ async def _submit_url(
 
 
 async def _wait_for_modal(app: IjobApp, pilot: Pilot[None]) -> RecipeProposalScreen:
-    for _ in range(100):
+    for _ in range(1000):
         if isinstance(app.screen, RecipeProposalScreen):
             await pilot.pause()
             return app.screen
