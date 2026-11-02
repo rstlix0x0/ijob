@@ -78,6 +78,7 @@ class SourceKind(StrEnum):
     JOBPOSTING = "jobposting"
     FEED = "feed"
     FOURDAYWEEK = "4dayweek"
+    RECIPE = "recipe"
 
 
 class Vote(StrEnum):

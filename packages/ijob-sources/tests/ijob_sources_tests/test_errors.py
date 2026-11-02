@@ -4,12 +4,16 @@ from ijob_sources.errors import (
     FetchError,
     HttpStatusError,
     IdentityMismatchError,
+    InvalidRecipeError,
     NotPublicAddressError,
     ParseError,
+    RecipeEvaluationError,
+    RecipeFailedError,
     ReservedHostError,
     RobotsDisallowedError,
     SourceNotFoundError,
     SourcesError,
+    UnsupportedRecipeVersionError,
     UnsupportedUrlError,
 )
 
@@ -29,6 +33,10 @@ _REF = SourceRef(SourceKind.GREENHOUSE, parse_source_key("prisma"))
         UnsupportedUrlError(_URL, "no feed found"),
         NotPublicAddressError(_URL),
         ReservedHostError("www.jobstreet.com"),
+        InvalidRecipeError("no items"),
+        UnsupportedRecipeVersionError(2),
+        RecipeEvaluationError("Unregistered function"),
+        RecipeFailedError("recipe failed"),
     ],
 )
 def test_every_error_is_a_sources_error(error: SourcesError) -> None:
@@ -80,3 +88,33 @@ def test_error_messages() -> None:
     reserved = ReservedHostError("www.jobstreet.com")
     assert str(reserved) == "www.jobstreet.com is read only by its own source kind"
     assert reserved.host == "www.jobstreet.com"
+    invalid = InvalidRecipeError("no items")
+    assert str(invalid) == "invalid recipe: no items"
+    assert invalid.reason == "no items"
+    unsupported = UnsupportedRecipeVersionError(2)
+    assert str(unsupported) == "recipe version 2 is not supported"
+    assert unsupported.version == 2
+    evaluation = RecipeEvaluationError("Unregistered function")
+    assert str(evaluation) == "Unregistered function"
+    assert evaluation.reason == "Unregistered function"
+
+
+def test_recipe_failed_messages() -> None:
+    ref = SourceRef(SourceKind.RECIPE, parse_source_key("example"))
+    reanalyze = "run: ijob sources reanalyze recipe:example"
+
+    failed = RecipeFailedError.failed(ref, "Unregistered function")
+    unsupported = RecipeFailedError.unsupported_version(ref, 2)
+    expected = RecipeFailedError.expected_format(ref, "json")
+    no_jobs = RecipeFailedError.no_jobs(ref)
+
+    assert str(failed) == (
+        f"recipe for recipe:example failed: Unregistered function; {reanalyze}"
+    )
+    assert str(unsupported) == f"recipe version 2 is not supported; {reanalyze}"
+    assert str(expected) == f"recipe for recipe:example expected json; {reanalyze}"
+    assert str(no_jobs) == (
+        "recipe for recipe:example found no jobs; "
+        "if the site changed, run: ijob sources reanalyze recipe:example"
+    )
+    assert isinstance(no_jobs, SourcesError)

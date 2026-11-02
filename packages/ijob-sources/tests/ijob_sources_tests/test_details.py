@@ -21,8 +21,10 @@ from ijob_sources.description import TextForm, normalize
 from ijob_sources.details import describe
 from ijob_sources.errors import (
     ParseError,
+    RecipeEvaluationError,
     RobotsDisallowedError,
     SourceNotFoundError,
+    UnsupportedUrlError,
 )
 from ijob_sources.fourdayweek import parse_fourdayweek
 from ijob_sources.gem import parse_gem
@@ -291,7 +293,12 @@ def test_describe_raw_without_field_gives_none() -> None:
 
 
 def test_describe_covers_every_source_kind() -> None:
-    fetched = {SourceKind.WORKABLE, SourceKind.YC, SourceKind.LETSGETRUSTY}
+    fetched = {
+        SourceKind.WORKABLE,
+        SourceKind.YC,
+        SourceKind.LETSGETRUSTY,
+        SourceKind.RECIPE,
+    }
     covered = {kind for kind, _ in _PAYLOAD_CASES} | fetched
 
     assert covered == set(SourceKind)
@@ -518,3 +525,85 @@ def test_describe_letsgetrusty_raw_without_url_raises(raw: str) -> None:
 
     with pytest.raises(ParseError):
         _describe(sighting, _no_request)
+
+
+_RECIPE_PAGE = _text("recipe", "detail.html")
+_RECIPE_URL = "https://example.org/jobs/101/"
+
+
+def _html_page(text: str) -> httpx.Response:
+    return httpx.Response(
+        200, content=text.encode(), headers={"Content-Type": "text/html"}
+    )
+
+
+def _recipe_sighting(raw: dict[str, str]) -> Sighting:
+    return _sighting(SourceKind.RECIPE, json.dumps(raw), key="example")
+
+
+def test_recipe_detail_description() -> None:
+    requests: list[httpx.Request] = []
+    handler = _serving(_html_page(_RECIPE_PAGE), requests)
+    sighting = _recipe_sighting(
+        {"url": _RECIPE_URL, "detail_description": "//div[@id='body']"}
+    )
+
+    result = _describe(sighting, handler)
+
+    assert [str(request.url) for request in requests] == [_RECIPE_URL]
+    assert result is not None
+    assert "**platform**" in result
+    assert "Run Kubernetes" in result
+    assert "Apply by email" not in result
+    assert "tracking" not in result
+
+
+def test_recipe_detail_description_without_xpath_is_none_with_no_request() -> None:
+    sighting = _recipe_sighting({"url": _RECIPE_URL, "title": "Platform Engineer"})
+
+    assert _describe(sighting, _no_request) is None
+
+
+def test_recipe_detail_description_empty_is_none() -> None:
+    handler = _serving(_html_page(_RECIPE_PAGE), [])
+    sighting = _recipe_sighting(
+        {"url": _RECIPE_URL, "detail_description": "//div[@id='absent']"}
+    )
+
+    assert _describe(sighting, handler) is None
+
+
+@pytest.mark.parametrize("url", ["mailto:x", "/jobs/101/", "ftp://example.org/x"])
+def test_recipe_detail_description_bad_url(url: str) -> None:
+    sighting = _recipe_sighting({"url": url, "detail_description": "//div"})
+
+    with pytest.raises(ParseError):
+        _describe(sighting, _no_request)
+
+
+def test_recipe_detail_description_missing_url() -> None:
+    sighting = _recipe_sighting({"detail_description": "//div"})
+
+    with pytest.raises(ParseError):
+        _describe(sighting, _no_request)
+
+
+def test_recipe_detail_description_json_page_is_unsupported() -> None:
+    handler = _serving(
+        httpx.Response(
+            200, json={"a": 1}, headers={"Content-Type": "application/json"}
+        ),
+        [],
+    )
+    sighting = _recipe_sighting({"url": _RECIPE_URL, "detail_description": "//div"})
+
+    with pytest.raises(UnsupportedUrlError):
+        _describe(sighting, handler)
+
+
+def test_recipe_detail_description_engine_error() -> None:
+    handler = _serving(_html_page(_RECIPE_PAGE), [])
+    sighting = _recipe_sighting({"url": _RECIPE_URL, "detail_description": "foo()"})
+
+    with pytest.raises(RecipeEvaluationError):
+        _describe(sighting, handler)

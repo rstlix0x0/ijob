@@ -30,7 +30,7 @@ warn_unreachable = true
 enable_error_code = ["explicit-override"]
 
 [[tool.mypy.overrides]]
-module = ["dspy", "dspy.*"]
+module = ["dspy", "dspy.*", "jmespath", "jmespath.*", "lxml", "lxml.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

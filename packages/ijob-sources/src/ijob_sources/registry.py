@@ -30,6 +30,7 @@ from ijob_sources.letsgetrusty import LetsGetRusty
 from ijob_sources.lever import LeverSite
 from ijob_sources.manual import FeedUrl, JobPostingPage
 from ijob_sources.mycareersfuture import MyCareersFutureBoard
+from ijob_sources.recipe_source import RecipeSource
 from ijob_sources.remoteok import RemoteOkBoard
 from ijob_sources.rss import RssFeed
 from ijob_sources.workable import WorkableAccount
@@ -45,7 +46,10 @@ _NO_INTERVAL: Final = timedelta(0)
 
 
 def build_source(  # noqa: PLR0911, PLR0912 - one branch per SourceKind, so the match stays exhaustive
-    row: SourceRow, *, known: frozenset[ExternalId] = frozenset()
+    row: SourceRow,
+    *,
+    known: frozenset[ExternalId] = frozenset(),
+    recipe: str | None = None,
 ) -> Source:
     """Build the adapter that reads the source a row describes.
 
@@ -58,13 +62,16 @@ def build_source(  # noqa: PLR0911, PLR0912 - one branch per SourceKind, so the 
         known: The ids of the jobs already stored. Only the sources that fetch
             a page per job (`RSS` detail feeds and `JAPANDEV`) use it, to skip
             pages they already hold.
+        recipe: The recipe text stored for the row. Only a `RECIPE` source
+            uses it, and it cannot be built without one.
 
     Returns:
         The adapter for the row; its `ref` equals `row.ref`.
 
     Raises:
         InvalidValueError: The row is an `RSS` source whose key is not a known
-            feed, or a `JOBPOSTING` or `FEED` source without a `target_url`.
+            feed, a `JOBPOSTING` or `FEED` source without a `target_url`, or a
+            `RECIPE` source without a `recipe`.
     """
     key = row.ref.key
     kind = row.ref.kind
@@ -107,6 +114,10 @@ def build_source(  # noqa: PLR0911, PLR0912 - one branch per SourceKind, so the 
             return JobPostingPage(key, target_url=_target_url(row), company=row.company)
         case SourceKind.FEED:
             return FeedUrl(key, target_url=_target_url(row), company=row.company)
+        case SourceKind.RECIPE:
+            if recipe is None:
+                raise InvalidValueError("recipe", f"{row.ref} has no stored recipe")
+            return RecipeSource(key, company=row.company, recipe=recipe)
         case _ as unreachable:
             assert_never(unreachable)
 

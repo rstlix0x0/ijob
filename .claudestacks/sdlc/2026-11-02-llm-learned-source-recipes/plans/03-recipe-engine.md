@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-02
 depends-on: [01, 02]
 built-on: 6ee2c2bd4580
@@ -276,3 +276,24 @@ passes and the CLAUDE.md gate is green. Commit `feat(sources): evaluate recipes 
 
 - `uv run --locked pytest packages/ijob-sources` passes.
 - The gate exits 0.
+
+## Review findings
+
+- fixed — `recipe_document.py:191` a `charset=` Python knows but libxml2 does not (`latin-1`, `utf-8-sig`, `rot13`, `base64`) raised `LookupError` out of `load_document`; the parser is now built inside the try and retries with `encoding=None`. `uv run --locked pytest packages/ijob-sources` → `1820 passed`.
+- fixed — `recipe_document.py:223` JSON nested ≥1000 levels raised a bare `RecursionError` in `sample_text`; `load_document` now refuses JSON deeper than `MAX_JSON_DEPTH = 64` (measured iteratively) with `UnsupportedUrlError`. Same run as above.
+- fixed — `recipe.py:670` `_read_result` recursed on a list's first entry outside the isolation; it now loops. Same run as above.
+- fixed — `recipe.py:616` `detail_description` went into `raw` when the item's description was absent; it now goes in only when the recipe has no `fields.description`, as Task 3 says. Same run as above.
+- fixed — `recipe.py:724` a `posted_at` outside the UTC range (`9999-12-31T23:59:59-05:00`) was kept and made `Store.record` raise `OverflowError`; it is now absent and the job kept. Same run as above; full `uv run --locked pytest` → `2950 passed`.
+- open — `recipe_document.py:96` the 5 MiB cap is checked after `PoliteClient.get` buffers the whole body, so a huge or decompression-bomb response is held in memory before refusal. Needs a streamed byte limit in the client.
+- open — nits: `_isolated` docstring says it is the one place engine errors are caught (compile helpers also catch); nothing pins the `except Exception` catch-all; `_resolve` keeps an out-of-range port; a json recipe's invalid `detail_description` reports "does not compile" before "html only"; `version: int` could be `Literal[1]`; UTF-8 JSON with a BOM is refused; `RecipeEvaluationError` docstring narrower than its uses.
+
+## Deviations
+
+- 2026-11-02 — The board row was not clean at start (`2026-11-01-llm-layer` reads `spec disproven by plan 07`); this chain's row was clean.
+- 2026-11-02 — The dependency step ran on the main thread before the coders, so the parallel plan 04 coder never saw a stale lock. `jmespath` 1.1.0 was already in `uv.lock`; only `lxml` 6.1.3 was added. The mypy entry was merged into the existing `dspy` override (`module = ["dspy", "dspy.*", "jmespath", "jmespath.*", "lxml", "lxml.*"]`) instead of a separate one.
+- 2026-11-02 — Task 3 asks for `# noqa: BLE001` on the engine wrapper's `except Exception`. `uv run --locked ruff check --no-fix` reports it RUF100 (unused), because BLE001 exempts a handler that re-raises with `from`. A plain comment marks the isolation point instead.
+- 2026-11-02 — `etree.XPath("a\x00b")` raises a plain `ValueError`, not `XPathError`; `parse_recipe` also catches `ValueError`.
+- 2026-11-02 — Decided where the plan is silent: a non-finite float field reads as absent; `recipe_text` and `raw` keep `ensure_ascii=True`; field text that cannot encode as UTF-8 is absent; `load_document` honours a `charset=` in `Content-Type`; an absent `salary_defaults` is `SalaryDefaults(None, None)` and is omitted from `recipe_text`; `fetch_document` is async and returns `(document, final_url)`; `str(RecipeEvaluationError)` is the engine's text with no prefix.
+- 2026-11-02 — Beyond the plan, from review: JSON is refused past 64 levels of nesting (`MAX_JSON_DEPTH`).
+- 2026-11-02 — The three tasks ran in one coder, sequentially, and plans 03 and 04 were reviewed by one reviewer over their combined diff. The task-briefer ledger and briefs were skipped; the coder read the plan's task sections directly.
+- 2026-11-02 — Not committed: the instruction to execute did not ask for commits.

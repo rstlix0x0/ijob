@@ -1,5 +1,7 @@
 """Exceptions raised by ijob_sources."""
 
+from typing import Self
+
 from ijob_core.model import SourceRef
 
 
@@ -165,3 +167,111 @@ class ReservedHostError(SourcesError):
         """
         super().__init__(f"{host} is read only by its own source kind")
         self.host = host
+
+
+class InvalidRecipeError(SourcesError):
+    """Text is not a valid recipe.
+
+    Attributes:
+        reason: What is wrong with the recipe.
+    """
+
+    def __init__(self, reason: str) -> None:
+        """Build the error from what is wrong with the recipe.
+
+        Args:
+            reason: What is wrong with the recipe.
+        """
+        super().__init__(f"invalid recipe: {reason}")
+        self.reason = reason
+
+
+class UnsupportedRecipeVersionError(SourcesError):
+    """A recipe states a version this release cannot read.
+
+    Attributes:
+        version: The version the recipe states.
+    """
+
+    def __init__(self, version: int) -> None:
+        """Build the error from the stated version.
+
+        Args:
+            version: The version the recipe states.
+        """
+        super().__init__(f"recipe version {version} is not supported")
+        self.version = version
+
+
+class RecipeEvaluationError(SourcesError):
+    """An expression engine failed while a recipe was being evaluated.
+
+    The message is the engine's own text, so a caller can place it inside a
+    longer sentence of its own.
+
+    Attributes:
+        reason: The text of the failure the engine raised.
+    """
+
+    def __init__(self, reason: str) -> None:
+        """Build the error from the engine failure's text.
+
+        Args:
+            reason: The text of the failure the engine raised.
+        """
+        super().__init__(reason)
+        self.reason = reason
+
+
+class RecipeFailedError(SourcesError):
+    """A stored recipe could not be used to read its source at search time.
+
+    Every message ends by naming the command that learns the recipe again. Build
+    one with the classmethod for the failure.
+    """
+
+    @classmethod
+    def failed(cls, ref: SourceRef, error: str) -> Self:
+        """Build the error for a recipe that is invalid or failed to evaluate.
+
+        Args:
+            ref: The recipe source.
+            error: The text of the failure.
+        """
+        return cls(f"recipe for {ref} failed: {error}; {_reanalyze(ref)}")
+
+    @classmethod
+    def unsupported_version(cls, ref: SourceRef, version: int) -> Self:
+        """Build the error for a recipe whose version this release cannot read.
+
+        Args:
+            ref: The recipe source.
+            version: The version the recipe states.
+        """
+        return cls(f"recipe version {version} is not supported; {_reanalyze(ref)}")
+
+    @classmethod
+    def expected_format(cls, ref: SourceRef, expected: str) -> Self:
+        """Build the error for a page of another format than the recipe reads.
+
+        Args:
+            ref: The recipe source.
+            expected: The format the recipe reads, `html` or `json`.
+        """
+        return cls(f"recipe for {ref} expected {expected}; {_reanalyze(ref)}")
+
+    @classmethod
+    def no_jobs(cls, ref: SourceRef) -> Self:
+        """Build the error for a first page that yielded no valid job.
+
+        Args:
+            ref: The recipe source.
+        """
+        return cls(
+            f"recipe for {ref} found no jobs; if the site changed, {_reanalyze(ref)}"
+        )
+
+
+def _reanalyze(ref: SourceRef) -> str:
+    """Return the command that learns a source's recipe again."""
+    return f"run: ijob sources reanalyze {ref}"
