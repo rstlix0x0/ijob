@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-02
 built-on: 6ee2c2bd4580
 ---
@@ -147,3 +147,22 @@ passes and the CLAUDE.md gate is green. Commit `feat(ai): propose source recipes
 
 - `uv run --locked pytest packages/ijob-ai` passes.
 - The gate exits 0.
+
+## Review findings
+
+Plans 06 and 07 were reviewed together by one reviewer over the combined diff.
+
+- fixed — `source_recipe.py:80` `page_format` is now `Literal["html", "json"]`, like `RecipeOut.format`. `uv run --locked pytest` → `3071 passed`.
+- fixed — `tasks/__init__.py:1` the docstring now names the source recipe task. Same run as above.
+- open — `source_recipe.py:47` "exactly one field is set" is not enforced by `ProposedRecipe`.
+
+## Deviations
+
+- 2026-11-02 — The board row was not clean at start (another chain, `2026-11-01-llm-layer`, reads `spec disproven by plan 07`); this chain's row was clean.
+- 2026-11-02 — `SourceRecipeOut`'s validator returns `Self`. Ruff reports `SourceRecipeOut` as undefined (F821, `outputs.py:218`) when it names the class.
+- 2026-11-02 — The plan gives no types for `url`, `items`, `next_page` or `detail_description`. They are `str`, matching `ijob_sources.recipe.Recipe`.
+- 2026-11-02 — `ProposedRecipe` is a frozen, slotted, keyword-only dataclass with both fields defaulting to `None`.
+- 2026-11-02 — Only `sample` and the returned `json_url` go through `sanitize`; `page_url` is passed unchanged.
+- 2026-11-02 — "Seen failing" was not met for Task 2: a tool block stopped the first attempt and the module was written before a red run. Its first recorded run is green.
+- 2026-11-02 — The task-briefer ledger and briefs were skipped: one coder read the plan's task sections directly.
+- 2026-11-02 — Not committed: the instruction to execute did not ask for commits.

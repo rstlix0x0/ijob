@@ -47,6 +47,18 @@ def test_models_parsed(tmp_path: Path) -> None:
     assert llm.config_path == path
 
 
+def test_models_accepts_source_recipe(tmp_path: Path) -> None:
+    path = _config(
+        tmp_path, '[models]\nsource_recipe = "claude-sdk/claude-sonnet-5-5"\n'
+    )
+
+    llm = read_llm_settings(path)
+
+    assert dict(llm.models) == {
+        Task.SOURCE_RECIPE: ModelRef(Provider.CLAUDE_SDK, "claude-sonnet-5-5")
+    }
+
+
 def test_limits_and_cli_path_parsed(tmp_path: Path) -> None:
     path = _config(
         tmp_path,
@@ -191,6 +203,7 @@ _NEW_KEYS = (
     "instructions",
     "judge",
     "scorer",
+    "source_recipe",
     "[llm]",
     "max_cost_usd",
     "concurrency",

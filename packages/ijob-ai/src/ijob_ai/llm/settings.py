@@ -16,6 +16,7 @@ class Task(StrEnum):
     INSTRUCTIONS = "instructions"
     JUDGE = "judge"
     SCORER = "scorer"
+    SOURCE_RECIPE = "source_recipe"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -1,1 +1,1 @@
-"""DSPy tasks: profile, instructions, judge and scorer, with their text helpers."""
+"""DSPy tasks: profile, instructions, judge, scorer and source recipe, with helpers."""

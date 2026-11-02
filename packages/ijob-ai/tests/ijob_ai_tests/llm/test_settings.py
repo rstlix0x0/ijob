@@ -11,7 +11,13 @@ _JUDGE = ModelRef(Provider.CLAUDE_SDK, "claude-haiku-5-5")
 
 
 def test_task_values() -> None:
-    assert [t.value for t in Task] == ["cv_profile", "instructions", "judge", "scorer"]
+    assert [t.value for t in Task] == [
+        "cv_profile",
+        "instructions",
+        "judge",
+        "scorer",
+        "source_recipe",
+    ]
 
 
 def test_settings_defaults() -> None:

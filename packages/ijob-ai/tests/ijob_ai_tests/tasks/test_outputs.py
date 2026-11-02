@@ -1,5 +1,12 @@
 import pytest
-from ijob_ai.tasks.outputs import InstructionsOut, ProfileOut, ScoreOut, VerdictOut
+from ijob_ai.tasks.outputs import (
+    InstructionsOut,
+    ProfileOut,
+    RecipeOut,
+    ScoreOut,
+    SourceRecipeOut,
+    VerdictOut,
+)
 from ijob_core.model import Seniority
 from pydantic import ValidationError
 
@@ -106,3 +113,66 @@ def test_rule_length_bounds() -> None:
         InstructionsOut.model_validate({"filters": {}, "rules": ["r" * 201]})
     ok = InstructionsOut.model_validate({"filters": {}, "rules": ["r" * 200] * 10})
     assert len(ok.rules) == 10
+
+
+_RECIPE_FIELDS = {"title": ".//a/text()", "url": ".//a/@href"}
+_RECIPE: dict[str, object] = {
+    "version": 1,
+    "format": "html",
+    "url": "https://jobs.example.test/list",
+    "items": "//li[@class='job']",
+    "fields": _RECIPE_FIELDS,
+}
+
+
+def test_recipe_out_accepts_minimal_and_full_shapes() -> None:
+    minimal = RecipeOut.model_validate(_RECIPE)
+    full = RecipeOut.model_validate(
+        _RECIPE
+        | {
+            "salary_defaults": {"currency": "USD", "period": "year"},
+            "next_page": "//a[@rel='next']/@href",
+            "detail_description": "//div[@id='body']",
+            "fields": _RECIPE_FIELDS | {"company": ".//b/text()"},
+        }
+    )
+
+    assert minimal.salary_defaults is None
+    assert full.fields.company == ".//b/text()"
+    assert full.salary_defaults is not None
+    assert full.salary_defaults.period == "year"
+
+
+def test_recipe_out_forbids_unknown_keys() -> None:
+    with pytest.raises(ValidationError):
+        RecipeOut.model_validate(_RECIPE | {"extra": 1})
+    with pytest.raises(ValidationError):
+        RecipeOut.model_validate(
+            _RECIPE | {"fields": {"title": "a", "url": "b", "x": "c"}}
+        )
+
+
+def test_recipe_out_fields_need_title_and_url() -> None:
+    with pytest.raises(ValidationError):
+        RecipeOut.model_validate(_RECIPE | {"fields": {"title": "a"}})
+
+
+def test_recipe_out_version_must_be_one() -> None:
+    with pytest.raises(ValidationError):
+        RecipeOut.model_validate(_RECIPE | {"version": 2})
+
+
+def test_recipe_out_format_is_html_or_json() -> None:
+    with pytest.raises(ValidationError):
+        RecipeOut.model_validate(_RECIPE | {"format": "xml"})
+
+
+def test_source_recipe_out_needs_exactly_one() -> None:
+    recipe = RecipeOut.model_validate(_RECIPE)
+
+    with pytest.raises(ValidationError):
+        SourceRecipeOut(recipe=recipe, json_url="https://jobs.example.test/api")
+    with pytest.raises(ValidationError):
+        SourceRecipeOut()
+    assert SourceRecipeOut(recipe=recipe).json_url is None
+    assert SourceRecipeOut(json_url="https://jobs.example.test/api").recipe is None

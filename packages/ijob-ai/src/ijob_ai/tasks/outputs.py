@@ -1,16 +1,23 @@
-"""The shapes a model must answer in for each assessment task.
+"""The shapes a model must answer in for each task.
 
-Each model carries the same bounds as the core type it becomes
+Each assessment model carries the same bounds as the core type it becomes
 (`ResumeProfile`, `Instructions`, `Verdict`, `Score`), so an answer outside
 those bounds fails pydantic validation instead of reaching the core type. The
 models forbid unknown keys, so a filter outside the config file's `[filters]`
-table is rejected.
+table is rejected. The recipe models check shape only; the recipe parser owns
+whether a recipe is valid.
 """
 
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
 from ijob_core.model import Seniority
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 _ITEM = Annotated[str, StringConstraints(min_length=1, max_length=100)]
 _REASON = Annotated[str, StringConstraints(min_length=1, max_length=200)]
@@ -132,3 +139,85 @@ class ScoreOut(_Strict):
 
     score: Annotated[int, Field(ge=0, le=100)]
     reasons: Annotated[list[_REASON], Field(min_length=1, max_length=5)]
+
+
+class RecipeFieldsOut(_Strict):
+    """The expressions that read one job out of an item.
+
+    Attributes:
+        title: Expression for the job title.
+        url: Expression for the job's address.
+        company: Expression for the hiring company, when the item has one.
+        location: Expression for where the job is.
+        posted_at: Expression for when the job was published.
+        description: Expression for the job's description.
+        salary: Expression for the pay, as text.
+        external_id: Expression for the job's identifier in the source.
+    """
+
+    title: str
+    url: str
+    company: str | None = None
+    location: str | None = None
+    posted_at: str | None = None
+    description: str | None = None
+    salary: str | None = None
+    external_id: str | None = None
+
+
+class SalaryDefaultsOut(_Strict):
+    """What a salary text falls back to when it does not say.
+
+    Attributes:
+        currency: A currency code, when set.
+        period: A pay period, when set.
+    """
+
+    currency: str | None = None
+    period: str | None = None
+
+
+class RecipeOut(_Strict):
+    """A source recipe, as the model writes it.
+
+    Attributes:
+        version: The recipe version; always 1.
+        format: The kind of document the recipe reads.
+        url: The address of the page the recipe reads.
+        items: Expression that selects each job on the page.
+        fields: Expressions that read one job out of an item.
+        salary_defaults: Salary fallbacks, when set.
+        next_page: Expression that gives the next page's address, when set.
+        detail_description: For an HTML recipe, the expression on a job's own
+            page that gives its description, when set.
+    """
+
+    version: Literal[1]
+    format: Literal["html", "json"]
+    url: str
+    items: str
+    fields: RecipeFieldsOut
+    salary_defaults: SalaryDefaultsOut | None = None
+    next_page: str | None = None
+    detail_description: str | None = None
+
+
+class SourceRecipeOut(_Strict):
+    """The answer to a recipe request: a recipe, or a JSON address instead.
+
+    Attributes:
+        recipe: A recipe for the sampled page.
+        json_url: The address of a JSON document that holds the jobs, for an
+            HTML page whose jobs are not in its markup.
+    """
+
+    recipe: RecipeOut | None = None
+    json_url: str | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> Self:
+        """Require exactly one of `recipe` and `json_url`."""
+        if (self.recipe is None) == (self.json_url is None):
+            msg = "set exactly one of recipe and json_url"
+            raise ValueError(msg)
+        return self
