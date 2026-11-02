@@ -35,11 +35,11 @@ failed or the HTTP cache cannot be opened, and `2` for a flag, source reference
 or config file that cannot be used.
 
 When the stored instructions hold rules, `search` also has a model judge each
-posting that passes the filters. Each line then ends with a tab and the verdict:
-a check mark, a cross and the reason, or a dot and why there is no verdict
-(`cap reached`, `provider error`, `judge failed`), with ` (no description)`
-added when the model saw none. Dropped postings print only with `--dropped`. A
-summary goes to stderr, `judged N, cached K, dropped M, not judged U, cost $X of
+posting that passes the filters. A kept posting prints as soon as it is judged,
+ending with a tab and a check mark. With `--dropped` the rest print too: a cross
+and the reason, or a dot and why there is no verdict (`cap reached`, `provider
+error`, `judge failed`), with ` (no description)` added when the model saw none.
+A summary goes to stderr, `judged N, cached K, dropped M, not judged U, cost $X of
 $Y`, ending `; stopped: <why>` when judging stopped early. The status is `1`
 after printing when judging stopped for a provider error or an unknown cost. A
 missing judge model or another error of the LLM layer exits `1` before any line
@@ -135,7 +135,6 @@ None of the `traces` commands loads an LLM library.
 """
 
 import asyncio
-import json
 import logging
 import os
 import sqlite3
@@ -189,7 +188,6 @@ from ijob_app.cli_recipes import learn_page, reanalyze_command
 from ijob_app.config import (
     FilterFlags,
     FilterLayers,
-    effective_filters,
     read_filter_layers,
 )
 from ijob_app.home import (
@@ -200,7 +198,7 @@ from ijob_app.home import (
     setup_home,
 )
 from ijob_app.llm_config import read_llm_settings
-from ijob_app.llm_ops import LlmOptions, SearchItem
+from ijob_app.llm_ops import JudgeStatus, LlmOptions
 from ijob_app.llm_text import profile_lines, search_summary, verdict_cell
 from ijob_app.render import error_text, posting_fields
 from ijob_app.service import (
@@ -573,21 +571,28 @@ def _posting_line(service: Service, posting: Posting) -> str:
     )
 
 
-async def _collect_search(
+async def _stream_search(
     service: Service,
     layers: FilterLayers,
     refs: list[SourceRef],
     progress: ProgressLine,
-) -> list[SearchItem]:
-    """Gather every item of a search, showing how many the judge has read."""
-    items: list[SearchItem] = []
+    *,
+    show_dropped: bool,
+) -> None:
+    """Print each posting of a search the moment it is ready."""
+    read = 0
     kept = 0
     async for item in service.search(layers, refs):
-        items.append(item)
-        if item.verdict is not None:
-            kept += item.verdict.keep
-            progress.show_live(f"judging jobs: {len(items)} read, {kept} kept")
-    return items
+        if item.status is JudgeStatus.NOT_RUN:
+            typer.echo(_posting_line(service, item.posting))
+            continue
+        read += 1
+        keep = item.verdict is not None and item.verdict.keep
+        kept += keep
+        if keep or show_dropped:
+            progress.clear()
+            typer.echo(f"{_posting_line(service, item.posting)}\t{verdict_cell(item)}")
+        progress.show_live(f"judging jobs: {read} read, {kept} kept")
 
 
 def _print_search(
@@ -597,18 +602,18 @@ def _print_search(
     *,
     show_dropped: bool,
 ) -> bool:
-    """Print the postings that pass the filters, judged when rules are stored.
+    """Print the postings that pass the filters as each one is ready.
 
     With no stored rules each posting prints as `_posting_line` writes it. With
-    rules each line ends with the judge's verdict in a tab-separated cell, in the
-    order the filters list the postings, a dropped posting is left out unless
-    `show_dropped`, and a summary and any warnings go to stderr.
+    rules a kept posting prints as soon as it is judged, with the verdict in a
+    tab-separated cell, and a posting that was dropped or not judged is left out
+    unless `show_dropped`. A summary and any warnings go to stderr.
 
     Args:
         service: The open service.
         layers: The filters the config file and the flags set.
         refs: The sources to read; empty means every source.
-        show_dropped: Whether to print the postings the judge dropped.
+        show_dropped: Whether to print the postings not kept, with the reason.
 
     Returns:
         Whether the judging ended on a stop that makes the command exit `1`.
@@ -616,25 +621,16 @@ def _print_search(
     progress = ProgressLine(sys.stderr)
     try:
         with llm_failures():
-            items = asyncio.run(_collect_search(service, layers, refs, progress))
+            asyncio.run(
+                _stream_search(
+                    service, layers, refs, progress, show_dropped=show_dropped
+                )
+            )
     finally:
         progress.close()
     report = service.last_report
     if report is None:
-        for item in items:
-            typer.echo(_posting_line(service, item.posting))
         return False
-    stored = service.instructions()
-    instruction = None if stored is None else json.loads(stored.filters_json)
-    spec, _ = effective_filters(layers, instruction)
-    order = {
-        post.id: place for place, post in enumerate(service.open_postings(spec, refs))
-    }
-    for item in sorted(items, key=lambda each: order.get(each.posting.id, len(order))):
-        verdict = item.verdict
-        if verdict is not None and not verdict.keep and not show_dropped:
-            continue
-        typer.echo(f"{_posting_line(service, item.posting)}\t{verdict_cell(item)}")
     for note in report_notes(report):
         typer.echo(note, err=True)
     typer.echo(search_summary(report), err=True)
@@ -1052,7 +1048,7 @@ def make_app(  # noqa: PLR0915  # one registration per command
             bool,
             typer.Option(
                 "--dropped",
-                help="Also list the postings your rules drop, with the reason.",
+                help="Also list the postings not kept, with the reason.",
             ),
         ] = False,
         db: Annotated[Path | None, typer.Option(help=DB_HELP)] = None,

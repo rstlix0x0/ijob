@@ -2178,7 +2178,7 @@ def test_search_provider_failure_prints_partial_exit_1(tmp_path: Path) -> None:
 
     result = CliRunner().invoke(
         app_,
-        ["search", *_JOBICY_SEARCH, "--db", str(tmp_path / "ijob.db")],
+        ["search", *_JOBICY_SEARCH, "--dropped", "--db", str(tmp_path / "ijob.db")],
         env=_env(tmp_path),
     )
 
