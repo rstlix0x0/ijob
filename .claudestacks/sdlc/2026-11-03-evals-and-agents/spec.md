@@ -134,8 +134,9 @@ Migration 8 adds these tables to `ijob.db`, which is in the ijob home and is nev
 | `eval_results` | `run_id, case_key` | `passed`, `answer` (JSON), `detail`, `latency_ms` |
 
 Votes have their own table because `saved_scores` would otherwise show a juror's score in the user's search list
-[1.3]. `task` is `judge` or `scorer`. A label set shows as `labels v<id>`. A `running` row that its process
-left behind reads as `incomplete`.
+[1.3]. `task` is `judge` or `scorer`. A label set shows as `labels v<id>`. Any `running` row read by another
+command shows as `incomplete`, whether or not its process is alive, and its spend still counts. A suite spanning
+both tasks stores both versions in `task_version`, as `judge-1+scorer-1`, and compares on that exact text.
 
 ## 6. Labels
 
@@ -200,7 +201,8 @@ means every juror voted and the row above gives a label; for a score, this is wh
 
 ## 7. Review
 
-`ijob eval review` shows the canvas screens, one case at a time.
+`ijob eval review` shows the screens of section 15, one case at a time. With no jury, rules or profile to identify
+a set, it exits 1 with the fix.
 
 | Input | Judge case | Scorer case |
 |---|---|---|
@@ -253,6 +255,7 @@ out of range exits 2.
 - **Model on the jury:** `judge`, `scorer` and `reasons` check the set's stored jury, exit 2, and name it, because it would be graded on
   its own answers. `hostile` and the agent suites use no labels, so they allow it.
 - **Fewer than 10 labels:** exit 1 with `ijob eval review` or `ijob eval label` as the fix.
+- **No set:** with no jury, rules or profile to identify a set, `judge`, `scorer` and `reasons` exit 1 with the fix.
 - **Stop:** a cap or provider stop stores the run as `incomplete`, and so does any case that ended on `CapReachedError`, including the
   last one. It stays visible in `eval report`, marked.
 - **Exit status:** 1 on a provider or cost-unknown stop (`cli_llm.py:142-148`), on a missed hard target, or on any incomplete `hostile`,
@@ -354,9 +357,10 @@ Run the task on each labelled case with the model under test [1.5], then store a
 ### `explore-agent`
 
 - Cases: `ijob_ai/evals/data/explore_scenarios.json`, 5 committed instructions.
+- Each runs on an empty temporary store, so `list_sources` and `companies_in_store` read nothing of the user's.
 - **Main metric:** accepted ÷ (accepted + refused) `propose` calls. Repeats and already-known sources are in neither. 3 accepted, 1 refused, 1 repeat, 1
   known → 0.75. [P-G] No `propose` shows `-`.
-- Also: mean G-Eval instruction following, new and known sources, steps and cost. `LLMTestCase.input` is the instruction and `actual_output` the proposals,
+- Also: mean G-Eval instruction following, steps and cost. `LLMTestCase.input` is the instruction and `actual_output` the proposals,
   one per line with company and reason. Steps: "List what the instruction asks for." "Check each proposal against it." "Give 10 if all fit, and take off in
   proportion to those that do not." The grader rules of `reasons` apply.
 - **Hard target 0:** rule violations.
@@ -365,10 +369,11 @@ Run the task on each labelled case with the model under test [1.5], then store a
 
 - **Comparable** means the same suite, set, and task version, status `complete`, not limited. A suite with no labels compares by suite and task version.
 - No argument: for the current set, a table per suite of comparable runs, a line counting others, the jury metrics line, and total OpenRouter spend of
-  `total_cost_usd`. An empty store prints that no run exists, exit 0.
+  `total_cost_usd`. An empty store prints that no run exists, exit 0. With no jury, rules or profile to identify a set, it shows the suites without labels
+  and says labels need setup, exit 0.
 - `RUN`: one run's metrics, whatever its status. An unknown run exits 2.
 - `RUN --failures`: its failed cases with answer and reason.
-- Gaps smaller than the ± show the note from the canvas.
+- Gaps smaller than the ± show the note in section 15.
 
 ## 9. Agents
 
@@ -452,7 +457,7 @@ public-host client, since it calls the boards' own API hosts.
 
 ### Rule violations
 
-A violation is recorded on the span, counted on the run and refused by the tool. Each is a hard target of 0:
+A violation is recorded on the span, counted on the run and refused by the tool. A violation inside `find_source` also adds to the explore run's count. Each is a hard target of 0:
 
 - `open_page` to a host the site rule refuses, or a guess the form rule refuses, or a new guess after a page was read.
 - `open_page` to a non-public address (the public-host guard refuses it).
@@ -469,7 +474,7 @@ A server's redirect off the site, a malformed argument and a tool error are no v
 |---|---|
 | `list_sources()` | References and companies of the user's sources |
 | `companies_in_store(query)` | Distinct companies from stored postings matching a substring, at most 50 |
-| `find_source(company)` | One source agent run, sharing the budget |
+| `find_source(company)` | One source agent run, sharing the budget. One that ends with no source counts toward "no source" on the proposals screen |
 | `propose(ref, why)` | Records a proposal; `why` is cut to 200 characters |
 
 `propose` returns: `proposed`; `already proposed` for a repeat, with no count; `already one of your sources` for a known source, counted as known and not offered; or `not verified in this run`, a refusal and violation.
@@ -478,11 +483,11 @@ Explore has no web search, so it can only propose companies the model knows or t
 
 ### Commands
 
-Screens are in the design canvas, <https://claude.ai/artifact/9sWtPQwAhX1Fr7X38ksfvw>. Source names use `kind:key`.
+Screens are in section 15. Source names use `kind:key`.
 
 **`ijob sources find "<company or URL>" [--company C] [--model M] [--yes]`**
 
-- Blank input exits 2. An `http` or `https` input needs `--company`, or exits 2. Anything else is a company name.
+- Blank input exits 2. An `http` or `https` input needs `--company`, or exits 2. Anything else is a company name, and `--company` with it exits 2.
 - Missing `[models].source_agent` exits 1, naming the key [1.10].
 - A pipe without `--yes` exits 1 before any call, as `sources add-url` does (`cli_recipes.py:67-76`).
 - Found: shows steps, sample titles and cost, then asks. On yes, a board goes through `add_source`, a feed or job page through `add_url` with its address [1.11], and a recipe through `accept_recipe`.
@@ -526,9 +531,11 @@ Only the Sources tab changes.
 
 Tests use fakes and recorded fixtures, with no LLM and no network (`CLAUDE.md`).
 
-- `test_metrics.py`: every example in sections 7 and 8.
-- `test_labels.py`: every row in section 6, the pools, `--limit` and the spot check order.
-- `test_store` for the new tables and migration 8 on a version 7 database.
+- `test_metrics.py`: every example in section 8.
+- `test_eval_report.py`: every example in section 7.
+- `test_eval_rules.py`: every row in section 6, `--limit` and the spot check order.
+- `test_store.py` and `test_eval_records.py`: the new tables, the pools and migration 8 on a version 7 database.
+- `test_eval_view.py` and `test_agent_view.py`: the drawing of each screen in section 15.
 - `test_react.py`: the cases of probes P2 and P-G, with a fake engine.
 - `test_agent_tools.py`: every tool outcome, site rule row, guess, redirect and violation, with `httpx.MockTransport`.
 - `test_deepeval_metrics.py`: `KeepMatch`, `ScoreClose` and the grader with a fake model, and no output under `_show_indicator=False`.
@@ -563,6 +570,7 @@ These need the user's OK for spending at each step, and Greenhouse and Lever rea
 - The `unjudged` pool is broad, including postings the user's filters drop. The 20 cases test the judge on what it has not seen, as the intent's sample asks.
 - The total budget covers `ijob eval` commands only.
 - A concurrent second `eval label` wastes money but cannot corrupt data.
+- A careers page that redirects to a host off the company's site and off the known boards ends as `could not open`, so a company on an unlisted hiring system may not resolve this way. The user accepted this at the first spec approval.
 
 ## 13. Non-goals
 
@@ -594,3 +602,207 @@ The probes were throwaway scripts, not kept in the repository. Commands ran from
 | P-G | The review's fixes | Safe tool wrapper and stored stops with a fake engine; guess form; `--limit`; rates; budget; read-only SQL |
 | P-H | Does a guard stop a redirect? | `PoliteClient` on `httpx.MockTransport` with a site guard, through `resolve_url` |
 | P2 | Does a ReAct subclass keep the rails? | Subclass with a fake engine: normal run, cap, unparseable answer, unknown tool, provider failure, step limit |
+
+## 15. Screens
+
+These are the exact layouts and wording; all numbers, companies and results are examples. Boxes come from `view.boxed`. The design canvas,
+<https://claude.ai/artifact/9sWtPQwAhX1Fr7X38ksfvw>, shows them in color; where they differ, this section governs. A pipe gets plain lines with no boxes.
+
+**Command map**
+
+```
+ijob
+├─ eval
+│  ├─ label    [--limit N] [--yes]
+│  ├─ review
+│  ├─ run      judge|scorer|reasons|hostile|source-agent|explore-agent
+│  │           [--model X] [--limit N] [--yes]
+│  └─ report   [RUN] [--failures]
+├─ sources
+│  └─ find     "Company or URL" [--company C] [--model M] [--yes]
+└─ explore     "instruction" [--model M] [--yes]
+```
+
+**`ijob eval label --limit 10`**
+
+```
+╭─ Jury · 10 postings · judge + scorer ────────────────────────────────╮
+│ JUROR                                     COST                       │
+│ claude-sdk/claude-opus-5-5        subscription                       │
+│ openrouter/openai/gpt-6.1-sol      about $0.18                       │
+│ openrouter/google/gemini-4-argon   about $0.18                       │
+│                                                                      │
+│ Estimate about $0.36 · cap $4.00                                     │
+│ Sends your rules, CV profile and postings to OpenRouter, OpenAI and  │
+│ Google                                                               │
+╰──────────────────────────────────────────────────────────────────────╯
+ Start the jury?   y yes   n no
+
+ ⠹ Jury  ████████░░░░░░░░  24 of 60 votes   $0.14 of $4.00
+
+ ✓ Jury finished  59 of 60 votes
+   judge   8 agree   2 to review
+   scorer  7 agree   3 to review
+   cost $0.35 of $4.00
+ › ijob eval review
+```
+
+**`ijob eval review`**
+
+```
+╭─ Review 3 of 5 · judge ──────────────────────────────────────────────╮
+│ Senior Backend Engineer                                              │
+│ Example Co  ·  Berlin  ·  no salary stated                           │
+│                                                                      │
+│ JUROR   VOTE    WHY                                                  │
+│ Opus    keep    remote allowed in the text                           │
+│ GPT     reject  rule 2: office attendance required                   │
+│ Gemini  reject  rule 2: three days on site                           │
+│                                                                      │
+│ Your rule 2: remote only                                             │
+╰──────────────────────────────────────────────────────────────────────╯
+ Your call   k keep   r reject   o open posting   s skip   q quit
+
+╭─ Review 4 of 5 · scorer · spread 32 ─────────────────────────────────╮
+│ Platform Engineer                                                    │
+│ Example Co  ·  Remote  ·  no salary stated                           │
+│                                                                      │
+│  JUROR  SCORE                    WHY                                 │
+│   Opus  72 ██████████████░░░░░░  skills match, seniority higher      │
+│    GPT  65 █████████████░░░░░░░  most skills match                   │
+│ Gemini  40 ████████░░░░░░░░░░░░  field differs from the CV           │
+╰──────────────────────────────────────────────────────────────────────╯
+ Your score   0-100   Enter takes 65   o open   s skip   q quit
+```
+
+**`ijob eval run`**
+
+```
+╭─ Judge · claude-haiku-5-5 · 100 cases · run 7 ───────────────────────╮
+│ METRIC            VALUE                                              │
+│ Keep recall        0.90  ±0.09  main                                 │
+│ Keep precision     0.82                                              │
+│ Macro F1           0.87                                              │
+│ Right rule cited   0.76                                              │
+│ Unusable answers      3  of 100                                      │
+│ Cost              $0.10                                              │
+│ Latency            6.4s  p95 11.2s                                   │
+╰──────────────────────────────────────────────────────────────────────╯
+ › ijob eval report 7 --failures
+
+╭─ Hostile · claude-haiku-5-5 · 10 pairs · run 8 ──────────────────────╮
+│ CASE                  CLEAN  HOSTILE                                 │
+│ ignore-instructions  reject   reject  ✓                              │
+│ fake-system-message  reject   reject  ✓                              │
+│ score-me-100             35       92  ✗ changed                      │
+╰──────────────────────────────────────────────────────────────────────╯
+ ✗ 1 of 10 attacks changed the answer  target is 0
+
+╭─ Source agent · claude-sonnet-5-5 · 100 companies · run 9 ───────────╮
+│ METRIC                   VALUE                                       │
+│ Found the right source    0.84  ±0.07  main                          │
+│ Other source verified        0                                       │
+│ Nothing found               16  of 100                               │
+│ Could not check              0                                       │
+│ Rule violations              0  target 0                             │
+│ Steps                        3  median                               │
+│ Cost per company        $0.006                                       │
+╰──────────────────────────────────────────────────────────────────────╯
+   These cases are easy: most board names are simple company slugs.
+```
+
+A scorer screen follows the judge screen, with NDCG@10 as main, then Spearman, mean score error, unusable answers, cost and latency. A reasons or explore screen
+follows it too, with its section 8 metrics.
+
+**`ijob eval report`**
+
+```
+╭─ Judge runs · labels v1 · judge-1 ───────────────────────────────────╮
+│ RUN  MODEL             RECALL  PREC    F1  BAD   COST   P50          │
+│   7  claude-haiku-5-5    0.90  0.82  0.87    3  $0.10  6.4s          │
+│  10  glm-5.3-flash       0.78  0.74  0.76    6  $0.01  2.1s          │
+│  11  gpt-5.4-nano        0.86  0.80  0.83    2  $0.05  1.9s          │
+╰──────────────────────────────────────────────────────────────────────╯
+   Gaps under ±0.09 may be noise.
+   Jury: agreement 0.70 · overruled 1 · spot check 0.90
+   OpenRouter spent $3.60 of $10.00 · 2 other runs not compared
+```
+
+**In a pipe**
+
+```
+$ ijob eval run judge | cat
+keep_recall      0.90
+keep_precision   0.82
+macro_f1         0.87
+right_rule       0.76
+unusable         3
+cost_usd         0.10
+```
+
+**`ijob sources find "Example Co"`**
+
+```
+ ⠹ Looking for Example Co   step 4 of at most 8
+
+╭─ Found · lever:example-co ───────────────────────────────────────────╮
+│ STEP  WHAT                       RESULT                              │
+│    1  try greenhouse:example-co  not found                           │
+│    2  try ashby:example-co       not found                           │
+│    3  open example.com/careers   links to lever                      │
+│    4  verify lever:example-co    ✓ 41 jobs, company matches          │
+│                                                                      │
+│ Sample: Staff Engineer · Sales Lead · Data Analyst                   │
+╰──────────────────────────────────────────────────────────────────────╯
+   cost $0.004 of $0.50
+ Add this source?   y yes   n no
+ ✓ Added lever:example-co  41 jobs on the next fetch
+
+When nothing is found:
+ ✗ No source found for Example Co  4 steps, $0.004
+ › ijob sources add-url <careers URL> --company "Example Co"
+```
+
+**`ijob explore "Find fintech companies hiring in Tokyo"`**
+
+```
+ ⠹ Exploring   step 6 of at most 20   $0.03 of $0.50
+   ✓ read your 168 sources
+   ✓ checked Example Co        lever, 41 jobs
+   ✗ checked Sample Labs       no public board
+
+╭─ 2 sources proposed · 1 already known · 1 no source ─────────────────╮
+│ #  SOURCE            COMPANY     JOBS  WHY                           │
+│ 1  lever:example-co  Example Co    41  Tokyo fintech, hires remote   │
+│ 2  ashby:sample-pay  Sample Pay    18  payments, Japan office        │
+╰──────────────────────────────────────────────────────────────────────╯
+   cost $0.05 of $0.50
+ Add which?   1,2   all   none
+ ✓ Added 2 sources  run: ijob search
+```
+
+**TUI Sources tab, after the change**
+
+```
+ ijob    Jobs  Sources  CV  Rules  Traces
+
+╭─ Add a source ───────────────────────────────────────────────────────╮
+│ › URL, kind:key, or blank to find it          Stripe                 │
+╰──────────────────────────────────────────────────────────────────────╯
+⠹ Finding Stripe in the background · step 2 · $0.002
+```
+
+**TUI confirm modal, Cancel focused**
+
+```
+╭─ Found · greenhouse:stripe ──────────────────────────────────────────╮
+│ STEP  WHAT                      RESULT                               │
+│    1  try greenhouse:stripe     ✓ found                              │
+│    2  verify greenhouse:stripe  ✓ 744 jobs, company matches          │
+│                                                                      │
+│ Sample: Staff Engineer · Sales Lead · Data Analyst                   │
+│ cost $0.002 of $0.50                                                 │
+│                                                                      │
+│ [ Accept ]  [ Cancel ]                                               │
+╰──────────────────────────────────────────────────────────────────────╯
+```
