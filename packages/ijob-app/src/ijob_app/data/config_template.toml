@@ -30,6 +30,9 @@
 # scorer       = "claude-sdk/claude-haiku-5-5"
 # source_recipe = "claude-sdk/claude-sonnet-5-5"
 # job_extract  = "claude-sdk/claude-haiku-5-5"
+# source_agent  = "claude-sdk/claude-sonnet-5-5"
+# explore_agent = "claude-sdk/claude-sonnet-5-5"
+# eval_grader   = "openrouter/openai/gpt-6.1-sol"
 
 # Limits on model calls.
 # [llm]
@@ -46,3 +49,10 @@
 # [tracing]
 # max_size_mb = 256           # 16 to 10240
 # langfuse_endpoint = "http://localhost:3000"
+
+# The eval commands. The jury holds 2 to 5 different models and must stay on one
+# line. Only OpenRouter spend counts toward the two caps.
+# [eval]
+# jury = ["claude-sdk/claude-opus-5-5", "openrouter/openai/gpt-6.1-sol", "openrouter/google/gemini-4-argon"]
+# max_cost_usd   = 4          # per command; above 0 and at most 100
+# total_cost_usd = 10         # across all commands; above 0 and at most 100

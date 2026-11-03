@@ -47,8 +47,9 @@ _T2 = datetime(2026, 10, 2, 9, 30, 15, 250000, tzinfo=UTC)
 _T1_TEXT = "2026-10-01T08:00:00.000000+00:00"
 _T2_TEXT = "2026-10-02T09:30:15.250000+00:00"
 _ALL_TABLES = (
-    "cv,cv_profile,instructions,labels,postings,scores,sightings,"
-    "skipped_items,source_recipes,sources,verdicts"
+    "cv,cv_profile,eval_cases,eval_labels,eval_results,eval_runs,eval_sets,"
+    "eval_votes,instructions,labels,postings,scores,sightings,skipped_items,"
+    "source_recipes,sources,verdicts"
 )
 
 
@@ -90,11 +91,11 @@ def _draft(
     return SightingDraft(source=source, external_id=ExternalId(external_id), **values)
 
 
-def test_fresh_database_is_version_7(tmp_path: Path) -> None:
+def test_fresh_database_is_version_8(tmp_path: Path) -> None:
     path = tmp_path / "ijob.db"
     with Store.open(path):
         pass
-    assert _scalar(path, "PRAGMA user_version") == 7
+    assert _scalar(path, "PRAGMA user_version") == 8
     tables = _scalar(
         path,
         "SELECT group_concat(name) FROM "
@@ -124,7 +125,7 @@ def test_open_is_idempotent(tmp_path: Path) -> None:
         )
     with Store.open(path):
         pass
-    assert _scalar(path, "PRAGMA user_version") == 7
+    assert _scalar(path, "PRAGMA user_version") == 8
     assert _scalar(path, "SELECT count(*) FROM postings") == 1
 
 
@@ -390,7 +391,7 @@ def test_version_1_database_migrates_and_keeps_rows(tmp_path: Path) -> None:
         conn.execute("PRAGMA user_version = 1")
     with Store.open(path) as store:
         postings = store.postings(sources=[_A])
-    assert _scalar(path, "PRAGMA user_version") == 7
+    assert _scalar(path, "PRAGMA user_version") == 8
     assert len(postings) == 1
     posting = postings[0]
     assert (posting.title, posting.company) == ("Engineer", "Acme")
@@ -901,7 +902,7 @@ def test_migration_3_on_version_2_database(tmp_path: Path) -> None:
     _version_2_database(path)
     with Store.open(path) as store:
         (posting,) = store.postings(sources=[_A])
-    assert _scalar(path, "PRAGMA user_version") == 7
+    assert _scalar(path, "PRAGMA user_version") == 8
     assert posting.title == "Engineer"
     assert posting.description is None
     tables = _scalar(
@@ -1122,7 +1123,7 @@ def test_migration_4_creates_tables(tmp_path: Path) -> None:
         cv = store.cv()
         assert store.cv_profile() is None
         assert store.instructions() is None
-    assert _scalar(path, "PRAGMA user_version") == 7
+    assert _scalar(path, "PRAGMA user_version") == 8
     assert posting is not None
     assert posting.title == "Engineer"
     assert cv == StoredCv("cv.pdf", "ab" * 32, 10, _T1)
@@ -1151,7 +1152,7 @@ def test_migration_5_adds_source_recipes(tmp_path: Path) -> None:
     fresh = tmp_path / "fresh.db"
     with Store.open(fresh):
         pass
-    assert _scalar(fresh, "PRAGMA user_version") == 7
+    assert _scalar(fresh, "PRAGMA user_version") == 8
     assert _rows(fresh, "PRAGMA table_info(source_recipes)") == [
         (0, "ref", "TEXT", 1, None, 1),
         (1, "recipe", "TEXT", 1, None, 0),
@@ -1168,7 +1169,7 @@ def test_migration_5_adds_source_recipes(tmp_path: Path) -> None:
     with Store.open(upgraded) as store:
         row = store.source(_A)
         assert store.recipe(_A) is None
-    assert _scalar(upgraded, "PRAGMA user_version") == 7
+    assert _scalar(upgraded, "PRAGMA user_version") == 8
     assert _rows(upgraded, "PRAGMA table_info(source_recipes)") == _rows(
         fresh, "PRAGMA table_info(source_recipes)"
     )
@@ -1581,3 +1582,42 @@ def test_two_connections_can_read_while_one_writes(tmp_path: Path) -> None:
         writer.import_seeds([(_A, "Alpha")])
         assert _scalar(path, "PRAGMA journal_mode") == "wal"
         assert [row.ref for row in reader.sources()] == [_A]
+
+
+def test_migration_8_upgrades_a_version_7_database(tmp_path: Path) -> None:
+    path = tmp_path / "ijob.db"
+    with closing(sqlite3.connect(path)) as conn, conn:
+        for statements in _MIGRATIONS[:7]:
+            for statement in statements:
+                conn.execute(statement)
+        conn.execute(
+            "INSERT INTO postings (title, company, location, url, first_seen, "
+            "last_seen) VALUES ('Engineer', 'Acme', 'Remote', "
+            "'https://example.com/jobs/1', ?, ?)",
+            (_T1_TEXT, _T1_TEXT),
+        )
+        conn.execute(
+            "INSERT INTO sources (ref, company, origin) "
+            "VALUES ('greenhouse:alpha', 'Alpha', 'seed')"
+        )
+        conn.execute("PRAGMA user_version = 7")
+    assert _rows(path, "PRAGMA table_info(eval_sets)") == []
+
+    with Store.open(path) as store:
+        posting = store.posting(PostingId(1))
+        [source] = store.sources()
+        assert store.evals.runs() == []
+
+    assert _scalar(path, "PRAGMA user_version") == 8
+    assert posting is not None
+    assert posting.title == "Engineer"
+    assert source.company == "Alpha"
+    tables = _scalar(
+        path,
+        "SELECT group_concat(name) FROM "
+        "(SELECT name FROM sqlite_master WHERE type = 'table' "
+        "AND name LIKE 'eval_%' ORDER BY name)",
+    )
+    assert tables == (
+        "eval_cases,eval_labels,eval_results,eval_runs,eval_sets,eval_votes"
+    )

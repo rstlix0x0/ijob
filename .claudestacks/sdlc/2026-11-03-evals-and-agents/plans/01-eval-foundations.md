@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-03
 built-on: 8947dcb8c009
 ---
@@ -141,3 +141,35 @@ packages/ijob-core/src/ijob_core/eval_records.py    — create: eval record type
 
 - The five gate commands in `CLAUDE.md` exit 0.
 - No test calls an LLM or the network.
+
+## Review findings
+
+Fixed:
+- `test_package.py:42` suppression had no reason. Fixed; `uv run --locked ruff check --no-fix` → `All checks passed!`.
+- `eval_records.py` `_check_answer` accepted scores outside 0 to 100 and a reject with no rule. Fixed; `uv run --locked pytest packages/ijob-core/tests/ijob_core_tests/test_eval_records.py` → 24 passed.
+- `eval_spend.py` `cap` was fixed at construction, so two operations could pass `eval.total_cost_usd`. Now a property that shrinks with spend; `uv run --locked pytest .../test_eval_spend.py .../test_llm_ops.py .../test_eval_records.py` → 116 passed.
+- `eval_spend.py` `finish` did not write spend. Fixed in the same change, same run.
+
+Open:
+- `pyproject.toml:44` four of the six `-p no:` flags have no guarding test, and no comment says why they exist.
+- `config_template.toml:53` "must stay on one line" is false for a user.
+- `llm_config.py:25` no test accepts a jury of 2 or 5.
+- `llm_config.py:207` a trailing space dodges the different-references rule, through `parse_model_ref`.
+- `eval_records.py:9` the docstring says a stored label never changes; a user label replaces a derived one.
+- `eval_records.py:87` a scorer answer with a stray `rule` names `keep` in the error; `test_eval_records.py:268` never reaches the judge `score` branch.
+- `eval_records.py:89` set and run ids are bare `int`.
+- `eval_records.py:181` `EvalLabel.__post_init__` errors, the `finish_run` `RUNNING` guard and naive-time refusals have no test. Same for the `begin` and `finish` error paths in `eval_spend.py`.
+- `eval_records.py:260` timestamp helpers duplicate `store.py`; `_SCORE_MAX` duplicates `model.py:56`.
+- `eval_records.py:365` `put_cases` ignores `case.set_id`.
+- `eval_records.py:601` `record_spend` and `finish_run` no-op on an unknown run, spend can go negative or lower, and a second `finish_run` flips the status.
+- `eval_spend.py:99` `budget_for` accepts an operation of any cap, so a forgotten `cap=` falls back to `[llm].max_cost_usd`.
+- `eval_spend.py:146` `record()` is allowed after `finish()`.
+- Nits: `_max_cost` wrapper; `test_lm_for_openrouter_builds_one_lm_per_task` name; two suppressions without reasons in tests; `Final` on `_SELECT_*`; typed run row; `ORDER BY position` tie-break; `eval_spend.py:1` 81 columns; spent above the total and `cap=0` untested.
+
+## Deviations
+
+- 2026-11-03: the build did not commit per task. The plan's "Commit ..." lines stand down, since CLAUDE.md says commit only when the user asks and the run had no such instruction.
+- 2026-11-03: Task 5 builds `budget_for(ref, operation)`, not `budget_for(ref)`. `run_items` creates the operation's budget and first hands it to the worker (`llm_ops.py:463`), so `EvalSpend` cannot hold it earlier.
+- 2026-11-03: Task 5 `test_cap_is_the_smaller_limit` covers spent 7.50; spent 1 moved to `test_cap_is_the_command_limit_when_the_total_is_far`.
+- 2026-11-03: the handoff report for two fix coders was returned inline rather than written to their paths.
+- 2026-11-03: `test_claude_engine.py::test_timeout_kills_child` failed once under load from parallel coders, then passed; the workspace run gave `3477 passed in 262.69s`.

@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-03
 depends-on: [01]
 built-on: 8947dcb8c009
@@ -105,3 +105,28 @@ packages/ijob-ai/src/ijob_ai/tasks/signatures.py  — modify: agent signatures a
 
 - The five gate commands in `CLAUDE.md` exit 0.
 - `grep -rn 'ijob_ai.agents' packages/ijob-ai/src/ijob_ai/llm` finds nothing, keeping the boundary in `CLAUDE.md`.
+
+## Review findings
+
+Fixed (`uv run --locked pytest .../agents/test_react.py .../test_errors.py` → 65 passed):
+- `react.py:124` a tool argument named `self` raised outside the wrapper, and DSPy's traceback put absolute paths in the trajectory. The new test failed on the old code.
+- `react.py:145,158` a raising `on_step`, or a result whose `__str__` raises, escaped by the same route. The new tests failed on the old code.
+- `react.py:152` a stored-stop error inside an `ExceptionGroup` was not matched, so a run went on spending.
+- `react.py:158` non-string results reached the model as Python repr; they now render as DSPy renders them.
+- `test_the_first_stored_stop_is_kept` never ran a tool; it now does.
+- `errors.py:85` `CapReachedError` had no message, so a CLI would print a blank error.
+
+Open:
+- `signatures.py:117` `SourceAgentSig` does not call its inputs untrusted.
+- `react.py:156` the catch-all records the failure nowhere, so a broken tool shows only `outcome=failed`.
+- Nits: no test at exactly 4,000 characters; `tracing.finish()` is skipped when a test block raises; `setup.py:147,161` docstrings say the span is for a model call.
+- Plan question: "in the instruction position" is built as an ordinary input field, `instruction_text`.
+
+## Deviations
+
+- 2026-11-03: the build did not commit per task. CLAUDE.md says commit only when the user asks, and the run had no such instruction.
+- 2026-11-03: Tasks 2 and 3 share `react.py`, so they were reviewed once, together.
+- 2026-11-03: `AgentRun.stop` is `Exception | None`, not `LlmError | None`, since a raising `on_step` is stored as the stop so the caller sees it and the model does not.
+- 2026-11-03: Task 2 adds a `forward()` override that raises `NotImplementedError`. ReAct's sync path calls models and tools directly and would bypass the rails.
+- 2026-11-03: a tool reports a violation by appending to `AgentRun.violations`; the plan left the mechanism open.
+- 2026-11-03: `ToolOutcome` (`ok`, `failed`) gives `TOOL_OUTCOME` its values.

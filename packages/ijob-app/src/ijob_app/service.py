@@ -3,11 +3,12 @@
 `Service` owns what a front end does with the stored data: choosing sources,
 fetching the ones that are due, recording what they show, listing the open,
 filtered postings, reading a posting's detail and description, voting on
-postings, keeping the CV, judging and scoring postings with a model, reading
-the recorded traces and managing the source table. It returns values and
-raises `InvalidValueError` subclasses, `SourcesError`, the model layer's
-`LlmError` subclasses or `OSError`; it neither prints nor starts an event loop,
-so each front end keeps its own output, exit codes and loop.
+postings, keeping the CV, judging and scoring postings with a model, running
+the jury that labels postings, reading the recorded traces and managing the
+source table. It returns values and raises `InvalidValueError` subclasses,
+`SourcesError`, the model layer's `LlmError` subclasses or `OSError`; it neither
+prints nor starts an event loop, so each front end keeps its own output, exit
+codes and loop.
 
 A recipe source is read through a client that refuses any request to a
 non-public address, so its page address, its next pages and its job pages are
@@ -44,7 +45,7 @@ from contextlib import AsyncExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Final, cast
+from typing import TYPE_CHECKING, Final, cast
 
 from ijob_core.dedupe import normalise_company
 from ijob_core.errors import InvalidValueError
@@ -90,6 +91,7 @@ from ijob_app.config import FilterLayers, effective_filters
 from ijob_app.extract_ops import ExtractProgress, ExtractReport, extract_operation
 from ijob_app.home import IjobHome
 from ijob_app.llm_ops import (
+    ItemOutcome,
     JudgeStatus,
     LlmOptions,
     LlmRuntime,
@@ -108,6 +110,23 @@ from ijob_app.llm_ops import (
     score_operation,
 )
 from ijob_app.recipe_ops import RecipeProposal
+
+if TYPE_CHECKING:
+    from ijob_ai.llm.reference import ModelRef
+    from ijob_ai.llm.settings import EvalSettings
+    from ijob_core.eval_records import EvalLabel, EvalVote
+
+    from ijob_app.eval_estimate import Cost
+    from ijob_app.eval_ops import (
+        LabelPlan,
+        LabelReport,
+        ReviewItem,
+        ReviewPlan,
+        VoteItem,
+    )
+    from ijob_app.eval_report import EvalReport, RunDetail
+    from ijob_app.eval_run import RunOffer, RunProgress
+    from ijob_app.eval_suites import Suite, SuiteReport
 
 type ClientFactory = Callable[[ConditionalCache | None], PoliteClient]
 
@@ -130,6 +149,40 @@ class FetchProgress:
     total: int
     done: int
     failed: int
+
+
+@dataclass(frozen=True, slots=True)
+class LabelOffer:
+    """What a jury run will do and cost, worked out before any model is called.
+
+    Attributes:
+        plan: The label set and the votes still missing.
+        settings: The eval settings the run reads its jury and caps from.
+        cap: What the run may spend on OpenRouter, in US dollars.
+        costs: Each juror with the cost estimated for its calls.
+        estimate: The estimated cost of the whole run.
+    """
+
+    plan: "LabelPlan"
+    settings: "EvalSettings"
+    cap: float
+    costs: "tuple[tuple[ModelRef, Cost], ...]"
+    estimate: "Cost"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LabelProgress:
+    """How far a jury run has got.
+
+    Attributes:
+        stored: Votes cast and stored so far.
+        total: Votes asked for.
+        spent: OpenRouter spend of the run so far, in US dollars.
+    """
+
+    stored: int
+    total: int
+    spent: float
 
 
 class UnknownSourceError(InvalidValueError):
@@ -1424,6 +1477,315 @@ class Service:
         )
         self._keep_report(report.report)
         return report
+
+    async def eval_prepare(self, *, limit: int | None = None) -> LabelOffer:
+        """Find or draw the label set and estimate what its missing votes cost.
+
+        Prices are read from OpenRouter's public model list, and only when a
+        juror with votes to cast is on OpenRouter. No model is called.
+
+        Args:
+            limit: Cover only this many postings, from 1 to 100; all when `None`.
+
+        Returns:
+            The offer, whose plan lists the votes still missing.
+
+        Raises:
+            InvalidValueError: The config file is unusable, no jury is set,
+                `limit` is out of range, or the price list lacks a juror.
+            EvalNeedsError: No rules or no current CV profile is stored.
+            TooFewCasesError: The pools hold too few postings for a new set.
+            EvalBudgetSpentError: The recorded eval spending has used up
+                `eval.total_cost_usd`.
+            sqlite3.Error: The store cannot be read or written.
+        """
+        from ijob_ai.llm.reference import Provider  # noqa: PLC0415
+
+        from ijob_app.eval_estimate import (  # noqa: PLC0415
+            cost_by_model,
+            estimate,
+            planned_calls,
+            read_prices,
+            total_cost,
+        )
+        from ijob_app.eval_ops import prepare_label_run  # noqa: PLC0415
+        from ijob_app.eval_spend import EvalSpend  # noqa: PLC0415
+        from ijob_app.llm_config import read_eval_settings  # noqa: PLC0415
+
+        settings = read_eval_settings(self._llm.config_path)
+        plan = prepare_label_run(self._store, settings, limit=limit, now=self._now)
+        cap = EvalSpend(self._store.evals, settings).cap
+        calls = planned_calls(plan.items)
+        prices = None
+        if any(call.ref.provider is Provider.OPENROUTER for call in calls):
+            async with self._client(None) as client:
+                prices = await read_prices(client)
+        estimates = estimate(calls, prices)
+        return LabelOffer(
+            plan=plan,
+            settings=settings,
+            cap=cap,
+            costs=tuple(cost_by_model(estimates)),
+            estimate=total_cost(estimates),
+        )
+
+    async def eval_label(
+        self,
+        offer: LabelOffer,
+        *,
+        on_progress: Callable[[LabelProgress], None] | None = None,
+    ) -> "LabelReport":
+        """Request the votes of an offer and derive the labels they give.
+
+        Args:
+            offer: What `eval_prepare` returned.
+            on_progress: Called after each vote item ends.
+
+        Returns:
+            What the run did and spent, and where the votes stand.
+
+        Raises:
+            ProviderUnavailableError: A variable that redirects model calls is set.
+            InvalidValueError: The config file is unusable.
+            EvalBudgetSpentError: The recorded eval spending has used up
+                `eval.total_cost_usd`.
+            ExceptionGroup: A call raised something other than an `LlmError`.
+            sqlite3.Error: The store cannot be read or written.
+        """
+        from ijob_app.eval_ops import label_operation  # noqa: PLC0415
+        from ijob_app.eval_spend import EvalSpend  # noqa: PLC0415
+
+        spend = EvalSpend(self._store.evals, offer.settings)
+        total = len(offer.plan.items)
+        stored = 0
+
+        def ended(outcome: "ItemOutcome[VoteItem, EvalVote | None]") -> None:
+            nonlocal stored
+            if outcome.result is not None:
+                stored += 1
+            if on_progress is not None:
+                on_progress(
+                    LabelProgress(
+                        stored=stored, total=total, spent=spend.openrouter_spent
+                    )
+                )
+
+        report = await label_operation(
+            self._runtime(),
+            self._store,
+            offer.plan,
+            spend,
+            now=self._now,
+            on_outcome=ended,
+        )
+        self._keep_report(report.operation)
+        return report
+
+    async def eval_prepare_run(
+        self, suite: "Suite", *, model: "ModelRef | None", limit: int | None
+    ) -> "RunOffer":
+        """Plan a run of one suite and estimate what its calls cost.
+
+        Prices are read from OpenRouter's public model list, and only when a model
+        the run calls is on OpenRouter. No model is called.
+
+        Args:
+            suite: The suite to run.
+            model: The model under test, or `None` for the suite's default.
+            limit: Cover only this many cases; all when `None`.
+
+        Returns:
+            The offer, whose plan lists the cases and the calls.
+
+        Raises:
+            InvalidValueError: The config file is unusable, `limit` is out of range
+                or given to `hostile`, the model is on the set's jury or is the
+                grader, or the price list lacks a model the run calls.
+            MissingModelError: No model or grader is given or configured.
+            EvalNeedsError: A label set, labels or a run to grade is missing.
+            EvalBudgetSpentError: The recorded eval spending has used up
+                `eval.total_cost_usd`.
+            ProviderUnavailableError: A variable that redirects model calls is set.
+            sqlite3.Error: The store cannot be read.
+        """
+        from ijob_ai.llm.reference import Provider  # noqa: PLC0415
+
+        from ijob_app.eval_estimate import (  # noqa: PLC0415
+            cost_by_model,
+            estimate,
+            read_prices,
+            total_cost,
+        )
+        from ijob_app.eval_run import RunOffer, plan_run  # noqa: PLC0415
+        from ijob_app.eval_spend import EvalSpend  # noqa: PLC0415
+        from ijob_app.llm_config import read_eval_settings  # noqa: PLC0415
+
+        settings = read_eval_settings(self._llm.config_path)
+        plan = plan_run(
+            self._store,
+            self._runtime().settings,
+            settings,
+            suite,
+            model=model,
+            limit=limit,
+        )
+        cap = EvalSpend(self._store.evals, settings).cap
+        prices = None
+        if any(call.ref.provider is Provider.OPENROUTER for call in plan.calls):
+            async with self._client(None) as client:
+                prices = await read_prices(client)
+        estimates = estimate(plan.calls, prices)
+        return RunOffer(
+            plan=plan,
+            settings=settings,
+            cap=cap,
+            costs=tuple(cost_by_model(estimates)),
+            estimate=total_cost(estimates),
+        )
+
+    async def eval_run(
+        self,
+        offer: "RunOffer",
+        *,
+        on_progress: Callable[["RunProgress"], None] | None = None,
+    ) -> "SuiteReport":
+        """Run the suite of an offer and store the run.
+
+        Args:
+            offer: What `eval_prepare_run` returned.
+            on_progress: Called after each case ends.
+
+        Returns:
+            What the run did and spent.
+
+        Raises:
+            ProviderUnavailableError: A variable that redirects model calls is set.
+            InvalidValueError: The config file is unusable.
+            EvalBudgetSpentError: The recorded eval spending has used up
+                `eval.total_cost_usd`.
+            ExceptionGroup: A call raised something other than an `LlmError`.
+            sqlite3.Error: The store cannot be read or written.
+        """
+        from ijob_app.eval_run import RunProgress, run_plan  # noqa: PLC0415
+        from ijob_app.eval_spend import EvalSpend  # noqa: PLC0415
+
+        spend = EvalSpend(self._store.evals, offer.settings)
+        done = 0
+        stored = 0
+
+        def ended(outcome: "ItemOutcome[object, object]") -> None:
+            nonlocal done, stored
+            done += 1
+            if outcome.result is not None:
+                stored += 1
+            if on_progress is not None:
+                on_progress(
+                    RunProgress(
+                        done=done,
+                        stored=stored,
+                        total=offer.plan.cases,
+                        spent=spend.openrouter_spent,
+                    )
+                )
+
+        report = await run_plan(
+            self._runtime(),
+            self._store,
+            offer.plan,
+            spend,
+            now=self._now,
+            on_outcome=ended,
+        )
+        self._keep_report(report.operation)
+        return report
+
+    def eval_review_items(self) -> "ReviewPlan":
+        """List what `ijob eval review` offers, labelling what the votes agree on.
+
+        Returns:
+            The cases to show, the stored rules they cite and the postings left
+            out. No model is called.
+
+        Raises:
+            EvalNeedsError: No jury is set, or no rules or current CV profile
+                are stored.
+            InvalidValueError: The config file is unusable.
+            sqlite3.Error: The store cannot be read or written.
+        """
+        from ijob_app.eval_ops import review_items  # noqa: PLC0415
+        from ijob_app.llm_config import read_eval_settings  # noqa: PLC0415
+
+        settings = read_eval_settings(self._llm.config_path)
+        return review_items(self._store, settings, now=self._now)
+
+    def eval_record_review(
+        self,
+        item: "ReviewItem",
+        *,
+        keep: bool | None = None,
+        score: int | None = None,
+    ) -> "EvalLabel":
+        """Store the user's answer to a review case as a label.
+
+        Args:
+            item: The case answered.
+            keep: Keep or reject, for a judge case.
+            score: The fit from 0 to 100, for a scorer case.
+
+        Returns:
+            The label as stored.
+
+        Raises:
+            InvalidValueError: The answer does not fit the case.
+            sqlite3.Error: The store cannot be written.
+        """
+        from ijob_app.eval_ops import record_review  # noqa: PLC0415
+
+        return record_review(self._store, item, keep=keep, score=score, now=self._now)
+
+    def eval_report(self) -> "EvalReport":
+        """Gather what `ijob eval report` shows from the stored runs.
+
+        Returns:
+            A table of comparable runs for each suite with runs, the jury
+            metrics of the current label set and the total OpenRouter spend. The
+            suites with labels are listed only when the configured jury and the
+            stored rules and CV profile identify a stored label set. No model is
+            called.
+
+        Raises:
+            InvalidValueError: The config file is unusable.
+            sqlite3.Error: The store cannot be read.
+        """
+        from ijob_app.eval_report import build_report, current_set  # noqa: PLC0415
+        from ijob_app.llm_config import read_eval_settings  # noqa: PLC0415
+
+        settings = read_eval_settings(self._llm.config_path)
+        jury = None if settings.jury is None else [str(ref) for ref in settings.jury]
+        current, ready = current_set(self._store, jury)
+        return build_report(
+            self._store.evals,
+            current=current,
+            labels_ready=ready,
+            cap=settings.total_cost_usd,
+        )
+
+    def eval_run_detail(self, run_id: int) -> "RunDetail":
+        """Read one eval run, whatever its status.
+
+        Args:
+            run_id: The run's number.
+
+        Returns:
+            The run with its metrics, latency and case results.
+
+        Raises:
+            InvalidValueError: No such run is stored.
+            sqlite3.Error: The store cannot be read.
+        """
+        from ijob_app.eval_report import run_detail  # noqa: PLC0415
+
+        return run_detail(self._store.evals, run_id)
 
     def posting_sources(self, posting_id: PostingId) -> list[SourceRef]:
         """List the sources that have shown a posting.

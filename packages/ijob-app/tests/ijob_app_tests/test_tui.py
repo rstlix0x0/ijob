@@ -175,6 +175,19 @@ def _titles(app: IjobApp) -> list[str]:
     return [cast("Text", cell).plain for cell in cells]
 
 
+def test_a_draw_before_the_screen_is_ready_waits(home: IjobHome) -> None:
+    async def steps(app: IjobApp, pilot: Pilot[None], _quiet: _Quiet) -> None:
+        await app.query_one("#top").remove()
+        await pilot.pause()
+        app.changed()
+
+        app._draw()
+
+        assert app._dirty
+
+    _run(home, steps)
+
+
 def test_opens_on_the_saved_jobs(home: IjobHome) -> None:
     async def steps(app: IjobApp, _pilot: Pilot[None], quiet: _Quiet) -> None:
         assert sorted(_titles(app)) == sorted(_TITLES)

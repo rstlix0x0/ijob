@@ -14,7 +14,9 @@ keyed by what it was made from so a repeat call is a cache hit. A source can be
 stored together with its recipe, kept as opaque JSON text that outlives the
 source's removal.
 It also keeps the items a source's parser could not read, so a model reads each
-once: a pending item becomes a job or not a job and is not read again.
+once: a pending item becomes a job or not a job and is not read again. The
+records of the evaluation jury and of eval runs are read and written through
+`Store.evals`.
 
 The schema version lives in `PRAGMA user_version`; opening a database applies
 every migration newer than that version, each in one transaction.
@@ -36,6 +38,7 @@ from typing import Any, Final, Self
 from ijob_core.countries import CountryCode
 from ijob_core.dedupe import canonical_url, fingerprint
 from ijob_core.errors import InvalidValueError
+from ijob_core.eval_records import EvalRecords
 from ijob_core.model import (
     ExternalId,
     Instructions,
@@ -175,6 +178,72 @@ _MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
             posted_at, id, title, company, location, url, first_seen, last_seen,
             salaries, country, remote, role_hint, low_confidence
         )
+        """,
+    ),
+    (
+        """
+        CREATE TABLE eval_sets (
+            id INTEGER PRIMARY KEY,
+            rules_sha256 TEXT NOT NULL, profile_sha256 TEXT NOT NULL,
+            jury TEXT NOT NULL, created_at TEXT NOT NULL,
+            UNIQUE (rules_sha256, profile_sha256, jury)
+        ) STRICT
+        """,
+        """
+        CREATE TABLE eval_cases (
+            set_id INTEGER NOT NULL REFERENCES eval_sets(id),
+            posting_id INTEGER NOT NULL REFERENCES postings(id),
+            position INTEGER NOT NULL,
+            bucket TEXT NOT NULL CHECK (bucket IN ('kept', 'rejected', 'unjudged')),
+            input_sha256 TEXT NOT NULL,
+            PRIMARY KEY (set_id, posting_id)
+        ) STRICT
+        """,
+        """
+        CREATE TABLE eval_votes (
+            set_id INTEGER NOT NULL REFERENCES eval_sets(id),
+            posting_id INTEGER NOT NULL REFERENCES postings(id),
+            task TEXT NOT NULL CHECK (task IN ('judge', 'scorer')),
+            juror TEXT NOT NULL, task_version TEXT NOT NULL,
+            keep INTEGER CHECK (keep IN (0, 1)), rule INTEGER, score INTEGER,
+            reasons TEXT NOT NULL, made_at TEXT NOT NULL,
+            PRIMARY KEY (set_id, posting_id, task, juror)
+        ) STRICT
+        """,
+        """
+        CREATE TABLE eval_labels (
+            set_id INTEGER NOT NULL REFERENCES eval_sets(id),
+            posting_id INTEGER NOT NULL REFERENCES postings(id),
+            task TEXT NOT NULL CHECK (task IN ('judge', 'scorer')),
+            keep INTEGER CHECK (keep IN (0, 1)), rule INTEGER, score INTEGER,
+            origin TEXT NOT NULL CHECK (origin IN ('agreed', 'user')),
+            spot_checked INTEGER NOT NULL CHECK (spot_checked IN (0, 1)),
+            decided_at TEXT NOT NULL,
+            PRIMARY KEY (set_id, posting_id, task)
+        ) STRICT
+        """,
+        """
+        CREATE TABLE eval_runs (
+            id INTEGER PRIMARY KEY,
+            suite TEXT NOT NULL, model TEXT NOT NULL, task_version TEXT NOT NULL,
+            set_id INTEGER REFERENCES eval_sets(id),
+            status TEXT NOT NULL
+                CHECK (status IN ('running', 'complete', 'incomplete')),
+            limited INTEGER NOT NULL CHECK (limited IN (0, 1)),
+            metrics TEXT NOT NULL DEFAULT '{}',
+            spent_usd REAL NOT NULL DEFAULT 0,
+            subscription_usd REAL NOT NULL DEFAULT 0,
+            started_at TEXT NOT NULL, finished_at TEXT
+        ) STRICT
+        """,
+        """
+        CREATE TABLE eval_results (
+            run_id INTEGER NOT NULL REFERENCES eval_runs(id),
+            case_key TEXT NOT NULL,
+            passed INTEGER NOT NULL CHECK (passed IN (0, 1)),
+            answer TEXT NOT NULL, detail TEXT NOT NULL, latency_ms INTEGER NOT NULL,
+            PRIMARY KEY (run_id, case_key)
+        ) STRICT
         """,
     ),
 )
@@ -465,6 +534,11 @@ class Store:
             _migrate(conn)
             cleanup.pop_all()
         return cls(conn)
+
+    @property
+    def evals(self) -> EvalRecords:
+        """The jury and eval-run records, on this store's connection."""
+        return EvalRecords(self._conn)
 
     def record(
         self,

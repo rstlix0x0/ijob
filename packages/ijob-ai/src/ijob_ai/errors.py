@@ -82,6 +82,18 @@ class CostUnknownError(LlmError):
         self.model = model
 
 
+class CapReachedError(LlmError):
+    """A run reached its spending cap and stopped before another model call."""
+
+    def __init__(self, message: str = "the spending cap was reached") -> None:
+        """Build the error.
+
+        Args:
+            message: What to tell the user; a subclass may pass its own.
+        """
+        super().__init__(message)
+
+
 class TaskOutputError(LlmError):
     """A task's model output could not be used.
 

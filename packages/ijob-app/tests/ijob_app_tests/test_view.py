@@ -15,6 +15,7 @@ from ijob_app.view import (
     extract_status,
     fetch_status,
     final_search,
+    fix_line,
     instructions_view,
     is_terminal,
     live_search,
@@ -295,6 +296,14 @@ def test_error_lines_show_the_fix() -> None:
     assert "No CV" in drawn
     assert "fix" in drawn
     assert "ijob cv set cv.pdf" in drawn
+
+
+def test_fix_line_draws_its_command_literally() -> None:
+    drawn = _draw(fix_line("ijob\x1b]0;pwned\x07 cv\nset"))
+
+    assert "\x1b" not in drawn
+    assert "\x07" not in drawn
+    assert "ijob]0;pwned cv set" in drawn
 
 
 def test_sources_table_shows_the_biggest_and_what_was_left_out() -> None:

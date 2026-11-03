@@ -206,7 +206,7 @@ def notice_line(text: str, detail: str = "") -> Text:
 def fix_line(command: str) -> Text:
     """Draw the command that fixes a problem shown just above."""
     line = Text("   fix  ", style=f"bold {AMBER}")
-    line.append(command, style=SKY)
+    line.append(clean(command), style=SKY)
     return line
 
 

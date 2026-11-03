@@ -1,4 +1,4 @@
-"""Process hygiene for DSPy and the registry of one `dspy.LM` per task.
+"""Process hygiene for DSPy and the registry of one `dspy.LM` per model reference.
 
 This module imports DSPy, so it is imported only when a model is about to be
 used.
@@ -54,7 +54,7 @@ def prepare_environment() -> None:
 
 
 class Registry:
-    """The `dspy.LM` of each task, built on first use and kept."""
+    """The `dspy.LM` of each model reference, built on first use and kept."""
 
     def __init__(self, settings: LlmSettings, claude_engines: EngineFactory) -> None:
         """Create a registry that has built nothing yet.
@@ -62,11 +62,12 @@ class Registry:
         Args:
             settings: Settings that name each task's model.
             claude_engines: Builds the sync and async engine for a claude-sdk
-                model; called once per claude-sdk task, when its LM is first built.
+                model; called once per claude-sdk reference, when its LM is first
+                built.
         """
         self._settings = settings
         self._claude_engines = claude_engines
-        self._lms: dict[Task, dspy.LM] = {}
+        self._lms: dict[ModelRef, dspy.LM] = {}
 
     def lm_for(self, task: Task) -> dspy.LM:
         """Return the task's `dspy.LM`, building it on first use.
@@ -77,20 +78,37 @@ class Registry:
             task: The task about to call a model.
 
         Returns:
-            The task's LM; the same object on every call.
+            The LM of the task's configured model; the same object on every call.
 
         Raises:
             MissingModelError: If no model is configured for `task`.
             ProviderUnavailableError: If the environment is not usable, or
                 OpenRouter is chosen and `OPENROUTER_API_KEY` is not set.
         """
-        existing = self._lms.get(task)
+        return self.lm_for_ref(self._settings.model_for(task))
+
+    def lm_for_ref(self, ref: ModelRef) -> dspy.LM:
+        """Return the `dspy.LM` of a model reference, building it on first use.
+
+        For a model that is not any task's configured model, such as a juror, a
+        grader or a `--model` value. The LM never caches and never retries.
+
+        Args:
+            ref: The model to call.
+
+        Returns:
+            The LM of `ref`; the same object for an equal reference.
+
+        Raises:
+            ProviderUnavailableError: If the environment is not usable, or
+                OpenRouter is chosen and `OPENROUTER_API_KEY` is not set.
+        """
+        existing = self._lms.get(ref)
         if existing is not None:
             return existing
-        ref = self._settings.model_for(task)
         prepare_environment()
         lm = self._build(ref)
-        self._lms[task] = lm
+        self._lms[ref] = lm
         return lm
 
     def _build(self, ref: ModelRef) -> dspy.LM:

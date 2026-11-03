@@ -41,5 +41,15 @@ disallow_subclassing_any = false
 minversion = "9.0"
 strict = true
 filterwarnings = ["error"]
-addopts = ["--import-mode=importlib", "--doctest-modules"]
+addopts = [
+  # The "-p no:" flags keep plugins that deepeval brings in from loading; test_package.py guards them.
+  "--import-mode=importlib",
+  "--doctest-modules",
+  "-p", "no:deepeval",
+  "-p", "no:asyncio",
+  "-p", "no:repeat",
+  "-p", "no:rerunfailures",
+  "-p", "no:xdist",
+  "-p", "no:xdist.looponfail",
+]
 testpaths = ["packages"]

@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-03
 depends-on: [01]
 built-on: 8947dcb8c009
@@ -173,3 +173,38 @@ packages/ijob-app/src/ijob_app/cli.py              — modify: register the grou
 
 - The five gate commands in `CLAUDE.md` exit 0.
 - `uv run --locked ijob eval label --help` and `uv run --locked ijob eval review --help` list the flags of the spec.
+
+## Review findings
+
+Fixed (`uv run --locked pytest .../test_cli_eval.py .../test_cli_terminal.py .../test_view.py` → 113 passed):
+- `cli_eval.py:297`, `view.py:206` provider error text could print terminal escape codes or a made-up fix command. `fix_line` now cleans, and the juror stop line does not split a fix out of provider text.
+- `cli_eval.py:227` the question went to stdout in a pipe; it now goes to stderr.
+- `cli_eval.py:471` the skipped count was dropped when nothing was left to review.
+
+Open:
+- `cli_output.py` other `say_error` and `say_note` callers still split `; run:` out of their text. Their messages are ijob's own today.
+- `cli_eval.py:263` the terminal Ctrl-C path has no test, and its exit status is undocumented.
+- `eval_ops.py:999` no test answers `r` on an agreed rejection.
+- `eval_ops.py:348` a limit that covers every case still marks the run limited.
+- `eval_ops.py:507` a run can pass the cap by its calls in flight, up to 4 at the default concurrency; a cancelled in-flight call is unmetered.
+- `eval_ops.py:520` provider failures and stopped-juror items count as `DONE` in `run_items`, so `operation.done` overcounts. `LabelReport.stored` and `failed` hold the true numbers.
+- `eval_ops.py:531` no test covers `ProviderUnavailableError` stopping one juror; `eval_ops.py:538` none observes spend per item; `eval_ops.py:716` none covers a split case with a user label.
+- `test_eval_ops.py:103` every test runs at concurrency 1, so stopped-juror and cap behaviour is unproven at the default of 4.
+- `eval_rules.py:122` a short `unjudged` pool is not topped up, so `--limit 1` can select nothing.
+- `eval_rules.py:195` no task check: scorer votes give `Agreed(keep=False)`, and judge votes crash `score_label`.
+- `eval_rules.py:57`, `eval_estimate.py:62` `Agreed`, `Split`, `Price` and `PlannedCall` validate nothing at construction.
+- `eval_estimate.py:142` a non-list or empty `data` reads as an empty price list, not `None`; `eval_estimate.py:167` a listed router model reads as "not in the list"; `test_eval_estimate.py:72` only HTTP 500 tests a failed fetch.
+- `eval_estimate.py:138` whether OpenRouter's robots.txt allows the price list is unchecked here; `PoliteClient` reads it at run time.
+- About 30 nits, in the session reports: naming, unused test helpers, docstring wording, duplicated test scaffolds.
+
+## Deviations
+
+- 2026-11-03: the build did not commit per task. CLAUDE.md says commit only when the user asks, and the run had no such instruction.
+- 2026-11-03: Task 3 changed `eval_records.py`, outside its file list. Spec section 6's "label reject, no rule" could not be stored while `EvalLabel` refused a reject with no rule, so a label may now do so; a vote still needs a rule. It also added `EvalRecords.sets()`, since `prepare_label_run` must compare against earlier sets.
+- 2026-11-03: Task 3 added `tests/ijob_app_tests/eval_fakes.py`, shared by the eval tests.
+- 2026-11-03: Task 4 added `planned_calls`, `total_cost` and `cost_by_model` to `eval_estimate.py`, and terminal tests to `test_cli_terminal.py`, which `test_every_command_is_checked_here` requires.
+- 2026-11-03: Task 4 imports eval modules inside `service.py` methods, since `test_search_without_rules_imports_no_llm_module` fails on a module-level import. The panel and data notice cover only jurors with votes left to cast.
+- 2026-11-03: Task 5 added `EvalRecords.mark_spot_checked`, since no existing write sets the mark and keeps origin `agreed`. `eval_app` gained a `now` argument.
+- 2026-11-03: Task 5 reads a missing `eval.jury` as exit 1 in review, per spec section 7; `eval label` stays at exit 2. Spec section 15 left open the spot check title suffix, the fewer-votes suffix, rule lines, juror names and the wrong-key line, and these were decided in code.
+- 2026-11-03: Task 2's coder fetched OpenRouter's public price list once with curl to check its shape. It needed no key and cost nothing. No test uses the network, and later coders were told to run no such probe.
+- 2026-11-03: Tasks 4 and 5 share files, so they were reviewed once, together.

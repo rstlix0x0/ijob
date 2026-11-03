@@ -10,6 +10,7 @@ from pathlib import Path
 import dspy
 import pytest
 from ijob_ai.errors import (
+    CapReachedError,
     CostUnknownError,
     CvTextError,
     MissingModelError,
@@ -249,6 +250,36 @@ def test_run_items_cap_marks_rest(make_runtime: _MakeRuntime) -> None:
     assert run.report.spent == pytest.approx(0.3)
 
 
+def test_run_items_cap_replaces_the_llm_cap(make_runtime: _MakeRuntime) -> None:
+    runtime = make_runtime(max_cost_usd=100, concurrency=1)
+
+    async def worker(item: int, budget: Budget) -> str:
+        budget.charge(0.1)
+        return f"item {item}"
+
+    run = asyncio.run(run_items(runtime, "eval", _ITEMS, worker, cap=0.25))
+
+    assert (
+        _statuses(run.outcomes) == [ItemStatus.DONE] * 3 + [ItemStatus.CAP_REACHED] * 3
+    )
+    assert run.report.stopped_by == "cap"
+    assert run.report.cap == 0.25
+
+
+def test_run_items_default_cap_is_unchanged(make_runtime: _MakeRuntime) -> None:
+    runtime = make_runtime(max_cost_usd=0.25, concurrency=1)
+
+    async def worker(item: int, budget: Budget) -> str:
+        budget.charge(0.1)
+        return f"item {item}"
+
+    run = asyncio.run(run_items(runtime, "search", _ITEMS, worker))
+
+    assert run.report.cap == 0.25
+    assert run.report.done == 3
+    assert run.report.stopped_by == "cap"
+
+
 @pytest.mark.parametrize(
     "error", [ProviderFailedError("boom"), ProviderUnavailableError("gone")]
 )
@@ -290,6 +321,26 @@ def test_run_items_cost_unknown_stops_rest(make_runtime: _MakeRuntime) -> None:
     assert started == [0, 1]
     assert _statuses(run.outcomes) == [ItemStatus.DONE] + [ItemStatus.STOPPED] * 5
     assert run.report.stopped_by == "cost_unknown"
+
+
+def test_run_items_cap_raised_inside_a_worker_stops_rest(
+    make_runtime: _MakeRuntime,
+) -> None:
+    runtime = make_runtime(concurrency=1)
+    started: list[int] = []
+
+    async def worker(item: int, _budget: Budget) -> str:
+        started.append(item)
+        if item == 1:
+            raise CapReachedError
+        return f"item {item}"
+
+    run = asyncio.run(run_items(runtime, "search", _ITEMS, worker))
+
+    assert started == [0, 1]
+    assert _statuses(run.outcomes) == [ItemStatus.DONE] + [ItemStatus.CAP_REACHED] * 5
+    assert run.report.stopped_by == "cap"
+    assert run.report.done == 1
 
 
 def test_run_items_task_failure_fails_only_that_item(
@@ -334,21 +385,21 @@ def test_run_items_hands_each_outcome_over_in_completion_order(
     make_runtime: _MakeRuntime,
 ) -> None:
     runtime = make_runtime(concurrency=4)
-    delays = {0: 0.06, 1: 0.03, 2: 0.0}
+    reported = {item: asyncio.Event() for item in (0, 1, 2)}
     seen: list[int] = []
 
     async def worker(item: int, _budget: Budget) -> str:
-        await asyncio.sleep(delays[item])
+        # each item waits for the next one, so they finish in reverse order
+        if item < 2:
+            await asyncio.wait_for(reported[item + 1].wait(), timeout=30)
         return f"item {item}"
 
+    def report(outcome: ItemOutcome[int, str]) -> None:
+        seen.append(outcome.item)
+        reported[outcome.item].set()
+
     run = asyncio.run(
-        run_items(
-            runtime,
-            "search",
-            (0, 1, 2),
-            worker,
-            on_outcome=lambda outcome: seen.append(outcome.item),
-        )
+        run_items(runtime, "search", (0, 1, 2), worker, on_outcome=report)
     )
 
     assert seen == [2, 1, 0]
@@ -526,6 +577,34 @@ def test_runtime_skips_the_cli_check_for_openrouter(
     runtime = make_runtime(judge=MADE_UP_OPENROUTER, cli_which=lambda _name: None)
 
     asyncio.run(runtime.registry_for(Task.JUDGE))
+
+    assert cli.runs() == []
+
+
+def test_registry_for_ref_checks_claude_once(
+    cli: FakeCli, make_runtime: _MakeRuntime
+) -> None:
+    runtime = make_runtime()
+    first = ModelRef(Provider.CLAUDE_SDK, "made-up-model")
+    second = ModelRef(Provider.CLAUDE_SDK, "another-made-up-model")
+
+    async def both() -> None:
+        assert await runtime.registry_for_ref(first) is await runtime.registry_for_ref(
+            second
+        )
+
+    asyncio.run(both())
+
+    assert cli.runs() == ["--version"]
+
+
+def test_registry_for_ref_skips_the_check_for_openrouter(
+    cli: FakeCli, make_runtime: _MakeRuntime
+) -> None:
+    runtime = make_runtime(cli_which=lambda _name: None)
+    ref = ModelRef(Provider.OPENROUTER, "made-up/model")
+
+    asyncio.run(runtime.registry_for_ref(ref))
 
     assert cli.runs() == []
 

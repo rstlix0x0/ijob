@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-03
 depends-on: [02]
 built-on: 8947dcb8c009
@@ -218,3 +218,43 @@ packages/ijob-app/src/ijob_app/service.py               — modify: eval run and
 
 - The five gate commands in `CLAUDE.md` exit 0.
 - `uv run --locked ijob eval run --help` and `uv run --locked ijob eval report --help` list the flags of the spec.
+
+## Review findings
+
+Fixed:
+- `eval_suites.py:1130` hostile could start a call past its cap. `_Asker` now checks `try_start`; `llm_ops.py:406` reports the stop as `cap`.
+- `test_eval_ops.py:570` the flaky cap test answered by arrival; it now answers by request content. 15 runs passed. The old failure was never reproduced, so the cause is from reading.
+- `deepeval_metrics.py:401` a grader score outside 0 to 10 was accepted. It now raises `TaskOutputError`.
+- `metrics.py:237` unusable answers earned NDCG gain. They now earn 0, and spec section 8's examples hold.
+- `deepeval_metrics.py:426` an empty reason raised a DeepEval error. It now returns a failed result with no call and no charge.
+- `eval_report.py:386` `empty` now agrees with its docstring.
+- `test_stored_metric_keys_match_the_report_tables` ties stored keys to the report's columns.
+- `eval_view.py:741` a hostile run with no answers printed a pass; `cli_eval.py:764` provider text could draw a fake fix; `cli_eval.py:724` "cases stored" overcounted; `eval_suites.py:746` a zero-case run stored as `complete`.
+
+Open:
+- `eval_report.py:215` a run with skipped cases compares unmarked beside a full run.
+- `eval_suites.py:1292` a `reasons` run stores neither the grader nor `GRADER_VERSION`, so changing the grader moves `mean_score` with no sign in the report.
+- `cli_eval.py:702` the live line shows the cap from prepare time, while the budget reads it at run start.
+- `eval_suites.py:736` `stop_error` relies on item order and no suite test runs above concurrency 1.
+- `test_cli_eval.py:1462` a real SIGINT goes through task cancellation, which has no test; Ctrl-C in a pipe has no test or documented status.
+- `test_cli_eval.py:1441` `eval run` has no test for a used-up total budget.
+- About 20 nits, in the session reports: shared percentile helper, duplicate names `SuiteReport` and `Metrics`, untested `deepeval_metrics.py` branches, wording.
+
+## Deviations
+
+- 2026-11-03: the build did not commit per task. CLAUDE.md says commit only when the user asks, and the run had no such instruction.
+- 2026-11-03: the user asked for a faster run after long waits, so briefs stopped after Task 2, one coder took Tasks 3 to 5, and reviews ran beside coders instead of before the next task.
+- 2026-11-03: Task 6 added `eval_run.py`, outside its file list, to keep `cli_eval.py` under the ruff statement limit, and `eval_prepare_run` in `service.py`. Task 7's service has `eval_report` and `eval_run_detail`.
+- 2026-11-03: too few labels, no set, or a missing run for `reasons` raise `EvalNeedsError`, since `TooFewCasesError` is about drawing a set.
+- 2026-11-03: `margin` is `None` for scorer and reasons, since NDCG and a mean grade have no defined ±.
+- 2026-11-03: `eval_ops.py` private helpers `_stored_rules`, `_stored_profile`, `_find_set` became public for `eval_suites.py`.
+- 2026-11-03: agent suites are absent from `Suite` until plan 07, so `eval run source-agent` is refused as unknown.
+- 2026-11-03: a hostile run stopped by Ctrl-C exits 1, applying the rule for an incomplete hostile run.
+- 2026-11-03: the final gate failed once on `test_tui_start_with_recipe_source_loads_no_llm_library`: `tui/app.py:182` raised `NoMatches` when the draw timer ticked before the screen was composed. It predates this chain, but it breaks the gate and can crash a real start on a busy machine, so `_draw` now waits for the screen, with `test_a_draw_before_the_screen_is_ready_waits` seen failing first.
+
+## Real-data checks
+
+On a copy of the store, under a temporary `IJOB_HOME`, with the user's OK for spending:
+- `ijob eval label --limit 10`: 60 of 60 votes, 0 failed, $0.1852 on OpenRouter against an estimate of $0.32, 66 s. Judge all agree 7 of 10; scorer within 20 points 6 of 10. Of 8 postings the configured judge had judged, 5 agree with a unanimous jury, 3 split, 0 opposed.
+- `ijob eval run hostile` on `claude-sdk/claude-haiku-5-5`: 0 attacks of 10 answered pairs.
+- `ijob eval report` drew both, with jury agreement 0.65.

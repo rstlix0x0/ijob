@@ -137,6 +137,13 @@ level, with the tokens, cost and duration of each model call, and exits `2` for
 an unknown id. `ijob traces prune` deletes the oldest traces until the trace
 database fits `[tracing].max_size_mb` and prints `pruned N traces, size X MB`.
 None of the `traces` commands loads an LLM library.
+
+`ijob eval label [--limit N] [--yes]` has the jury set under `[eval]` in the config
+vote on a sample of 100 postings, or on the first N of it, and labels the cases the
+jurors agree on; `ijob_app.cli_eval` describes its screen, its question, its
+pipe output and its exit statuses. `ijob eval review` shows, one at a time and on a
+terminal only, the cases the jurors did not agree on and then a spot check of the
+ones they did, and stores each answer as a label.
 """
 
 import asyncio
@@ -177,6 +184,7 @@ from ijob_sources.public_host import HostResolver, system_resolver
 from ijob_sources.registry import HOST_INTERVALS, refresh_interval
 from rich.live import Live
 
+from ijob_app.cli_eval import eval_app
 from ijob_app.cli_extract import extract_command, unread_note
 from ijob_app.cli_llm import (
     CONFIG_HELP,
@@ -1071,7 +1079,7 @@ def _llm_groups(  # noqa: PLR0913, PLR0917 - the application and what its groups
     is_interactive: Callable[[], bool],
     resolver: HostResolver,
 ) -> None:
-    """Add the `cv`, `instructions` and `traces` groups and the `score` command.
+    """Add the `cv`, `instructions`, `traces` and `eval` groups and `score`.
 
     Args:
         app: The application to add the groups to.
@@ -1087,6 +1095,7 @@ def _llm_groups(  # noqa: PLR0913, PLR0917 - the application and what its groups
     opener = _session_opener(client_factory, now, llm_for, resolver)
     app.add_typer(instructions_app(opener, is_interactive), name="instructions")
     app.add_typer(traces_app(opener), name="traces")
+    app.add_typer(eval_app(opener, is_interactive, now), name="eval")
     score_command(app, opener)
 
 
@@ -1124,8 +1133,8 @@ def make_app(  # noqa: PLR0915  # one registration per command
 
     Returns:
         The application, with its `setup`, `search`, `show`, `label`, `score` and
-        `tui` commands and its `sources`, `cv`, `instructions` and `traces`
-        groups.
+        `tui` commands and its `sources`, `cv`, `instructions`, `traces` and
+        `eval` groups.
     """
     theme_help()
     app = typer.Typer(

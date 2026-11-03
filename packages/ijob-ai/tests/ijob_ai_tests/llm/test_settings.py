@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from ijob_ai.errors import MissingModelError
 from ijob_ai.llm.reference import ModelRef, Provider
-from ijob_ai.llm.settings import LlmSettings, Task, TracingSettings
+from ijob_ai.llm.settings import EvalSettings, LlmSettings, Task, TracingSettings
 
 _CONFIG = Path("/home/user/.ijob/config.toml")
 _JUDGE = ModelRef(Provider.CLAUDE_SDK, "claude-haiku-5-5")
@@ -13,10 +13,13 @@ _JUDGE = ModelRef(Provider.CLAUDE_SDK, "claude-haiku-5-5")
 def test_task_values() -> None:
     assert [t.value for t in Task] == [
         "cv_profile",
+        "eval_grader",
+        "explore_agent",
         "instructions",
         "job_extract",
         "judge",
         "scorer",
+        "source_agent",
         "source_recipe",
     ]
 
@@ -54,3 +57,12 @@ def test_settings_are_frozen() -> None:
     tracing = TracingSettings()
     with pytest.raises(dataclasses.FrozenInstanceError):
         tracing.max_size_mb = 1  # type: ignore[misc]
+
+
+def test_eval_settings_defaults_and_frozen() -> None:
+    settings = EvalSettings()
+    assert settings.jury is None
+    assert settings.max_cost_usd == 4
+    assert settings.total_cost_usd == 10
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        settings.max_cost_usd = 1  # type: ignore[misc]
