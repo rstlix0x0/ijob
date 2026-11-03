@@ -973,6 +973,60 @@ def test_posting_by_id(tmp_path: Path) -> None:
         assert store.posting(PostingId(999)) is None
 
 
+def _record_companies(store: Store, names: list[str]) -> None:
+    store.record(
+        [
+            _draft(
+                _A,
+                f"c-{n}",
+                title=f"Engineer {n}",
+                company=name,
+                url=f"https://example.com/jobs/c-{n}",
+            )
+            for n, name in enumerate(names)
+        ],
+        seen_at=_T1,
+    )
+
+
+def test_companies_matching_is_distinct_and_limited(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        _record_companies(
+            store, ["Acme Corp", "Acme Corp", "Acme Labs", "Acme Works", "Other Inc"]
+        )
+        assert store.companies_matching("acme", 50) == [
+            "Acme Corp",
+            "Acme Labs",
+            "Acme Works",
+        ]
+        assert store.companies_matching("acme", 2) == ["Acme Corp", "Acme Labs"]
+        assert store.companies_matching("zzz", 50) == []
+
+
+def test_companies_matching_escapes_the_query(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        _record_companies(store, ["100% Remote", "100x Remote", "a_b Ltd", "axb Ltd"])
+        assert store.companies_matching("%", 50) == ["100% Remote"]
+        assert store.companies_matching("_", 50) == ["a_b Ltd"]
+        assert store.companies_matching("a_b", 50) == ["a_b Ltd"]
+
+
+def test_companies_matching_takes_a_backslash_literally(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        _record_companies(store, ["a\\b Ltd", "ab Ltd", "a\\%b Ltd", "a%b Ltd"])
+        assert store.companies_matching("a\\b", 50) == ["a\\b Ltd"]
+        assert store.companies_matching("\\", 50) == ["a\\%b Ltd", "a\\b Ltd"]
+        assert store.companies_matching("a\\%", 50) == ["a\\%b Ltd"]
+
+
+def test_companies_matching_limit_of_zero_or_less_returns_none(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        _record_companies(store, ["Acme Corp", "Acme Labs"])
+        assert store.companies_matching("acme", 0) == []
+        assert store.companies_matching("acme", -1) == []
+        assert store.companies_matching("", 1) == ["Acme Corp"]
+
+
 def test_sightings_of_in_id_order(tmp_path: Path) -> None:
     with Store.open(tmp_path / "ijob.db") as store:
         store.record([_draft(_B, "b-1", raw="b")], seen_at=_T1)

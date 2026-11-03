@@ -4,9 +4,11 @@ Prices come from OpenRouter's public model list, read through `PoliteClient`.
 Token counts follow a fixed table per kind of call: the posting block's characters
 divided by four, plus a fixed instruction overhead, in; a fixed number out. A
 claude-sdk model costs `subscription`. If the list cannot be read, an OpenRouter
-model costs `unknown`; a model missing from a list that was read is an error.
-`planned_calls` turns the votes a jury run still needs into the calls to price,
-and `total_cost` and `cost_by_model` sum the estimates.
+model costs `unknown`; a model missing from a list that was read is an error. The
+calls of an agent suite have no fixed token shape, so an OpenRouter model's cost
+reads "up to the cap" and needs no price. `planned_calls` turns the votes a jury
+run still needs into the calls to price, and `total_cost` and `cost_by_model` sum
+the estimates.
 """
 
 import math
@@ -32,7 +34,10 @@ SUBSCRIPTION: Final = "subscription"
 UNKNOWN: Final = "unknown"
 """The cost of an OpenRouter call when the price list could not be read."""
 
-type Cost = float | Literal["subscription", "unknown"]
+UP_TO_CAP: Final = "up to the cap"
+"""The cost of an agent suite's OpenRouter calls: what the cap allows, not a price."""
+
+type Cost = float | Literal["subscription", "unknown", "up to the cap"]
 """A cost in US dollars, or why there is no dollar figure."""
 
 type Prices = Mapping[str, Price]
@@ -47,6 +52,7 @@ class CallKind(StrEnum):
     JUDGE = "judge"
     SCORER = "scorer"
     GRADER = "grader"
+    AGENT = "agent"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +63,7 @@ class _Shape:
     output_tokens: int
 
 
-_SHAPES: Final = {
+_SHAPES: Final[dict[CallKind, _Shape]] = {
     CallKind.JUDGE: _Shape(overhead_tokens=500, output_tokens=300),
     CallKind.SCORER: _Shape(overhead_tokens=1000, output_tokens=600),
     CallKind.GRADER: _Shape(overhead_tokens=800, output_tokens=150),
@@ -84,8 +90,9 @@ class PlannedCall:
     Attributes:
         ref: The model called.
         kind: The kind of call.
-        count: How many calls.
-        characters: Characters in the posting block of one call, on average.
+        count: How many calls; for an agent run, how many cases it covers.
+        characters: Characters in the posting block of one call, on average; 0
+            for an agent run.
     """
 
     ref: ModelRef
@@ -192,6 +199,12 @@ def estimate(calls: Sequence[PlannedCall], prices: Prices | None) -> list[CallEs
     """
     estimates: list[CallEstimate] = []
     for call in calls:
+        if call.kind is CallKind.AGENT:
+            cost: Cost = (
+                SUBSCRIPTION if call.ref.provider is Provider.CLAUDE_SDK else UP_TO_CAP
+            )
+            estimates.append(CallEstimate(call, 0.0, 0.0, cost))
+            continue
         shape = _SHAPES[call.kind]
         per_call_input = call.characters / _CHARACTERS_PER_TOKEN + shape.overhead_tokens
         tokens = (call.count * per_call_input, float(call.count * shape.output_tokens))
@@ -254,8 +267,14 @@ def cost_by_model(estimates: Sequence[CallEstimate]) -> list[tuple[ModelRef, Cos
 
 
 def _sum_costs(costs: Sequence[Cost]) -> Cost:
-    """Add dollar costs; unknown wins, and no dollars at all is a subscription."""
+    """Add dollar costs.
+
+    Unknown wins, then up to the cap, which holds whatever dollars are priced beside
+    it; no dollars at all is a subscription.
+    """
     if UNKNOWN in costs:
         return UNKNOWN
+    if UP_TO_CAP in costs:
+        return UP_TO_CAP
     dollars = [cost for cost in costs if isinstance(cost, float)]
     return sum(dollars) if dollars else SUBSCRIPTION

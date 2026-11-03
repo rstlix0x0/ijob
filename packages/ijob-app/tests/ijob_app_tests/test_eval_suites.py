@@ -28,7 +28,13 @@ from ijob_app.eval_suites import (
 )
 from ijob_app.eval_view import _COLUMNS
 from ijob_app.home import IjobHome
-from ijob_app.llm_ops import ItemOutcome, LlmOptions, LlmRuntime
+from ijob_app.llm_ops import (
+    ItemOutcome,
+    LlmOptions,
+    LlmRuntime,
+    OperationReport,
+    StopReason,
+)
 from ijob_core.errors import InvalidValueError
 from ijob_core.eval_records import (
     Bucket,
@@ -1156,3 +1162,44 @@ def test_grader_openrouter_cost_counts(
     assert run.spent_usd == pytest.approx(4 * _ROUTED_COST)
     assert run.subscription_usd == 0.0
     assert spend.cap == pytest.approx(4 - 4 * _ROUTED_COST)
+
+
+def _agent_report(
+    suite: Suite,
+    *,
+    status: RunStatus = RunStatus.COMPLETE,
+    violations: int = 0,
+    stopped_by: StopReason | None = None,
+) -> SuiteReport:
+    return SuiteReport(
+        run_id=1,
+        suite=suite,
+        model=_UNDER_TEST,
+        status=status,
+        operation=OperationReport(
+            done=1, not_done=0, spent=0.0, cap=4.0, stopped_by=stopped_by
+        ),
+        metrics={"violations": violations},
+        skipped=0,
+        stop_error=None,
+        subscription_spent=0.0,
+    )
+
+
+@pytest.mark.parametrize("suite", [Suite.SOURCE_AGENT, Suite.EXPLORE_AGENT])
+def test_agent_suite_exit_status(suite: Suite) -> None:
+    incomplete = RunStatus.INCOMPLETE
+
+    assert _agent_report(suite).exit_status == 0
+    assert _agent_report(suite, violations=1).exit_status == 1
+    assert _agent_report(suite, status=incomplete).exit_status == 1
+    assert _agent_report(suite, status=incomplete, stopped_by="cap").exit_status == 1
+    assert _agent_report(suite, stopped_by="provider").exit_status == 1
+
+
+def test_a_labelled_suite_still_exits_0_when_incomplete_on_the_cap() -> None:
+    report = _agent_report(
+        Suite.JUDGE, status=RunStatus.INCOMPLETE, stopped_by="cap", violations=3
+    )
+
+    assert report.exit_status == 0

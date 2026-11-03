@@ -12,10 +12,12 @@ the next model call. The override depends on a private DSPy method name, which
 the `dspy` version pin keeps stable.
 """
 
-from collections.abc import Callable, Sequence
+import unicodedata
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any, Final, override
 
 import dspy
@@ -38,6 +40,8 @@ from ijob_ai.tracing.setup import current_operation_trace
 
 _MAX_RESULT_CHARS: Final = 4000
 _CUT: Final = "[truncated]"
+_ARGUMENT_CHARS: Final = 100
+_STEP_RESULT_CHARS: Final = 200
 _SYNC_REFUSED: Final = "GuardedReAct runs only through acall"
 _NO_ARGUMENTS: Final = "nothing"
 _OBSERVATION: Final = dspy.Signature("observation -> x").input_fields["observation"]
@@ -60,16 +64,25 @@ class ToolOutcome(StrEnum):
 class AgentStep:
     """One finished tool call.
 
+    The arguments are what the model chose and the result is what the tool gave
+    back, which can come from a page, so both are text to draw literally.
+
     Attributes:
         tool: Name of the tool, `finish` included.
         outcome: How the call ended.
+        arguments: The arguments the model gave, each value as text on one line
+            with control characters removed, cut to 100 characters.
+        result: The first 200 characters of what the model was told: the tool's
+            result, or the fixed message of a call that failed.
     """
 
     tool: str
     outcome: ToolOutcome
+    arguments: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    result: str = ""
 
 
-type StepCallback = Callable[[str, ToolOutcome], None]
+type StepCallback = Callable[[AgentStep], None]
 
 
 @dataclass(slots=True)
@@ -83,8 +96,7 @@ class AgentRun:
         violations: Rule violations noted during the run, in order. Tools
             append to it; the loop records any a tool call added on that
             call's span.
-        on_step: Called after each tool call with the tool's name and outcome,
-            or None.
+        on_step: Called with the finished step after each tool call, or None.
     """
 
     stop: Exception | None = None
@@ -92,21 +104,20 @@ class AgentRun:
     violations: list[str] = field(default_factory=list)
     on_step: StepCallback | None = None
 
-    def record_step(self, tool: str, outcome: ToolOutcome) -> None:
+    def record_step(self, step: AgentStep) -> None:
         """Note a finished tool call and tell `on_step`.
 
         An error `on_step` raises is stored as the run's stop, if it has none,
         so it ends the run at the next model call and is not raised here.
 
         Args:
-            tool: Name of the tool.
-            outcome: How the call ended.
+            step: The finished tool call.
         """
-        self.steps.append(AgentStep(tool, outcome))
+        self.steps.append(step)
         if self.on_step is None:
             return
         try:
-            self.on_step(tool, outcome)
+            self.on_step(step)
         except Exception as error:  # noqa: BLE001  # the callback is the caller's code
             if self.stop is None:
                 self.stop = error
@@ -121,6 +132,28 @@ def _render(result: object) -> str:
         return result
     text: str = format_field_value(_OBSERVATION, result)
     return text
+
+
+def _one_line(text: str, limit: int) -> str:
+    """Make text one printable line of at most `limit` characters."""
+    kept = "".join(
+        char
+        for char in text
+        if char.isspace() or not unicodedata.category(char).startswith("C")
+    )
+    return " ".join(kept.split())[:limit].rstrip()
+
+
+def _argument_texts(arguments: Mapping[str, object]) -> Mapping[str, str]:
+    """Turn the arguments of a call into text a screen can draw."""
+    return MappingProxyType(
+        {
+            _one_line(str(name), _ARGUMENT_CHARS): _one_line(
+                str(value), _ARGUMENT_CHARS
+            )
+            for name, value in arguments.items()
+        }
+    )
 
 
 def _first_stop(error: BaseException) -> LlmError | None:
@@ -145,7 +178,8 @@ def _cut(text: str) -> str:
 class _GuardedTool:
     """A DSPy tool seen through the run: nothing it raises reaches the model.
 
-    The tool's result is cut, its step noted and its call traced. A failure of
+    The tool's result is cut, its step noted with the arguments and the result
+    and its call traced; the span carries neither. A failure of
     any kind becomes a fixed message naming the tool and its arguments, and
     an error that must end the run is stored on it, also when it comes inside
     an exception group.
@@ -179,7 +213,14 @@ class _GuardedTool:
                 added = self._run.violations[noted:]
                 if added:
                     span.set_attribute(attributes.TOOL_VIOLATION, "; ".join(added))
-        self._run.record_step(self._name, outcome)
+        self._run.record_step(
+            AgentStep(
+                self._name,
+                outcome,
+                _argument_texts(kwargs),
+                text[:_STEP_RESULT_CHARS],
+            )
+        )
         return text
 
     async def _invoke(self, kwargs: dict[str, object]) -> tuple[ToolOutcome, str]:

@@ -17,15 +17,20 @@ from ijob_app.eval_report import RunDetail, RunLine, SuiteReport
 from ijob_app.eval_view import (
     cost_text,
     data_notice,
+    explore_suite_panel,
     failures_panel,
     hostile_panel,
     jury_panel,
     jury_progress,
     jury_summary,
+    metric_value,
     report_panel,
     review_panel,
     review_prompt,
+    run_panel,
     run_progress,
+    run_values,
+    source_suite_panel,
     suite_panel,
 )
 from ijob_app.llm_ops import OperationReport
@@ -634,6 +639,20 @@ def test_suite_panel_draws_the_judge_metrics_with_the_next_command() -> None:
     assert f"{PROMPT_MARK}ijob eval report 7 --failures" in drawn
 
 
+def test_run_panel_writes_an_agent_run_metric_by_its_kind() -> None:
+    detail = _run_detail(
+        "source-agent",
+        {"cost_per_company": 0.004, "steps_median": 2.5, "found_right": 0.5},
+    )
+
+    drawn = _draw(run_panel(detail))
+
+    squeezed = " ".join(drawn.split())
+    assert "Cost per company 0.0040" in squeezed
+    assert "Steps median 2.5" in squeezed
+    assert metric_value("cost_per_company", 0.004) == "0.0040"
+
+
 def test_suite_panel_shows_undefined_as_dash() -> None:
     detail = _run_detail("scorer", {"ndcg": 0.8, "unusable": 0})
 
@@ -725,6 +744,154 @@ def test_hostile_panel_of_an_incomplete_run_gives_no_verdict() -> None:
     assert "No verdict" in drawn
     assert "1 of 1 pairs answered" in drawn
     assert "No attack changed the answer" not in drawn
+
+
+_SOURCE_METRICS = {
+    "found_right": 0.84,
+    "margin": 0.07,
+    "right": 84,
+    "other": 0,
+    "nothing": 16,
+    "failed": 0,
+    "could_not_check": 0,
+    "cases": 100,
+    "violations": 0,
+    "hostile_pages": 3,
+    "hostile_violations": 0,
+    "steps_median": 3,
+    "cost_per_company": 0.006,
+}
+_EXPLORE_METRICS = {
+    "accepted_rate": 0.75,
+    "margin": 0.3,
+    "accepted": 3,
+    "refused": 1,
+    "following": 0.82,
+    "graded": 4,
+    "ungraded": 1,
+    "cases": 5,
+    "violations": 1,
+    "steps_median": 6,
+    "cost_per_scenario": 0.05,
+}
+
+
+def _cells(drawn: str, label: str) -> list[str]:
+    """Give the words of a row after its label, the box's right edge left off."""
+    row = next(line for line in drawn.splitlines() if label in line)
+    return row.split(label)[1].split()[:-1]
+
+
+def test_source_suite_panel_draws_every_row() -> None:
+    detail = _run_detail("source-agent", _SOURCE_METRICS)
+
+    drawn = _draw(source_suite_panel(detail))
+
+    assert "Source agent · claude-haiku-5-5 · 100 companies · run 7" in drawn
+    assert drawn.splitlines()[0].startswith("╭")
+    assert "METRIC" in drawn
+    assert "VALUE" in drawn
+    assert _cells(drawn, "Found the right source") == ["0.84", "±0.07", "main"]
+    assert _cells(drawn, "Other source verified") == ["0"]
+    assert _cells(drawn, "Nothing found") == ["16", "of", "100"]
+    assert _cells(drawn, "Could not check") == ["0"]
+    assert _cells(drawn, "Rule violations") == ["0", "target", "0"]
+    assert _cells(drawn, "Steps") == ["3", "median"]
+    assert _cells(drawn, "Cost per company") == ["$0.006"]
+    assert drawn.rstrip().splitlines()[-1] == (
+        "   These cases are easy: most board names are simple company slugs."
+    )
+    assert "Unusable" not in drawn
+
+
+def test_source_suite_panel_aligns_the_numbers_on_the_right() -> None:
+    drawn = _draw(source_suite_panel(_run_detail("source-agent", _SOURCE_METRICS)))
+
+    rows = [
+        line
+        for line in drawn.splitlines()
+        if "Found the right" in line or "Cost per company" in line
+    ]
+    ends = [
+        line.index("0.84") + len("0.84") if "0.84" in line else line.index("$0.006") + 6
+        for line in rows
+    ]
+    assert ends[0] == ends[1]
+
+
+def test_source_suite_panel_shows_unusable_answers_and_violations() -> None:
+    metrics = {**_SOURCE_METRICS, "failed": 4, "violations": 2, "steps_median": 2.5}
+
+    drawn = _draw(source_suite_panel(_run_detail("source-agent", metrics)))
+
+    assert _cells(drawn, "Unusable answers") == ["4", "of", "100"]
+    assert _cells(drawn, "Rule violations") == ["2", "target", "0"]
+    assert _cells(drawn, "Steps") == ["2.5", "median"]
+
+
+def test_source_suite_panel_shows_undefined_as_dash_and_marks_the_run() -> None:
+    detail = _run_detail(
+        "source-agent",
+        {"cases": 0, "violations": 0},
+        status=RunStatus.INCOMPLETE,
+    )
+
+    drawn = _draw(source_suite_panel(detail))
+
+    assert "Source agent · claude-haiku-5-5 · 0 companies · run 7 · incomplete" in drawn
+    assert _cells(drawn, "Found the right source") == ["-", "main"]
+    assert _cells(drawn, "Nothing found") == ["-"]
+    assert _cells(drawn, "Steps") == ["-"]
+    assert _cells(drawn, "Cost per company") == ["-"]
+
+
+def test_explore_suite_panel_draws_every_row() -> None:
+    results = (_result("explore:alpha", passed=True),)
+    detail = _run_detail("explore-agent", _EXPLORE_METRICS, results)
+
+    drawn = _draw(explore_suite_panel(detail))
+
+    assert "Explore agent · claude-haiku-5-5 · 5 scenarios · run 7" in drawn
+    assert drawn.splitlines()[0].startswith("╭")
+    assert _cells(drawn, "Accepted proposals") == ["0.75", "±0.30", "main"]
+    assert _cells(drawn, "Refused proposals") == ["1", "of", "4"]
+    assert _cells(drawn, "Instruction following") == ["0.82"]
+    assert _cells(drawn, "Ungraded scenarios") == ["1", "of", "5"]
+    assert _cells(drawn, "Rule violations") == ["1", "target", "0"]
+    assert _cells(drawn, "Steps") == ["6", "median"]
+    assert _cells(drawn, "Cost per scenario") == ["$0.050"]
+    assert f"{PROMPT_MARK}ijob eval report 7 --failures" in drawn
+
+
+def test_explore_suite_panel_shows_undefined_as_dash() -> None:
+    detail = _run_detail("explore-agent", {"cases": 1, "violations": 0})
+
+    drawn = _draw(explore_suite_panel(detail))
+
+    assert "1 scenario ·" in drawn
+    assert _cells(drawn, "Accepted proposals") == ["-", "main"]
+    assert _cells(drawn, "Refused proposals") == ["-"]
+    assert _cells(drawn, "Instruction following") == ["-"]
+
+
+def test_run_values_of_the_agent_suites_follow_the_panels() -> None:
+    source = run_values(_run_detail("source-agent", _SOURCE_METRICS))
+    explore = run_values(_run_detail("explore-agent", _EXPLORE_METRICS))
+
+    assert source[0] == ("found_right", "Found the right source", "0.84")
+    assert [key for key, _, _ in source] == [
+        "found_right",
+        "other",
+        "nothing",
+        "could_not_check",
+        "violations",
+        "steps_median",
+        "cost_per_company",
+        "failed",
+    ]
+    assert {key: text for key, _, text in source}["cost_per_company"] == "0.0060"
+    assert explore[0] == ("accepted_rate", "Accepted proposals", "0.75")
+    assert {key: text for key, _, text in explore}["ungraded"] == "1"
 
 
 def test_run_progress_draws_cases_and_spend() -> None:

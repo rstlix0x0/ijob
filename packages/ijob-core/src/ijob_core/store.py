@@ -350,6 +350,9 @@ class SourceRow:
     last_fetched_at: datetime | None
 
 
+_LIKE_ESCAPE: Final = "\\"
+
+
 class _Outcome(Enum):
     """What `Store._write_draft` did with one draft."""
 
@@ -955,6 +958,32 @@ class Store:
             f"{_SELECT_POSTINGS} WHERE id = ?", (posting_id,)
         ).fetchone()
         return None if row is None else _posting(row)
+
+    def companies_matching(self, query: str, limit: int) -> list[str]:
+        """Read the distinct companies of stored postings whose name has a substring.
+
+        The match ignores ASCII letter case, and `%` and `_` in `query` match
+        themselves. Every stored posting counts, open or not.
+
+        Args:
+            query: The text a company name must contain; empty matches all.
+            limit: The most names to return; zero or less returns none.
+
+        Returns:
+            The distinct names, sorted, at most `limit`.
+        """
+        escaped = (
+            query.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
+            .replace("%", f"{_LIKE_ESCAPE}%")
+            .replace("_", f"{_LIKE_ESCAPE}_")
+        )
+        rows = self._conn.execute(
+            "SELECT DISTINCT company FROM postings "
+            "WHERE company LIKE ? ESCAPE '\\' "
+            "ORDER BY company LIMIT ?",
+            (f"%{escaped}%", max(limit, 0)),
+        ).fetchall()
+        return [row[0] for row in rows]
 
     def set_description(self, posting_id: PostingId, text: str) -> None:
         """Store a posting's description, replacing any earlier one.

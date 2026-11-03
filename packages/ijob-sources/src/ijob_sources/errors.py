@@ -209,6 +209,23 @@ class NotPublicAddressError(SourcesError):
         self.url = url
 
 
+class OffSiteError(SourcesError):
+    """A request was refused because its host is outside the site being read.
+
+    Attributes:
+        host: The host the request was for.
+    """
+
+    def __init__(self, host: str) -> None:
+        """Build the error from the refused request's host.
+
+        Args:
+            host: The host the request was for.
+        """
+        super().__init__(f"off the site: {host}")
+        self.host = host
+
+
 class ReservedHostError(SourcesError):
     """A host is reserved for the source kind that reads it by its own rules.
 

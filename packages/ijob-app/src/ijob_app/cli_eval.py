@@ -25,23 +25,26 @@ the run needs is missing or the recorded spending is used up, and `2` for a
 votes already cast stand and the next run asks for the rest.
 
 `eval run SUITE [--model PROVIDER/MODEL] [--limit N] [--yes]` runs `judge`,
-`scorer`, `reasons` or `hostile` on the model, which comes from configuration
-unless given, and shows what it measured. The plan, with the estimated cost and
-the cap, is shown first. The question is asked when a model the run calls is on
-OpenRouter, the grader of `reasons` included; the line naming who receives the data
-is left out for `hostile`, which sends none. `--yes` answers it, and without a
-terminal and without `--yes` the command exits `1` before any call. A run on
-claude-sdk models alone asks nothing. On a terminal it draws the plan, a live line
-and the result; in a pipe the plan goes to stderr and stdout gets the result as
-`name  value` lines, the metrics then `cost_usd`. The exit status is `0` when the run
-ended or reached the cost cap, and `1` when a provider failed, a cost could not be
-known, the question was declined, something the run needs is missing, the recorded
-spending is used up, or a `hostile` run had an attack, was incomplete or had no
-answered pair. It is `2` for an unknown suite, a `--limit` out of range or given to
-`hostile`, a `--model` that cannot be used (the jury of the label set, or the
-grader of `reasons`) or one missing from the OpenRouter price list. Ctrl-C on a
+`scorer`, `reasons`, `hostile`, `source-agent` or `explore-agent` on the model,
+which comes from configuration unless given, and shows what it measured. The plan,
+with the estimated cost and the cap, is shown first. The question is asked when a
+model the run calls is on OpenRouter, the grader of `reasons` and `explore-agent`
+included; the line naming who receives the data is left out for `hostile` and the
+agent suites, which send none. An agent suite's estimate reads "up to the cap".
+`--yes` answers the question, and without a terminal and without `--yes` the
+command exits `1` before any call. A run on claude-sdk models alone asks nothing.
+On a terminal it draws the plan, a live line and the result; in a pipe the plan
+goes to stderr and stdout gets the result as `name  value` lines, the metrics then
+`cost_usd`. The exit status is `0` when the run ended or reached the cost cap, and
+`1` when a provider failed, a cost could not be known, the question was declined,
+something the run needs is missing, the recorded spending is used up, or a
+`hostile`, `source-agent` or `explore-agent` run was incomplete or had a failure
+its target is 0 for (an attack, a rule violation, no answered pair). It is `2` for
+an unknown suite, a `--limit` out of range or given to `hostile`, a `--model` that
+cannot be used (the jury of the label set, or the grader of `reasons` and
+`explore-agent`) or one missing from the OpenRouter price list. Ctrl-C on a
 terminal ends the run with `Stopped` and keeps the cases stored in a run marked
-incomplete; it exits `0`, except for `hostile`, which exits `1`.
+incomplete; it exits `0`, except for `hostile` and the agent suites, which exit `1`.
 
 `eval review` needs a terminal and exits `1` in a pipe. It shows one case at a
 time, first those whose votes give no label, then a spot check of agreed labels,
@@ -71,7 +74,7 @@ import asyncio
 import re
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Coroutine, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime
@@ -83,7 +86,7 @@ import typer
 from ijob_ai.errors import LlmError
 from ijob_ai.llm.reference import Provider, parse_model_ref
 from ijob_core.errors import InvalidValueError
-from ijob_core.eval_records import EvalTask
+from ijob_core.eval_records import EvalTask, RunStatus
 from rich.console import Console
 from rich.live import Live
 from rich.text import Text
@@ -100,10 +103,11 @@ from ijob_app.eval_ops import (
 )
 from ijob_app.eval_report import EvalReport, RunDetail, run_cost
 from ijob_app.eval_run import RunOffer, RunProgress
-from ijob_app.eval_suites import Suite, SuiteReport
+from ijob_app.eval_suites import AGENT_SUITES, Suite, SuiteReport
 from ijob_app.eval_view import (
     cost_text,
     data_notice,
+    explore_suite_panel,
     failures_panel,
     hostile_panel,
     jury_panel,
@@ -118,6 +122,7 @@ from ijob_app.eval_view import (
     run_panel,
     run_progress,
     run_values,
+    source_suite_panel,
     suite_panel,
 )
 from ijob_app.service import LabelOffer, LabelProgress, Service
@@ -141,6 +146,9 @@ _REFRESH_PER_SECOND: Final = 8
 _SPINS_PER_SECOND: Final = 10
 _SCORE_MAX: Final = 100
 _SCORE_DIGITS: Final = re.compile(r"[0-9]{1,3}")
+
+type _SuiteRunner = Callable[..., Coroutine[object, object, SuiteReport]]
+"""A service call that runs an offer's suite, given the offer and `on_progress`."""
 
 
 class _Move(StrEnum):
@@ -638,13 +646,18 @@ def _run_plan_lines(offer: RunOffer) -> list[str]:
     return lines
 
 
+def _suite_label(suite: Suite) -> str:
+    """Write a suite's name for a title: `source-agent` is `Source agent`."""
+    return suite.value.replace("-", " ").capitalize()
+
+
 def _show_run_plan(offer: RunOffer, notice: str | None) -> None:
     """Show the models, the estimate, the cap and who receives the data."""
     if is_terminal():
         plan = offer.plan
         make_console().print(
             plan_panel(
-                f"{plan.suite.value.capitalize()} · {plan.cases} cases",
+                f"{_suite_label(plan.suite)} · {plan.cases} cases",
                 column="MODEL",
                 models=offer.costs,
                 estimate=offer.estimate,
@@ -682,6 +695,13 @@ def _confirm_run(
         raise typer.Exit(code=_EXIT_REFUSED)
 
 
+def _runner(service: Service, offer: RunOffer) -> _SuiteRunner:
+    """Pick the service call that runs an offer's suite; agents need web clients."""
+    if offer.plan.suite in AGENT_SUITES:
+        return service.eval_run_agents
+    return service.eval_run
+
+
 def _run_suite_on_terminal(service: Service, offer: RunOffer) -> SuiteReport | None:
     """Run the suite with a live line of progress.
 
@@ -689,7 +709,7 @@ def _run_suite_on_terminal(service: Service, offer: RunOffer) -> SuiteReport | N
         What the run did, or `None` when the user stopped it.
     """
     console = make_console()
-    name = offer.plan.suite.value.capitalize()
+    name = _suite_label(offer.plan.suite)
     state = RunProgress(done=0, stored=0, total=offer.plan.cases, spent=0.0)
 
     def draw() -> Text:
@@ -717,7 +737,7 @@ def _run_suite_on_terminal(service: Service, offer: RunOffer) -> SuiteReport | N
         ),
         suppress(KeyboardInterrupt),
     ):
-        report = asyncio.run(service.eval_run(offer, on_progress=progress))
+        report = asyncio.run(_runner(service, offer)(offer, on_progress=progress))
     if report is None:
         console.print(
             notice_line(
@@ -738,25 +758,13 @@ def _run_suite_in_a_pipe(service: Service, offer: RunOffer) -> SuiteReport:
         )
 
     try:
-        return asyncio.run(service.eval_run(offer, on_progress=progress))
+        return asyncio.run(_runner(service, offer)(offer, on_progress=progress))
     finally:
         line.clear()
 
 
-def _show_suite_result(detail: RunDetail, report: SuiteReport) -> None:
-    """Show a finished run: drawn on a terminal, `name  value` lines in a pipe."""
-    if is_terminal():
-        console = make_console()
-        if report.suite is Suite.HOSTILE:
-            console.print(hostile_panel(detail))
-        else:
-            console.print(suite_panel(detail))
-    else:
-        for key, _, text in run_values(detail):
-            typer.echo(_line(key, text))
-        typer.echo(_line("cost_usd", f"{run_cost(detail.run):.4f}"))
-        number = report.run_id
-        say_note(f"note: run {number}; run: ijob eval report {number} --failures")
+def _say_why_incomplete(report: SuiteReport) -> None:
+    """Say what stopped a run, or that it is incomplete with no stop to name."""
     stopped_by = report.operation.stopped_by
     if stopped_by == "provider":
         _say_stopped(f"{report.model} stopped: {report.stop_error}")
@@ -767,6 +775,33 @@ def _show_suite_result(detail: RunDetail, report: SuiteReport) -> None:
             "note: stopped at the cost cap (eval.max_cost_usd), "
             "the run is kept as incomplete"
         )
+    elif report.status is RunStatus.INCOMPLETE:
+        say_note(
+            "note: the run is kept as incomplete, with no stop to name; "
+            f"see ijob eval report {report.run_id} --failures"
+        )
+
+
+def _show_suite_result(detail: RunDetail, report: SuiteReport) -> None:
+    """Show a finished run: drawn on a terminal, `name  value` lines in a pipe."""
+    if is_terminal():
+        console = make_console()
+        match report.suite:
+            case Suite.HOSTILE:
+                console.print(hostile_panel(detail))
+            case Suite.SOURCE_AGENT:
+                console.print(source_suite_panel(detail))
+            case Suite.EXPLORE_AGENT:
+                console.print(explore_suite_panel(detail))
+            case _:
+                console.print(suite_panel(detail))
+    else:
+        for key, _, text in run_values(detail):
+            typer.echo(_line(key, text))
+        typer.echo(_line("cost_usd", f"{run_cost(detail.run):.4f}"))
+        number = report.run_id
+        say_note(f"note: run {number}; run: ijob eval report {number} --failures")
+    _say_why_incomplete(report)
     if report.skipped:
         say_note(
             f"note: {report.skipped} cases changed since the draw and were left out"
@@ -806,7 +841,10 @@ def _add_run(
         ] = None,
         limit: Annotated[
             int | None,
-            typer.Option(help="Cover only this many cases, from 1 to 100."),
+            typer.Option(
+                help="Cover only this many cases, from 1 to 100; "
+                "source-agent 1 to 150, explore-agent 1 to 5."
+            ),
         ] = None,
         yes: Annotated[
             bool, typer.Option("--yes", help="Start without asking.")
@@ -845,7 +883,11 @@ def _add_run(
                     None if report is None else service.eval_run_detail(report.run_id)
                 )
             if report is None or detail is None:
-                raise typer.Exit(code=_EXIT_REFUSED if chosen is Suite.HOSTILE else 0)
+                raise typer.Exit(
+                    code=_EXIT_REFUSED
+                    if chosen is Suite.HOSTILE or chosen in AGENT_SUITES
+                    else 0
+                )
             _show_suite_result(detail, report)
             if report.exit_status:
                 raise typer.Exit(code=report.exit_status)

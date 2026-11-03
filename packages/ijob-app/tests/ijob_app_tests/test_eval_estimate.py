@@ -9,6 +9,7 @@ from ijob_ai.tasks.text import posting_block
 from ijob_app.eval_estimate import (
     SUBSCRIPTION,
     UNKNOWN,
+    UP_TO_CAP,
     CallKind,
     PlannedCall,
     Price,
@@ -224,3 +225,37 @@ def test_cost_by_model_sums_each_models_calls_in_order() -> None:
     dollars = [row.cost for row in rows[1:] if isinstance(row.cost, float)]
     assert len(dollars) == 2
     assert by_model[1][1] == pytest.approx(sum(dollars))
+
+
+@pytest.mark.parametrize("prices", [None, _PRICES, {}])
+def test_agent_calls_read_up_to_the_cap_without_a_price(prices: Prices | None) -> None:
+    rows = estimate(
+        [
+            PlannedCall(_OPENROUTER, CallKind.AGENT, 3, 0),
+            PlannedCall(_CLAUDE, CallKind.AGENT, 3, 0),
+        ],
+        prices,
+    )
+
+    assert [row.cost for row in rows] == [UP_TO_CAP, SUBSCRIPTION]
+    assert [(row.input_tokens, row.output_tokens) for row in rows] == [(0, 0), (0, 0)]
+    assert total_cost(rows) == UP_TO_CAP
+    assert cost_by_model(rows) == [(_OPENROUTER, UP_TO_CAP), (_CLAUDE, SUBSCRIPTION)]
+
+
+def test_agent_calls_on_claude_only_are_a_subscription() -> None:
+    rows = estimate([PlannedCall(_CLAUDE, CallKind.AGENT, 3, 0)], None)
+
+    assert total_cost(rows) == SUBSCRIPTION
+
+
+def test_unknown_still_wins_over_up_to_the_cap() -> None:
+    rows = estimate(
+        [
+            PlannedCall(_OPENROUTER, CallKind.AGENT, 3, 0),
+            PlannedCall(_OPENROUTER, CallKind.JUDGE, 3, 100),
+        ],
+        None,
+    )
+
+    assert total_cost(rows) == UNKNOWN

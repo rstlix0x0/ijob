@@ -8,7 +8,7 @@ from typing import Any, override
 import dspy
 import pytest
 from dspy.utils.exceptions import ContextWindowExceededError
-from ijob_ai.agents.react import AgentRun, GuardedReAct, ToolOutcome
+from ijob_ai.agents.react import AgentRun, AgentStep, GuardedReAct, ToolOutcome
 from ijob_ai.errors import (
     CapReachedError,
     CostUnknownError,
@@ -35,7 +35,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 from ..llm.fakes import JUNK, FakeAsyncEngine, FakeEngine
 
 
-def _tool_call(name: str, args: dict[str, str]) -> str:
+def _tool_call(name: str, args: dict[str, object]) -> str:
     return json.dumps(
         {"next_thought": "look", "next_tool_name": name, "next_tool_args": args}
     )
@@ -318,7 +318,7 @@ def test_stored_stop_set_by_a_step_ends_the_next_call() -> None:
     engine = FakeAsyncEngine([CALL_GOOD], cost=0.01)
     run = AgentRun()
 
-    def stop_after_first(_tool: str, _outcome: ToolOutcome) -> None:
+    def stop_after_first(_step: AgentStep) -> None:
         run.stop = ProviderFailedError("tool saw it")
 
     run.on_step = stop_after_first
@@ -329,19 +329,87 @@ def test_stored_stop_set_by_a_step_ends_the_next_call() -> None:
     assert len(engine.requests) == 1
 
 
-def test_on_step_is_called_after_each_tool() -> None:
+def test_on_step_is_called_with_each_finished_step() -> None:
     engine = FakeAsyncEngine(script(CALL_GOOD, CALL_BAD, CALL_FINISH), cost=0.01)
-    seen: list[tuple[str, ToolOutcome]] = []
-    run = AgentRun(on_step=lambda tool, outcome: seen.append((tool, outcome)))
+    seen: list[AgentStep] = []
+    run = AgentRun(on_step=seen.append)
 
     asyncio.run(run_loop(build(engine, Budget(1.0), run)))
 
-    assert seen == [
+    assert [(step.tool, step.outcome) for step in seen] == [
         ("good", ToolOutcome.OK),
         ("bad", ToolOutcome.FAILED),
         ("finish", ToolOutcome.OK),
     ]
-    assert [(step.tool, step.outcome) for step in run.steps] == seen
+    assert seen == run.steps
+
+
+def test_a_step_carries_its_arguments_and_what_the_model_saw() -> None:
+    engine = FakeAsyncEngine(script(CALL_GOOD, CALL_BAD, CALL_FINISH), cost=0.01)
+    run = AgentRun()
+
+    prediction = asyncio.run(run_loop(build(engine, Budget(1.0), run)))
+
+    good_step, bad_step, _finish = run.steps
+    assert good_step.arguments == {"x": "a"}
+    assert good_step.result == "got a"
+    assert good_step.result == observation(prediction, 0)
+    assert bad_step.arguments == {"x": "a"}
+    assert bad_step.result == observation(prediction, 1)
+    assert bad_step.result == "could not run bad; it takes: x"
+
+
+def test_a_refused_call_keeps_the_arguments_the_model_gave() -> None:
+    engine = FakeAsyncEngine(script(CALL_STRAY, CALL_FINISH), cost=0.01)
+    run = AgentRun()
+
+    asyncio.run(run_loop(build(engine, Budget(1.0), run)))
+
+    [stray, _finish] = run.steps
+    assert stray.outcome is ToolOutcome.FAILED
+    assert stray.arguments == {"x": "a", "y": "b"}
+    assert stray.result == "could not run good; it takes: x"
+
+
+def test_a_step_result_is_its_first_200_characters() -> None:
+    engine = FakeAsyncEngine(script(CALL_BIG, CALL_FINISH), cost=0.01)
+    run = AgentRun()
+
+    asyncio.run(run_loop(build(engine, Budget(1.0), run)))
+
+    assert run.steps[0].result == "y" * 200
+
+
+def test_step_arguments_are_one_clean_line_of_at_most_100_characters() -> None:
+    hostile = "first\nsecond\x1b[2J\x07 " + "z" * 300
+    call = _tool_call("good", {"x": hostile})
+    engine = FakeAsyncEngine(script(call, CALL_FINISH), cost=0.01)
+    run = AgentRun()
+
+    asyncio.run(run_loop(build(engine, Budget(1.0), run)))
+
+    shown = run.steps[0].arguments["x"]
+    assert shown.startswith("first second[2J zzz")
+    assert len(shown) == 100
+    assert all(char.isprintable() for char in shown)
+
+
+def test_step_argument_values_are_text() -> None:
+    call = _tool_call("count", {"n": 5})
+    engine = FakeAsyncEngine(script(call, CALL_FINISH), cost=0.01)
+    run = AgentRun()
+
+    asyncio.run(run_loop(build(engine, Budget(1.0), run)))
+
+    assert run.steps[0].arguments == {"n": "5"}
+    assert run.steps[0].result == "counted 5"
+
+
+def test_a_step_without_details_has_none() -> None:
+    step = AgentStep("good", ToolOutcome.OK)
+
+    assert step.arguments == {}
+    assert step.result == ""
 
 
 def test_tool_results_are_cut_to_4000_characters() -> None:
@@ -558,7 +626,7 @@ def test_a_raising_on_step_ends_the_run_without_reaching_the_model() -> None:
     engine = FakeAsyncEngine(script(CALL_GOOD, CALL_FINISH), cost=0.01)
     run = AgentRun()
 
-    def broken(_tool: str, _outcome: ToolOutcome) -> None:
+    def broken(_step: AgentStep) -> None:
         raise RuntimeError(LEAK)
 
     run.on_step = broken
@@ -576,7 +644,7 @@ def test_a_raising_on_step_keeps_an_earlier_stop() -> None:
     engine = FakeAsyncEngine(script(CALL_GOOD), cost=0.01)
     run = AgentRun()
 
-    def broken(_tool: str, _outcome: ToolOutcome) -> None:
+    def broken(_step: AgentStep) -> None:
         run.stop = first
         raise RuntimeError(LEAK)
 

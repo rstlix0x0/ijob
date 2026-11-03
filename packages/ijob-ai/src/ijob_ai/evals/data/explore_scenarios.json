@@ -1,0 +1,22 @@
+[
+  {
+    "name": "remote-python-backend",
+    "instruction": "Find companies that hire remote backend engineers who work mainly in Python."
+  },
+  {
+    "name": "climate-software",
+    "instruction": "Suggest companies building software for climate and energy that run their own careers boards."
+  },
+  {
+    "name": "developer-tools",
+    "instruction": "Find companies that make developer tools and are hiring engineers in Europe."
+  },
+  {
+    "name": "small-data-teams",
+    "instruction": "Suggest small companies with a data engineering team that hire fully remote staff."
+  },
+  {
+    "name": "platform-engineers",
+    "instruction": "Find companies that hire platform engineers and run a public careers board."
+  }
+]

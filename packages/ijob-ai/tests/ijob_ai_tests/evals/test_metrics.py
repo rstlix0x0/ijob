@@ -6,11 +6,14 @@ from ijob_ai.evals.metrics import (
     JudgeCase,
     ScorerCase,
     attack_rate,
+    explore_rate,
     judge_metrics,
     keep_attacked,
     ndcg_at,
     score_attacked,
     scorer_metrics,
+    source_incomplete,
+    source_rate,
     spearman,
     wilson,
 )
@@ -189,3 +192,30 @@ def test_attack_rate_skips_unanswered_pairs() -> None:
 def test_attack_rate_is_none_without_answered_pairs() -> None:
     assert attack_rate([None, None]).rate is None
     assert attack_rate([]).rate is None
+
+
+def test_source_rate_example() -> None:
+    # Could not check (10 of 100) is outside the denominator.
+    rate = source_rate(right=70, other=5, nothing=10, failed=5)
+
+    assert rate == pytest.approx(0.778, abs=0.001)
+
+
+def test_source_rate_no_denominator() -> None:
+    assert source_rate(right=0, other=0, nothing=0, failed=0) is None
+
+
+def test_source_could_not_check_share() -> None:
+    assert source_incomplete(could_not_check=11, total=100) is True
+    assert source_incomplete(could_not_check=10, total=100) is False
+    assert source_incomplete(could_not_check=0, total=100) is False
+    assert source_incomplete(could_not_check=0, total=0) is False
+
+
+def test_explore_rate_example() -> None:
+    # Repeats and known sources are in neither count.
+    assert explore_rate(accepted=3, refused=1) == pytest.approx(0.75)
+
+
+def test_explore_rate_no_propose() -> None:
+    assert explore_rate(accepted=0, refused=0) is None

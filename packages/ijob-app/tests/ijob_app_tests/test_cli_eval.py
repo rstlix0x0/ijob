@@ -1,5 +1,6 @@
 import json
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, override
@@ -8,10 +9,12 @@ import httpx
 import pytest
 import typer
 from ijob_ai.errors import ProviderFailedError
+from ijob_ai.evals.agent_cases import HostilePage, load_hostile_pages
 from ijob_ai.llm.reference import ModelRef, Provider
 from ijob_ai.tasks.text import input_sha256, posting_block
 from ijob_app.cli import make_app
 from ijob_app.cli_eval import _show_suite_result
+from ijob_app.eval_agent_suites import source_cases
 from ijob_app.eval_ops import ReviewItem, review_items
 from ijob_app.eval_suites import Suite, SuiteReport
 from ijob_app.home import IjobHome, setup_home
@@ -22,6 +25,7 @@ from ijob_core.eval_records import (
     EvalCase,
     EvalLabel,
     EvalResult,
+    EvalRun,
     EvalTask,
     EvalVote,
     LabelOrigin,
@@ -52,11 +56,26 @@ from .eval_fakes import (
 )
 from .llm_fakes import (
     MADE_UP_CLAUDE,
+    FakeAsyncEngine,
     Opaque,
     score_answer,
     verdict_answer,
     write_fake_cli,
     write_llm_config,
+)
+from .test_eval_agent_suites import (
+    _BOARD_API,
+    _BOARD_JSON,
+    _FINDS_ACME,
+    _GRADE,
+    _PROPOSE_ACME,
+    _SUMMARY,
+    FINISH,
+    NOTHING,
+    _ByModel,
+    _page_scripts,
+    _reading_scripts,
+    _ScriptedEngine,
 )
 from .test_eval_view import _run_detail
 
@@ -67,6 +86,7 @@ _B = "claude-sdk/juror-b"
 _ROUTED = "openrouter/made-up/juror-c"
 _ROUTED_COST = 0.06
 _BOX_CHARACTERS = "╭╮╰╯│─✓✗"
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _NOTICE = "Sends your rules, CV profile and postings to OpenRouter and made-up"
 
 
@@ -550,7 +570,8 @@ def test_label_help_lists_its_flags(world: _World) -> None:
 
     assert result.exit_code == 0
     for flag in ("--limit", "--yes", "--db", "--config"):
-        assert flag in result.stdout
+        # Typer forces styled help under GITHUB_ACTIONS, which splits a flag's text.
+        assert flag in _ANSI.sub("", result.stdout)
 
 
 def _split_jury(world: _World) -> None:
@@ -865,7 +886,8 @@ def test_review_help_lists_its_flags(world: _World) -> None:
 
     assert result.exit_code == 0
     for flag in ("--db", "--config"):
-        assert flag in result.stdout
+        # Typer forces styled help under GITHUB_ACTIONS, which splits a flag's text.
+        assert flag in _ANSI.sub("", result.stdout)
 
 
 def _report(world: _World, *args: str) -> Result:
@@ -1133,7 +1155,8 @@ def test_report_help_lists_its_flags(world: _World) -> None:
 
     assert result.exit_code == 0
     for flag in ("--failures", "--db", "--config"):
-        assert flag in result.stdout
+        # Typer forces styled help under GITHUB_ACTIONS, which splits a flag's text.
+        assert flag in _ANSI.sub("", result.stdout)
 
 
 _UNDER_TEST = "claude-sdk/under-test"
@@ -1212,7 +1235,7 @@ def test_run_judge_screen(world: _World) -> None:
 
     assert result.exit_code == 0, result.output
     assert "Judge · under-test · 12 cases · run 1" in result.stdout
-    recall = next(line for line in result.stdout.splitlines() if "Keep recall" in line)
+    recall = _screen_row(result.stdout, "Keep recall")
     assert "1.00" in recall
     assert "±0." in recall
     assert "main" in recall
@@ -1234,7 +1257,7 @@ def test_run_scorer_screen(world: _World) -> None:
 
     assert result.exit_code == 0, result.output
     assert "Scorer · under-test · 12 cases · run 1" in result.stdout
-    ndcg = next(line for line in result.stdout.splitlines() if "NDCG@10" in line)
+    ndcg = _screen_row(result.stdout, "NDCG@10")
     assert "main" in ndcg
     for name in ("Spearman", "Mean score error", "Unusable answers", "Cost", "Latency"):
         assert name in result.stdout
@@ -1515,7 +1538,8 @@ def test_run_help_lists_its_flags(world: _World) -> None:
 
     assert result.exit_code == 0
     for flag in ("--model", "--limit", "--yes", "--db", "--config"):
-        assert flag in result.stdout
+        # Typer forces styled help under GITHUB_ACTIONS, which splits a flag's text.
+        assert flag in _ANSI.sub("", result.stdout)
     assert "judge" in result.stdout
 
 
@@ -1563,3 +1587,489 @@ def test_run_ctrl_c_stores_the_run_incomplete(
     assert stored > 0
     assert f"{stored} cases stored" in result.stdout
     assert [run.status for run in runs] == [RunStatus.INCOMPLETE]
+
+
+# --- the agent suites ----------------------------------------------------------
+
+_AGENT = "claude-sdk/made-up-agent"
+_AGENT_GRADER = "claude-sdk/made-up-grader"
+_ROUTED_AGENT = "openrouter/made-up/agent"
+_AGENT_MODELS = (
+    f'source_agent = "{_AGENT}"\n'
+    f'explore_agent = "{_AGENT}"\n'
+    f'eval_grader = "{_AGENT_GRADER}"\n'
+)
+_LIMIT_NOTE = "These cases are easy: most board names are simple company slugs."
+
+
+class _AgentWorld(_World):
+    """A home with no postings, agent models configured and scripted agents."""
+
+    def __init__(
+        self,
+        root: Path,
+        clients: ClientFactoryBuilder,
+        agents: _ByModel,
+        *,
+        max_cost: float | None = None,
+    ) -> None:
+        super().__init__(root, clients, jury=None, max_cost=max_cost, ready=False)
+        self.agents = agents
+        with self.home.config.open("a", encoding="utf-8") as handle:
+            handle.write(f"\n[models]\n{_AGENT_MODELS}")
+
+    @override
+    def _handler(self, request: httpx.Request) -> httpx.Response:
+        if f"{request.url.host}{request.url.path}" == _BOARD_API:
+            return httpx.Response(
+                200, content=_BOARD_JSON, headers={"Content-Type": "application/json"}
+            )
+        return super()._handler(request)
+
+    @override
+    def app(self, *, interactive: bool) -> typer.Typer:
+        agents = self.agents
+
+        def options(_home: object, config_path: Path) -> LlmOptions:
+            return LlmOptions(config_path=config_path, engines=agents)
+
+        return make_app(
+            self._clients(self._handler),
+            now=lambda: _AT,
+            llm_options=options,
+            is_interactive=lambda: interactive,
+            resolver=_resolve_public,
+        )
+
+    def stored_runs(self) -> list[EvalRun]:
+        with Store.open(self.home.db) as store:
+            return store.evals.runs()
+
+
+def _screen_row(stdout: str, label: str) -> str:
+    """Give the first line of a screen that holds `label`."""
+    return next(line for line in stdout.splitlines() if label in line)
+
+
+async def _resolve_public(host: str, port: int) -> Sequence[str]:
+    del host, port
+    return ["93.184.216.34"]
+
+
+def _source_agents(*, touching: Sequence[HostilePage] = ()) -> _ByModel:
+    """Script the source agent to find nothing, and to touch some pages' targets."""
+    pages = load_hostile_pages()
+    scripts = _reading_scripts()
+    scripts[source_cases(1)[0].company] = NOTHING
+    scripts |= _page_scripts(pages, touching=touching)
+    return _ByModel({"made-up-agent": _ScriptedEngine(scripts)})
+
+
+def _explore_agents(*, grade: str = _GRADE) -> _ByModel:
+    """Script the explore agent to find and propose one board, graded by `grade`."""
+    texts = (*_FINDS_ACME, _PROPOSE_ACME, FINISH, _SUMMARY)
+    return _ByModel(
+        {
+            "made-up-agent": FakeAsyncEngine(texts),
+            "made-up-grader": FakeAsyncEngine([grade]),
+        }
+    )
+
+
+@pytest.fixture
+def agent_world(
+    tmp_path: Path, client_factory_for: ClientFactoryBuilder
+) -> _AgentWorld:
+    return _AgentWorld(tmp_path, client_factory_for, _source_agents())
+
+
+@pytest.mark.parametrize("suite", ["source-agent", "explore-agent"])
+def test_agent_suite_asks_but_names_no_data(
+    agent_world: _AgentWorld, suite: str
+) -> None:
+    result = agent_world.suite(
+        suite, "--model", _ROUTED_AGENT, interactive=True, stdin="n\n"
+    )
+
+    assert result.exit_code == 1
+    assert "Start the run? [y/N]" in result.stderr
+    assert "Sends" not in result.output
+    assert "OpenRouter" not in result.output
+    assert agent_world.prices_requested == 0
+    assert agent_world.runs() == 0
+
+
+@pytest.mark.usefixtures("on_a_terminal")
+def test_agent_suite_paid_estimate_reads_up_to_the_cap(
+    agent_world: _AgentWorld,
+) -> None:
+    result = agent_world.suite(
+        "source-agent",
+        "--model",
+        _ROUTED_AGENT,
+        "--limit",
+        "2",
+        interactive=True,
+        stdin="n\n",
+    )
+
+    assert result.exit_code == 1
+    assert "Source agent · 5 cases" in result.stdout
+    assert f"{_ROUTED_AGENT}" in result.stdout
+    assert "up to the cap" in result.stdout
+    assert "Estimate up to the cap · cap $4.00" in result.stdout
+    assert agent_world.prices_requested == 0
+
+
+def test_agent_suite_paid_estimate_reads_up_to_the_cap_in_a_pipe(
+    agent_world: _AgentWorld,
+) -> None:
+    result = agent_world.suite("source-agent", "--model", _ROUTED_AGENT, "--limit", "2")
+
+    assert result.exit_code == 1
+    assert re.search(r"^estimate +up to the cap$", result.stderr, re.MULTILINE)
+    assert re.search(
+        rf"^model +{_ROUTED_AGENT} +up to the cap$", result.stderr, re.MULTILINE
+    )
+    assert "confirmation needed; pass --yes" in result.stderr
+    assert "Sends" not in result.stderr
+    assert agent_world.prices_requested == 0
+    assert agent_world.runs() == 0
+
+
+@pytest.mark.usefixtures("on_a_terminal")
+def test_claude_only_agent_run_does_not_ask(agent_world: _AgentWorld) -> None:
+    result = agent_world.suite("source-agent", "--limit", "1", interactive=True)
+
+    assert result.exit_code == 0, result.output
+    assert "Start" not in result.output
+    assert "subscription" in result.stdout
+
+
+@pytest.mark.usefixtures("on_a_terminal")
+def test_source_suite_screen(agent_world: _AgentWorld) -> None:
+    result = agent_world.suite("source-agent", "--limit", "1")
+
+    assert result.exit_code == 0, result.output
+    assert "Source agent · made-up-agent · 1 company · run 1" in result.stdout
+    for line in (
+        "Found the right source",
+        "Other source verified",
+        "Nothing found",
+        "Could not check",
+        "Rule violations",
+        "Steps",
+        "Cost per company",
+    ):
+        assert line in result.stdout
+    found = _screen_row(result.stdout, "Found the right")
+    assert found.split()[-4:-1] == ["0.00", "±0.40", "main"]
+    assert "target 0" in result.stdout
+    assert "median" in result.stdout
+    assert "of 1" in result.stdout
+    assert _LIMIT_NOTE in result.stdout
+    assert "Hostile" not in result.stdout
+    [run] = agent_world.stored_runs()
+    assert run.suite == "source-agent"
+    assert run.limited is True
+    assert run.status is RunStatus.COMPLETE
+
+
+def test_source_suite_in_a_pipe_is_plain(agent_world: _AgentWorld) -> None:
+    result = agent_world.suite("source-agent", "--limit", "1")
+
+    assert result.exit_code == 0, result.output
+    assert not any(char in result.stdout for char in _BOX_CHARACTERS)
+    for name, value in (
+        ("found_right", "0.00"),
+        ("other", "0"),
+        ("nothing", "1"),
+        ("could_not_check", "0"),
+        ("violations", "0"),
+        ("steps_median", "[0-9]+"),
+        ("cost_per_company", "[0-9.]+"),
+        ("failed", "0"),
+        ("cost_usd", "[0-9.]+"),
+    ):
+        assert re.search(rf"^{name} +{value}$", result.stdout, re.MULTILINE), name
+    assert "ijob eval report 1 --failures" in result.stderr
+
+
+@pytest.mark.usefixtures("on_a_terminal")
+def test_explore_suite_screen(
+    client_factory_for: ClientFactoryBuilder, tmp_path: Path
+) -> None:
+    world = _AgentWorld(tmp_path, client_factory_for, _explore_agents())
+
+    result = world.suite("explore-agent", "--limit", "1")
+
+    assert result.exit_code == 0, result.output
+    assert "Explore agent · made-up-agent · 1 scenario · run 1" in result.stdout
+    accepted = _screen_row(result.stdout, "Accepted proposals")
+    assert accepted.split()[-4:-1] == ["1.00", "±0.40", "main"]
+    for name in (
+        "Refused proposals",
+        "Instruction following",
+        "Ungraded scenarios",
+        "Rule violations",
+        "Steps",
+        "Cost per scenario",
+    ):
+        assert name in result.stdout
+    following = _screen_row(result.stdout, "following")
+    assert "0.80" in following
+    assert "ijob eval report 1 --failures" in result.stdout
+    assert _LIMIT_NOTE not in result.stdout
+    [run] = world.stored_runs()
+    assert run.suite == "explore-agent"
+    assert run.status is RunStatus.COMPLETE
+
+
+def test_explore_suite_in_a_pipe_is_plain(
+    client_factory_for: ClientFactoryBuilder, tmp_path: Path
+) -> None:
+    world = _AgentWorld(tmp_path, client_factory_for, _explore_agents())
+
+    result = world.suite("explore-agent", "--limit", "1")
+
+    assert result.exit_code == 0, result.output
+    assert not any(char in result.stdout for char in _BOX_CHARACTERS)
+    for name, value in (
+        ("accepted_rate", "1.00"),
+        ("accepted", "1"),
+        ("refused", "0"),
+        ("following", "0.80"),
+        ("violations", "0"),
+        ("ungraded", "0"),
+    ):
+        assert re.search(rf"^{name} +{value}$", result.stdout, re.MULTILINE), name
+
+
+def test_agent_suite_violation_exits_1(
+    tmp_path: Path, client_factory_for: ClientFactoryBuilder
+) -> None:
+    pages = load_hostile_pages()
+    world = _AgentWorld(
+        tmp_path, client_factory_for, _source_agents(touching=[pages[0]])
+    )
+
+    result = world.suite("source-agent", "--limit", "1")
+
+    assert result.exit_code == 1
+    assert re.search(
+        rf"^violations +{len(pages[0].injected_targets)}$", result.stdout, re.MULTILINE
+    )
+    [run] = world.stored_runs()
+    assert run.status is RunStatus.COMPLETE
+
+
+@pytest.mark.usefixtures("on_a_terminal")
+def test_agent_suite_violation_screen_marks_the_target(
+    tmp_path: Path, client_factory_for: ClientFactoryBuilder
+) -> None:
+    world = _AgentWorld(
+        tmp_path, client_factory_for, _source_agents(touching=load_hostile_pages()[:1])
+    )
+
+    result = world.suite("source-agent", "--limit", "1")
+
+    assert result.exit_code == 1
+    violations = _screen_row(result.stdout, "Rule violations")
+    assert "target 0" in violations
+    assert violations.split()[2] != "0"
+
+
+def test_agent_suite_incomplete_without_a_stop_says_so_in_a_pipe(
+    tmp_path: Path, client_factory_for: ClientFactoryBuilder
+) -> None:
+    unread = _ByModel({"made-up-agent": _ScriptedEngine({})})
+    world = _AgentWorld(tmp_path, client_factory_for, unread)
+
+    result = world.suite("source-agent", "--limit", "1")
+
+    assert result.exit_code == 1
+    [run] = world.stored_runs()
+    assert run.status is RunStatus.INCOMPLETE
+    assert "the run is kept as incomplete" in result.stderr
+    assert "ijob eval report 1 --failures" in result.stderr
+
+
+@pytest.mark.parametrize("suite", ["source-agent", "explore-agent"])
+def test_agent_suite_incomplete_exits_1(
+    tmp_path: Path,
+    client_factory_for: ClientFactoryBuilder,
+    monkeypatch: pytest.MonkeyPatch,
+    suite: str,
+) -> None:
+    world = _AgentWorld(tmp_path, client_factory_for, _source_agents(), max_cost=0.05)
+    serve_openrouter(
+        monkeypatch, [openrouter_reply(FINISH, cost=_ROUTED_COST) for _ in range(5)]
+    )
+
+    result = world.suite(suite, "--model", _ROUTED_AGENT, "--yes")
+
+    assert result.exit_code == 1, result.output
+    assert "stopped at the cost cap" in result.stderr
+    [run] = world.stored_runs()
+    assert run.status is RunStatus.INCOMPLETE
+
+
+@pytest.mark.parametrize(
+    ("suite", "limit"),
+    [
+        ("source-agent", "0"),
+        ("source-agent", "151"),
+        ("explore-agent", "0"),
+        ("explore-agent", "6"),
+    ],
+)
+def test_agent_suite_limit_out_of_range_exits_2(
+    agent_world: _AgentWorld, suite: str, limit: str
+) -> None:
+    result = agent_world.suite(suite, "--limit", limit)
+
+    assert result.exit_code == 2
+    assert "limit" in result.stderr
+    assert agent_world.runs() == 0
+
+
+@pytest.mark.parametrize(
+    ("suite", "limit"), [("source-agent", "150"), ("explore-agent", "5")]
+)
+def test_agent_suite_limit_edges_pass_the_plan(
+    agent_world: _AgentWorld, suite: str, limit: str
+) -> None:
+    result = agent_world.suite(suite, "--model", _ROUTED_AGENT, "--limit", limit)
+
+    assert result.exit_code == 1  # it stops to ask, in a pipe
+    assert "confirmation needed; pass --yes" in result.stderr
+
+
+def test_agent_suite_without_a_model_names_the_key(
+    tmp_path: Path, client_factory_for: ClientFactoryBuilder
+) -> None:
+    world = _AgentWorld(tmp_path, client_factory_for, _source_agents())
+    world.home.config.write_text("", encoding="utf-8")
+
+    result = world.suite("explore-agent")
+
+    assert result.exit_code == 1
+    assert "explore_agent" in result.stderr
+    assert world.runs() == 0
+
+
+def test_explore_suite_without_a_grader_names_the_key(
+    tmp_path: Path, client_factory_for: ClientFactoryBuilder
+) -> None:
+    world = _AgentWorld(tmp_path, client_factory_for, _explore_agents())
+    text = world.home.config.read_text(encoding="utf-8")
+    world.home.config.write_text(
+        text.replace(f'eval_grader = "{_AGENT_GRADER}"\n', ""), encoding="utf-8"
+    )
+
+    result = world.suite("explore-agent", "--limit", "1")
+
+    assert result.exit_code == 1
+    assert "eval_grader" in result.stderr
+    assert world.runs() == 0
+
+
+def test_explore_suite_refuses_the_grader_as_the_model(
+    tmp_path: Path, client_factory_for: ClientFactoryBuilder
+) -> None:
+    world = _AgentWorld(tmp_path, client_factory_for, _explore_agents())
+
+    result = world.suite("explore-agent", "--model", _AGENT_GRADER)
+
+    assert result.exit_code == 2
+    assert "grader" in result.stderr
+    assert world.runs() == 0
+
+
+class _InterruptedAgent(FakeAsyncEngine):
+    """An agent engine that gets a Ctrl-C on its first call."""
+
+    @override
+    async def complete(self, request: Opaque) -> Opaque:
+        raise KeyboardInterrupt
+
+
+@pytest.mark.usefixtures("on_a_terminal")
+def test_agent_suite_ctrl_c_stores_the_run_incomplete_and_exits_1(
+    tmp_path: Path, client_factory_for: ClientFactoryBuilder
+) -> None:
+    world = _AgentWorld(
+        tmp_path,
+        client_factory_for,
+        _ByModel({"made-up-agent": _InterruptedAgent()}),
+    )
+
+    result = world.suite("source-agent", "--limit", "1")
+
+    assert result.exit_code == 1, result.output
+    assert "Stopped" in result.stdout
+    [run] = world.stored_runs()
+    assert run.status is RunStatus.INCOMPLETE
+
+
+@pytest.mark.usefixtures("on_a_terminal")
+def test_agent_suites_appear_in_report(agent_world: _AgentWorld) -> None:
+    _add_run(
+        agent_world,
+        "source-agent",
+        metrics={"found_right": 0.84, "margin": 0.07, "nothing": 16, "violations": 0},
+        model="claude-sdk/sonnet",
+    )
+    _add_run(
+        agent_world,
+        "explore-agent",
+        metrics={"accepted_rate": 0.75, "violations": 0},
+        model="claude-sdk/sonnet",
+    )
+    limited = agent_world.suite("source-agent", "--limit", "1")
+    assert limited.exit_code == 0, limited.output
+
+    result = _report(agent_world)
+
+    assert result.exit_code == 0, result.output
+    assert "Source agent runs · source-agent-1" in result.stdout
+    assert "Explore agent runs · explore-agent-1" in result.stdout
+    for header in ("RIGHT", "NONE", "VIOL", "ACCEPT"):
+        assert header in result.stdout
+    row = _screen_row(result.stdout, "0.84")
+    assert "sonnet" in row
+    assert "1 other run not compared" in result.stdout
+
+
+def test_agent_suites_appear_in_the_report_pipe(agent_world: _AgentWorld) -> None:
+    run_id = _add_run(
+        agent_world,
+        "source-agent",
+        metrics={"found_right": 0.84, "nothing": 16, "violations": 0},
+    )
+
+    result = _report(agent_world)
+
+    assert result.exit_code == 0, result.output
+    assert re.search(
+        rf"^run +{run_id}  source-agent  .*  source-agent-1  .*found_right=0\.8400",
+        result.stdout,
+        re.MULTILINE,
+    )
+
+
+def test_run_help_lists_the_agent_suites_and_their_limits(
+    agent_world: _AgentWorld,
+) -> None:
+    result = CliRunner().invoke(
+        agent_world.app(interactive=False),
+        ["eval", "run", "--help"],
+        env={"IJOB_HOME": str(agent_world.home.root), "COLUMNS": "200"},
+    )
+
+    assert result.exit_code == 0
+    text = _ANSI.sub("", result.stdout)
+    assert "source-agent" in text
+    assert "explore-agent" in text
+    assert "150" in text
+    assert "1 to 5" in text

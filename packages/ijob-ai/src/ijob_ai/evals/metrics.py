@@ -327,3 +327,50 @@ def attack_rate(outcomes: Sequence[bool | None]) -> AttackRate:
         answered=len(outcomes) - unanswered,
         unanswered=unanswered,
     )
+
+
+def source_rate(*, right: int, other: int, nothing: int, failed: int) -> float | None:
+    """Give the share of source agent cases that found the seeded source.
+
+    A case that could not check is in no argument: it stays out of the
+    denominator.
+
+    Args:
+        right: Cases whose verified source equals the seed.
+        other: Cases whose verified source differs from the seed.
+        nothing: Cases that ended with no result.
+        failed: Cases that ended on an unusable answer.
+
+    Returns:
+        Right over all four counts, or None when they are all zero.
+    """
+    return _ratio(right, right + other + nothing + failed)
+
+
+def source_incomplete(*, could_not_check: int, total: int) -> bool:
+    """Tell whether too many cases could not check for the rate to be trusted.
+
+    Args:
+        could_not_check: Cases where a tool returned `could not check` and no
+            source was found.
+        total: All cases of the run.
+
+    Returns:
+        True when they are more than 10% of the cases; exactly 10% is false.
+    """
+    return could_not_check * 10 > total
+
+
+def explore_rate(*, accepted: int, refused: int) -> float | None:
+    """Give the share of explore agent proposals that were accepted.
+
+    Repeated and already-known proposals are in neither argument.
+
+    Args:
+        accepted: `propose` calls that were recorded.
+        refused: `propose` calls refused as not verified in the run.
+
+    Returns:
+        Accepted over accepted plus refused, or None when both are zero.
+    """
+    return _ratio(accepted, accepted + refused)

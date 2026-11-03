@@ -8,7 +8,14 @@ import httpx
 import pytest
 from ijob_core.model import SourceKind, SourceRef, parse_source_key
 from ijob_sources.collect import Source, SourceBatch
-from ijob_sources.detect import Resolution, resolve_url, verify_new_source
+from ijob_sources.detect import (
+    BOARD_HOSTS,
+    Resolution,
+    board_host,
+    board_ref,
+    resolve_url,
+    verify_new_source,
+)
 from ijob_sources.errors import (
     FetchError,
     HttpStatusError,
@@ -111,6 +118,59 @@ def _page(*blocks: dict[str, Any]) -> bytes:
         for block in blocks
     )
     return f"<html><head>{scripts}</head><body></body></html>".encode()
+
+
+def test_board_hosts_match_board_ref() -> None:
+    assert len(BOARD_HOSTS) == 6
+    for host, kind in BOARD_HOSTS.items():
+        assert board_ref(f"https://{host}/acme/jobs/1") == _ref(kind, "acme")
+
+
+def test_board_ref_is_none_off_the_boards() -> None:
+    assert board_ref("https://example.com/acme") is None
+    assert board_ref("https://jobs.lever.co.evil.com/acme") is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://jobsxlever.co/acme",
+        "https://jobs-lever.co/acme",
+        "https://job_boards.greenhouse.io/acme",
+        "https://job-boardsxgreenhouse.io/acme",
+        "https://boards.greenhouse.io.evil.test/acme",
+        "https://job\u017f.lever.co/acme",
+        "https://x.jobs.lever.co/acme",
+    ],
+)
+def test_a_look_alike_host_is_no_board(url: str) -> None:
+    assert board_ref(url) is None
+    assert board_host(url) is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://jobs.lever.co./acme",
+        "https://u@jobs.lever.co/acme",
+        "https://u:pw@JOBS.lever.co:443/acme",
+        "https://jobs.lever.co:443/acme",
+    ],
+)
+def test_the_host_decides_not_its_spelling(url: str) -> None:
+    assert board_ref(url) == _ref(SourceKind.LEVER, "acme")
+    assert board_host(url) == "jobs.lever.co"
+
+
+def test_board_host_names_a_board_host_without_an_account() -> None:
+    assert board_host("https://jobs.lever.co/") == "jobs.lever.co"
+    assert board_host("https://boards.greenhouse.io/embed/job_board?for=x") == (
+        "boards.greenhouse.io"
+    )
+    assert board_ref("https://jobs.lever.co/") is None
+    assert board_host("ftp://jobs.lever.co/acme") is None
+    assert board_host("not a url") is None
+    assert board_host("https://example.com/") is None
 
 
 @pytest.mark.parametrize(

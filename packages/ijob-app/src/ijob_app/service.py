@@ -17,6 +17,9 @@ by URL and the analysis that learns a recipe for an unrecognized page use such a
 client too, from their first request on, and the analysis stores nothing until
 the caller accepts its proposal.
 
+The source agent finds a source for a company without storing anything, and
+`add_found` stores what the user confirms.
+
 Every client the service builds shares one record of when each host was last
 requested, so requests to one host are spaced apart even when they come from
 different clients, such as `add_url` followed by `analyze_url`.
@@ -86,7 +89,9 @@ from ijob_sources.public_host import (
 from ijob_sources.registry import build_source, refresh_interval
 from ijob_sources.seeds import load_seeds
 
-from ijob_app import recipe_ops
+from ijob_app import agent_ops, recipe_ops
+from ijob_app.agent_ops import ExploreResult, FoundSource, SourceResult
+from ijob_app.agent_site import SiteRule, site_guard
 from ijob_app.config import FilterLayers, effective_filters
 from ijob_app.extract_ops import ExtractProgress, ExtractReport, extract_operation
 from ijob_app.home import IjobHome
@@ -112,6 +117,7 @@ from ijob_app.llm_ops import (
 from ijob_app.recipe_ops import RecipeProposal
 
 if TYPE_CHECKING:
+    from ijob_ai.agents.react import StepCallback
     from ijob_ai.llm.reference import ModelRef
     from ijob_ai.llm.settings import EvalSettings
     from ijob_core.eval_records import EvalLabel, EvalVote
@@ -1284,6 +1290,147 @@ class Service:
         self._store.add_source(resolution.ref, company, resolution.target_url)
         return self._require_source(resolution.ref)
 
+    async def find_source(
+        self,
+        company: str,
+        url: str | None = None,
+        *,
+        model: "ModelRef | None" = None,
+        on_step: "StepCallback | None" = None,
+        on_cost: Callable[[float], None] | None = None,
+    ) -> tuple[SourceResult, OperationReport]:
+        """Have the source agent find the source that lists a company's openings.
+
+        Nothing is stored; `add_found` stores what the user confirms. Boards
+        are checked through a client that refuses non-public addresses, and the
+        pages the agent opens through one that also stays on the company's
+        site, so a request off the site is refused before it is sent. The run
+        costs at most `[llm].max_cost_usd`.
+
+        Args:
+            company: The company to find a source for.
+            url: The company's careers address, which fixes the site the agent
+                may read, or `None` to start from the name alone.
+            model: The model that replaces `[models].source_agent` for this
+                run, or `None` for the configured one.
+            on_step: Called with each finished tool call.
+            on_cost: Called with the money the run has spent so far, in US
+                dollars, just before each `on_step` call.
+
+        Returns:
+            The result, whose `found` is the source to offer if any and whose
+            `stop` says why the run ended early, and what the run spent.
+
+        Raises:
+            MissingModelError: `model` is `None` and no model is set for the
+                `source_agent` task; nothing is called.
+            ProviderUnavailableError: A variable that redirects model calls is
+                set.
+            InvalidValueError: The config file is unusable.
+            ExceptionGroup: The run raised an error other than an `LlmError`,
+                such as one `on_step` raised.
+            sqlite3.Error: The store cannot be read.
+        """
+
+        def page_client_for(rule: SiteRule) -> PoliteClient:
+            client = self._client(None, public_only=True)
+            client.guard_requests(site_guard(rule))
+            return client
+
+        async with self._client(None, public_only=True) as public_client:
+            return await agent_ops.find_operation(
+                self._runtime(),
+                self._store,
+                company,
+                url,
+                model=model,
+                public_client=public_client,
+                page_client_for=page_client_for,
+                on_step=on_step,
+                on_cost=on_cost,
+            )
+
+    async def explore(
+        self,
+        instruction: str,
+        *,
+        model: "ModelRef | None" = None,
+        on_step: "StepCallback | None" = None,
+        on_cost: Callable[[float], None] | None = None,
+    ) -> tuple[ExploreResult, OperationReport]:
+        """Have the explore agent carry out an instruction and propose sources.
+
+        Nothing is stored; `add_found` stores what the user confirms, with
+        `found_of` turning a proposal into the source to add. Boards are
+        checked through a client that refuses non-public addresses, and the
+        pages each source-agent run opens through one that also stays on the
+        company's site. The run costs at most `[llm].max_cost_usd`, the
+        source-agent runs inside it included.
+
+        Args:
+            instruction: The user's own request.
+            model: The model that replaces `[models].explore_agent` for this
+                run, or `None` for the configured one.
+            on_step: Called with each finished tool call of the explore agent.
+            on_cost: Called with the money the run has spent so far, in US
+                dollars, just before each `on_step` call.
+
+        Returns:
+            The result, whose `proposals` stand however the run ended and whose
+            `stop` says why it ended early, and what the run spent.
+
+        Raises:
+            MissingModelError: `model` is `None` and no model is set for the
+                `explore_agent` task; nothing is called.
+            ProviderUnavailableError: A variable that redirects model calls is
+                set.
+            InvalidValueError: The config file is unusable.
+            ExceptionGroup: The run raised an error other than an `LlmError`,
+                such as one `on_step` raised.
+            sqlite3.Error: The store cannot be read.
+        """
+
+        def page_client_for(rule: SiteRule) -> PoliteClient:
+            client = self._client(None, public_only=True)
+            client.guard_requests(site_guard(rule))
+            return client
+
+        async with self._client(None, public_only=True) as public_client:
+            return await agent_ops.explore_operation(
+                self._runtime(),
+                self._store,
+                instruction,
+                model=model,
+                public_client=public_client,
+                page_client_for=page_client_for,
+                on_step=on_step,
+                on_cost=on_cost,
+            )
+
+    async def add_found(self, found: FoundSource) -> SourceRow:
+        """Store a source the agent found, the way its kind is stored.
+
+        A board goes through `add_source`, a feed or job page through `add_url`
+        with the address it was read from, and a learned recipe through
+        `accept_recipe`.
+
+        Args:
+            found: The source the user confirmed.
+
+        Returns:
+            The source's row.
+
+        Raises:
+            SourceCompanyError: The table already holds the source for another
+                company.
+            InvalidValueError: The source cannot be built, or a recipe or its
+                model reference is empty.
+            SourcesError: The source fails its check or cannot be read.
+            sqlite3.Error: The write failed.
+        """
+        self._refuse_other_company(found.ref, found.company)
+        return await agent_ops.add_found(self, found)
+
     def learns_recipes(self) -> bool:
         """Say whether a model is set to learn recipes.
 
@@ -1587,12 +1734,13 @@ class Service:
         """Plan a run of one suite and estimate what its calls cost.
 
         Prices are read from OpenRouter's public model list, and only when a model
-        the run calls is on OpenRouter. No model is called.
+        the run calls is priced from it. An agent suite's calls are not: their
+        estimate reads "up to the cap". No model is called.
 
         Args:
             suite: The suite to run.
             model: The model under test, or `None` for the suite's default.
-            limit: Cover only this many cases; all when `None`.
+            limit: Cover only this many cases; the suite's default when `None`.
 
         Returns:
             The offer, whose plan lists the cases and the calls.
@@ -1611,6 +1759,7 @@ class Service:
         from ijob_ai.llm.reference import Provider  # noqa: PLC0415
 
         from ijob_app.eval_estimate import (  # noqa: PLC0415
+            CallKind,
             cost_by_model,
             estimate,
             read_prices,
@@ -1631,7 +1780,10 @@ class Service:
         )
         cap = EvalSpend(self._store.evals, settings).cap
         prices = None
-        if any(call.ref.provider is Provider.OPENROUTER for call in plan.calls):
+        if any(
+            call.ref.provider is Provider.OPENROUTER and call.kind is not CallKind.AGENT
+            for call in plan.calls
+        ):
             async with self._client(None) as client:
                 prices = await read_prices(client)
         estimates = estimate(plan.calls, prices)
@@ -1651,6 +1803,8 @@ class Service:
     ) -> "SuiteReport":
         """Run the suite of an offer and store the run.
 
+        An agent suite runs through `eval_run_agents` instead.
+
         Args:
             offer: What `eval_prepare_run` returned.
             on_progress: Called after each case ends.
@@ -1660,7 +1814,8 @@ class Service:
 
         Raises:
             ProviderUnavailableError: A variable that redirects model calls is set.
-            InvalidValueError: The config file is unusable.
+            InvalidValueError: The config file is unusable, or the offer is for an
+                agent suite.
             EvalBudgetSpentError: The recorded eval spending has used up
                 `eval.total_cost_usd`.
             ExceptionGroup: A call raised something other than an `LlmError`.
@@ -1696,6 +1851,77 @@ class Service:
             now=self._now,
             on_outcome=ended,
         )
+        self._keep_report(report.operation)
+        return report
+
+    async def eval_run_agents(
+        self,
+        offer: "RunOffer",
+        *,
+        on_progress: Callable[["RunProgress"], None] | None = None,
+    ) -> "SuiteReport":
+        """Run the agent suite of an offer and store the run.
+
+        Boards are checked through a client that refuses non-public addresses, and
+        the pages an agent opens through one that also stays on the company's site,
+        as `find_source` does. `source-agent` reads none of the user's sources and
+        `explore-agent` runs on an empty store, so the run reads no personal data.
+
+        Args:
+            offer: What `eval_prepare_run` returned for `source-agent` or
+                `explore-agent`.
+            on_progress: Called after each case ends.
+
+        Returns:
+            What the run did and spent.
+
+        Raises:
+            ProviderUnavailableError: A variable that redirects model calls is set.
+            InvalidValueError: The config file is unusable, or the offer is not for
+                an agent suite.
+            EvalBudgetSpentError: The recorded eval spending has used up
+                `eval.total_cost_usd`.
+            ExceptionGroup: A call raised something other than an `LlmError`.
+            sqlite3.Error: The store cannot be read or written.
+        """
+        from ijob_app.eval_run import RunProgress, run_agent_plan  # noqa: PLC0415
+        from ijob_app.eval_spend import EvalSpend  # noqa: PLC0415
+
+        spend = EvalSpend(self._store.evals, offer.settings)
+        done = 0
+        stored = 0
+
+        def ended(outcome: "ItemOutcome[object, object]") -> None:
+            nonlocal done, stored
+            done += 1
+            if outcome.result is not None:
+                stored += 1
+            if on_progress is not None:
+                on_progress(
+                    RunProgress(
+                        done=done,
+                        stored=stored,
+                        total=offer.plan.cases,
+                        spent=spend.openrouter_spent,
+                    )
+                )
+
+        def page_client_for(rule: SiteRule) -> PoliteClient:
+            client = self._client(None, public_only=True)
+            client.guard_requests(site_guard(rule))
+            return client
+
+        async with self._client(None, public_only=True) as public_client:
+            report = await run_agent_plan(
+                self._runtime(),
+                self._store,
+                offer.plan,
+                spend,
+                public_client=public_client,
+                page_client_for=page_client_for,
+                now=self._now,
+                on_outcome=ended,
+            )
         self._keep_report(report.operation)
         return report
 

@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-03
 depends-on: [05]
 built-on: 8947dcb8c009
@@ -118,3 +118,32 @@ packages/ijob-app/src/ijob_app/cli.py              — modify: register the comm
 
 - The five gate commands in `CLAUDE.md` exit 0.
 - `uv run --locked ijob explore --help` lists the flags of the spec.
+
+## Review findings
+
+This plan shared its reviews with plan 05 and plan 07.
+
+Fixed (`pytest test_agent_ops.py test_agent_tools.py test_agent_site.py test_service.py` → 364 passed):
+- `agent_tools.py` whitespace in `propose` lost a verified source.
+- `agent_tools.py` an inner unusable answer hid verified sources; the result lists the refs, then the reason.
+- `agent_tools.py` a company counted as both "no source" and proposed; it leaves `no_source` once it has a proposal or a later success.
+- `store.py` the backslash and limit branches of `companies_matching` gained tests.
+
+Fixed, CLI (`pytest test_cli_agents.py test_agent_view.py test_tui.py test_cli_terminal.py test_recipe_imports.py` → 236 passed, also with `GITHUB_ACTIONS=1`):
+- `cli_agents.py` a failed add could draw outside text as a `fix` command.
+- `cli_agents.py` a blank instruction loaded DSPy.
+- `cli_agents.py` a pick of 4,301 or more digits crashed.
+
+Open:
+- `store.py` nits: distinct names are exact, so `ACME` and `Acme` take two slots; the SQL hard-codes the escape beside `_LIKE_ESCAPE`; a 60,000-character query raises `sqlite3.OperationalError`.
+- `cli_agents.py` nits: `٣` counts as a pick; Ctrl-C at a piped prompt reads as end of input; with stdout redirected, the question goes into the file.
+
+## Deviations
+
+- 2026-11-03: the run was lean, as in plan 05, and tasks were not committed one by one.
+- 2026-11-03: `ExploreTools` receives a `find_source` closure, not `run_source_agent`, so `agent_tools.py` stays clear of `agent_ops.py` and the budget stays with the caller. `SourceAttempt` is the Protocol between them.
+- 2026-11-03: `run_explore_agent` is a separate inner runner, so plan 07 can run it on an empty store and its own budget.
+- 2026-11-03: inside explore, the source agent uses `[models].source_agent` if set, otherwise the explore model. The spec does not say which; a missing model inside a tool would leave the agent looping on a refusal.
+- 2026-11-03: inner source-agent steps do not reach the outer `on_step`, so one `find_source` is one step. Inner runs get no URL, since explore has none to give.
+- 2026-11-03: the explore header's count needed `list_sources` to open with `N sources:`.
+- 2026-11-03: not run on real data. Spec section 11's list spends money and needs the user's OK at each step.

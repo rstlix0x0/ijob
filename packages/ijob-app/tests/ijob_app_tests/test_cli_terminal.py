@@ -5,6 +5,7 @@ command believes it is on a terminal, and `assert_tidy` fails on anything that
 would look raw there. A new command belongs in this file.
 """
 
+import json
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -445,6 +446,58 @@ def test_extract_that_leaves_an_item_unread(bench: _Bench) -> None:
 
 def test_reanalyze_without_a_recipe(bench: _Bench) -> None:
     assert bench.run("sources", "reanalyze", str(_REF), "--yes").exit_code == 2
+
+
+def test_find_without_a_model(bench: _Bench) -> None:
+    result = bench.run("sources", "find", "Acme", "--yes")
+
+    assert result.exit_code == 1
+    assert "source_agent" in result.stderr
+
+
+def test_find_that_finds_nothing(bench: _Bench) -> None:
+    finish = json.dumps({"next_tool_name": "finish", "next_tool_args": {}})
+    answer = json.dumps({"reasoning": "none fits", "source": "none"})
+
+    result = bench.run(
+        "sources",
+        "find",
+        "Acme",
+        "--model",
+        MADE_UP_CLAUDE,
+        "--yes",
+        answers=[finish, answer],
+    )
+
+    assert result.exit_code == 1
+    assert "No source found for Acme" in result.stderr
+    assert "ijob sources add-url" in result.stderr
+
+
+def test_explore_without_a_model(bench: _Bench) -> None:
+    result = bench.run("explore", "Find fintech companies in Tokyo", "--yes")
+
+    assert result.exit_code == 1
+    assert "explore_agent" in result.stderr
+
+
+def test_explore_that_proposes_nothing(bench: _Bench) -> None:
+    finish = json.dumps(
+        {"next_thought": "done", "next_tool_name": "finish", "next_tool_args": {}}
+    )
+    summary = json.dumps({"reasoning": "nothing fits", "summary": "no luck"})
+
+    result = bench.run(
+        "explore",
+        "Find fintech companies in Tokyo",
+        "--model",
+        MADE_UP_CLAUDE,
+        "--yes",
+        answers=[finish, summary],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "no sources proposed" in result.stdout
 
 
 def test_cv_show_and_profile(bench: _Bench) -> None:

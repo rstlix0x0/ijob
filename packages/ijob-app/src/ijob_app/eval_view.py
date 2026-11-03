@@ -2,15 +2,16 @@
 
 Each function builds a Rich renderable from plain data and prints nothing: the
 plan, the progress and the summary of a jury run, the cases of the review, the
-metrics of a suite run or the pairs of a `hostile` run, and the tables, one run
-and failed cases of the report. Text that comes from a provider, such as the
-reason a juror stopped or voted as it did, or from a posting or a model's answer,
-reaches the screen only as `Text`, after `clean`, so it cannot carry markup or
-terminal escape sequences.
+metrics of a suite run, the pairs of a `hostile` run or the metrics of an agent
+suite, and the tables, one run and failed cases of the report. Text that comes from
+a provider, such as the reason a juror stopped or voted as it did, or from a
+posting, a page or a model's answer, reaches the screen only as `Text`, after
+`clean`, so it cannot carry markup or terminal escape sequences.
 """
 
 import json
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from typing import Final, Literal
 
 from ijob_ai.llm.reference import ModelRef, Provider
@@ -113,14 +114,40 @@ _RUN_ROWS: Final[dict[str, tuple[_Row, ...]]] = {
         ("attacks", "Attacks", "count"),
         ("answered", "Answered pairs", "count"),
     ),
+    "source-agent": (
+        ("found_right", "Found the right source", "rate"),
+        ("other", "Other source verified", "count"),
+        ("nothing", "Nothing found", "count"),
+        ("could_not_check", "Could not check", "count"),
+        ("violations", "Rule violations", "count"),
+        ("steps_median", "Steps", "steps"),
+        ("cost_per_company", "Cost per company", "money"),
+    ),
+    "explore-agent": (
+        ("accepted_rate", "Accepted proposals", "rate"),
+        ("accepted", "Proposals accepted", "count"),
+        ("refused", "Refused proposals", "count"),
+        ("following", "Instruction following", "rate"),
+        ("violations", "Rule violations", "count"),
+        ("steps_median", "Steps", "steps"),
+        ("cost_per_scenario", "Cost per scenario", "money"),
+    ),
 }
 _RUN_BAD: Final = {
     "judge": ("unusable", "Unusable answers"),
     "scorer": ("unusable", "Unusable answers"),
     "reasons": ("ungraded", "Ungraded reasons"),
     "hostile": ("unanswered", "Unanswered pairs"),
+    "source-agent": ("failed", "Unusable answers"),
+    "explore-agent": ("ungraded", "Ungraded scenarios"),
 }
-_KINDS: Final = {key: kind for columns in _COLUMNS.values() for _, key, kind in columns}
+_SOURCE_LIMIT: Final = (
+    "   These cases are easy: most board names are simple company slugs."
+)
+_KINDS: Final = {
+    **{key: kind for columns in _COLUMNS.values() for _, key, kind in columns},
+    **{key: kind for rows in _RUN_ROWS.values() for key, _, kind in rows},
+}
 
 
 def cost_text(cost: Cost) -> str:
@@ -753,6 +780,159 @@ def hostile_panel(detail: RunDetail) -> Group:
     return Group(boxed(title, table, accent=True), verdict)
 
 
+@dataclass(frozen=True, slots=True)
+class _AgentRow:
+    """One metric of an agent screen: its label, a number and a note beside it."""
+
+    label: str
+    number: str
+    note: str = ""
+    failing: bool = False
+
+
+def _agent_table(rows: Sequence[_AgentRow]) -> Table:
+    """Build the metric table of an agent screen, with the numbers right-aligned."""
+    table = Table(
+        box=None,
+        expand=True,
+        pad_edge=False,
+        padding=(0, 2, 0, 0),
+        header_style=f"bold {MUTED}",
+    )
+    table.add_column("METRIC", no_wrap=True)
+    table.add_column("VALUE", no_wrap=True)
+    width = max(len(row.number) for row in rows)
+    for row in rows:
+        cell = Text(row.number.rjust(width), style=CORAL if row.failing else TEXT)
+        if row.note:
+            cell.append(f"  {row.note}", style=CORAL if row.failing else MUTED)
+        table.add_row(Text(row.label, style=TEXT), cell)
+    return table
+
+
+def _count_row(
+    detail: RunDetail, key: str, label: str, *, out_of: float | None = None
+) -> _AgentRow:
+    """Draw a count, with `of N` beside it when it is defined and `out_of` is given."""
+    value = detail.metrics.get(key)
+    note = "" if value is None or out_of is None else f"of {out_of:.0f}"
+    return _AgentRow(label, _metric_text("count", value), note)
+
+
+def _main_row(detail: RunDetail, key: str, label: str) -> _AgentRow:
+    """Draw the main metric: its rate, the "plus or minus" if any, and `main`."""
+    margin = detail.metrics.get(MARGIN_KEY)
+    note = "main" if margin is None else f"±{margin:.2f}  main"
+    return _AgentRow(label, _metric_text("rate", detail.metrics.get(key)), note)
+
+
+def _violations_row(detail: RunDetail) -> _AgentRow:
+    """Draw the rule violations against their target of 0."""
+    value = detail.metrics.get("violations")
+    return _AgentRow(
+        "Rule violations",
+        _metric_text("count", value),
+        "target 0",
+        failing=bool(value),
+    )
+
+
+def _tail_rows(detail: RunDetail, cost_key: str, cost_label: str) -> list[_AgentRow]:
+    """Draw the steps and the cost every agent screen ends with."""
+    steps = detail.metrics.get("steps_median")
+    cost = detail.metrics.get(cost_key)
+    return [
+        _AgentRow(
+            "Steps", _metric_text("steps", steps), "" if steps is None else "median"
+        ),
+        _AgentRow(cost_label, "-" if cost is None else f"${cost:.3f}"),
+    ]
+
+
+def _noun(count: int, one: str, many: str) -> str:
+    """Write a count with its noun."""
+    return f"{count} {one if count == 1 else many}"
+
+
+def source_suite_panel(detail: RunDetail) -> Group:
+    """Draw a finished `source-agent` run and the limit of its cases.
+
+    Args:
+        detail: The run as read.
+
+    Returns:
+        A box with the right-source share, marked main with its "plus or minus",
+        then the other sources, nothing found, boards that could not be checked,
+        unusable answers (only when there are some), rule violations against the
+        target of 0, the median steps and the cost per company; under it the line
+        saying the cases are easy.
+    """
+    run = detail.run
+    metrics = detail.metrics
+    cases = int(metrics.get("cases", 0))
+    rows = [
+        _main_row(detail, "found_right", "Found the right source"),
+        _count_row(detail, "other", "Other source verified"),
+        _count_row(detail, "nothing", "Nothing found", out_of=cases),
+    ]
+    if metrics.get("failed", 0) > 0:
+        rows.append(_count_row(detail, "failed", "Unusable answers", out_of=cases))
+    rows += [
+        _count_row(detail, "could_not_check", "Could not check"),
+        _violations_row(detail),
+        *_tail_rows(detail, "cost_per_company", "Cost per company"),
+    ]
+    title = (
+        f"{_suite_name(run.suite)} · {_juror_name(run.model)} · "
+        f"{_noun(cases, 'company', 'companies')} · run {run.id}{_run_marks(run)}"
+    )
+    return Group(
+        boxed(title, _agent_table(rows), accent=True),
+        Text(_SOURCE_LIMIT, style=MUTED),
+    )
+
+
+def explore_suite_panel(detail: RunDetail) -> Group:
+    """Draw a finished `explore-agent` run and the command that follows.
+
+    Args:
+        detail: The run as read.
+
+    Returns:
+        A box with the accepted share of the proposals, marked main, then the
+        refused proposals, the mean instruction following, the ungraded
+        scenarios, rule violations against the target of 0, the median steps and
+        the cost per scenario; under it the command that lists the failed cases.
+    """
+    run = detail.run
+    metrics = detail.metrics
+    cases = int(metrics.get("cases", 0))
+    proposed = (
+        None
+        if "accepted" not in metrics or "refused" not in metrics
+        else metrics["accepted"] + metrics["refused"]
+    )
+    rows = [
+        _main_row(detail, "accepted_rate", "Accepted proposals"),
+        _count_row(detail, "refused", "Refused proposals", out_of=proposed),
+        _AgentRow(
+            "Instruction following",
+            _metric_text("rate", metrics.get("following")),
+        ),
+        _count_row(detail, "ungraded", "Ungraded scenarios", out_of=cases),
+        _violations_row(detail),
+        *_tail_rows(detail, "cost_per_scenario", "Cost per scenario"),
+    ]
+    title = (
+        f"{_suite_name(run.suite)} · {_juror_name(run.model)} · "
+        f"{_noun(cases, 'scenario', 'scenarios')} · run {run.id}{_run_marks(run)}"
+    )
+    return Group(
+        boxed(title, _agent_table(rows), accent=True),
+        _next_command(f"ijob eval report {run.id} --failures"),
+    )
+
+
 def _pair_answers(stored: str) -> tuple[str, str]:
     """Read the clean and hostile answers of a stored `hostile` result."""
     try:
@@ -852,6 +1032,10 @@ def _metric_text(kind: str, value: float | None) -> str:
         return f"{value:.0f}"
     if kind == "error":
         return f"{value:.1f}"
+    if kind == "steps":
+        return f"{value:.0f}" if value.is_integer() else f"{value:.1f}"
+    if kind == "money":
+        return f"{value:.4f}"
     return f"{value:.2f}"
 
 

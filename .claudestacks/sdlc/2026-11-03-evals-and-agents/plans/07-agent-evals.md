@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-03
 depends-on: [03, 06]
 built-on: 8947dcb8c009
@@ -153,3 +153,42 @@ packages/ijob-app/README.md                                        — modify: n
 - `uv run --locked ijob eval run --help` lists every suite in the spec.
 - `git status --short` shows no labels, votes or personal data.
 - After `execute`, the user and agent run the list in spec section 11 on the real `~/.ijob`, before calling the milestone done.
+
+## Review findings
+
+Two reviews covered this plan: Task 1 with the site rule, then Tasks 2 to 4. Each fix began with a test that failed on the reported input.
+
+Fixed, Task 1:
+- `hostile_pages/` the injected instructions sat in body text, which `open_page` never returns, so the target of 0 proved little. Each page now carries them in on-site link text within the 100-character cut.
+- `explore_scenarios.json` the `stored-companies` scenario asked the agent to read a store that the suite keeps empty. It is now `platform-engineers`.
+
+Fixed, Tasks 2 to 4 (`GITHUB_ACTIONS=1 pytest` on the eight suite, CLI, tool and run test files → 498 passed):
+- `agent_tools.py` `propose("Acme Corp", "x")` went uncounted, so 1 accepted and 4 such calls read 1.00, not 0.20. Any non-blank unverified ref is now refused and counted.
+- `eval_agent_suites.py` `refused` was counted by matching a text prefix. `ExploreTools.refused` and `ExploreResult.refused` carry it.
+- `eval_agent_suites.py` calls on injected targets slipped through: `learn_page`, `open_page` with no scheme, and a target really on the site. `hostile_violations` reads each step's arguments and counts one violation per call.
+- `eval_agent_suites.py` a verified source, an unusable answer and one board timeout left the denominator as could-not-check.
+- `eval_agent_suites.py` a hostile page ending on an unusable answer, or never read, passed.
+- `eval_agent_suites.py` `cost_per_company` carried hostile-page spend. A metered budget view sums company cases only.
+- `eval_agent_suites.py` an explore scenario ending on an unusable answer passed. Its proposals still count in the main metric.
+- `eval_agent_suites.py` violations of the case that ended a run were lost.
+- `eval_view.py` number formats ignored `_RUN_ROWS`. `cli_eval.py` an incomplete run with no stop printed nothing in a pipe.
+- `README.md` claimed all committed cases are made up and that DeepEval measures both agents; `packages/ijob-app/README.md` named only one of the two caps. Both are corrected.
+- `test_cli_eval.py` 4 help tests failed on CI because Typer styles help under `GITHUB_ACTIONS`.
+
+Open:
+- `eval_agent_suites.py` the mock web answers 404 for a hostile page's real board, so a run cannot verify it there. This can inflate violations, never hide one.
+- `eval_agent_suites.py` the accepted and refused counts of the scenario that ended a run are lost; that run is incomplete and exits 1.
+- `deepeval_metrics.py` a scenario with no proposals scores 0.0 with no grader call, which the spec does not define. A proposal holding a newline breaks "one per line".
+- Spec: "a model missing from the list exits 2" does not hold for agent suites, which read no price list. "Limit stated in the report" is drawn only on the source panel.
+- Nits: `RunPlan.cases` reads `4 cases` for `--limit 1`, since it counts the hostile pages; `1 cases` wording; seven private imports from `eval_suites`; a board target matches any host with that path segment, which only over-counts; `UP_TO_CAP` is missing from three docstrings; `_suite_label` repeats `_suite_name`.
+
+## Deviations
+
+- 2026-11-03: Task 1 started beside plan 05, before plan 06 was done, since its files and symbols do not depend on it. The other tasks kept to order.
+- 2026-11-03: the source-agent outcome table gives no row for a run that verified a source and then ended on an unusable answer. It is built as Failed, since after a stop the source is only the latest verified one and not an answer. Could not check still comes first when nothing was verified.
+- 2026-11-03: a hostile page never read stores the run as `incomplete`, since a target of 0 cannot be claimed from a run that never met the injection. An unusable answer on a page that was read fails the page only.
+- 2026-11-03: `propose` counts any non-blank unverified text as a violation, though spec section 9 calls a malformed argument no violation. Only a blank ref is treated as malformed, since otherwise a model could raise the main metric by proposing plain text.
+- 2026-11-03: cost per company and per scenario divide all spend, subscription included, as section 15 shows dollars on a claude-sdk model. An explore run's margin uses Wilson over accepted and refused, since the spec is silent.
+- 2026-11-03: agent suites read no price list; the estimate reads "up to the cap" through `CallKind.AGENT`.
+- 2026-11-03: `eval_estimate.py` and `eval_run.py` changed, though the plan's file list omits them. `eval_suites._execute` gained an optional `trusted` hook, for the 10% rule.
+- 2026-11-03: spec section 11's real-data list has not run. It spends money and needs the user's OK at each step, as this plan's Risks state.

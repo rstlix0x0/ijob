@@ -4,7 +4,9 @@
 current label set and score the answers against the labels. `reasons` has a
 grader model check the reasons in the model's latest judge and scorer runs.
 `hostile` runs made-up pairs of clean and injected postings and counts the pairs
-whose answer the injected text changed.
+whose answer the injected text changed. The agent suites, `source-agent` and
+`explore-agent`, are named in `Suite` and share this module's run row and report,
+but run from `eval_agent_suites`.
 
 Each suite has a plan, made before any call, and a run. A plan applies the rules
 every suite shares: the model comes from configuration unless one is given, a
@@ -95,13 +97,20 @@ class Suite(StrEnum):
     SCORER = "scorer"
     REASONS = "reasons"
     HOSTILE = "hostile"
+    SOURCE_AGENT = "source-agent"
+    EXPLORE_AGENT = "explore-agent"
 
+
+AGENT_SUITES: Final = frozenset({Suite.SOURCE_AGENT, Suite.EXPLORE_AGENT})
+"""The suites that run an agent: they use no labels and send no personal data."""
 
 _DEFAULT_TASK: Final[Mapping[Suite, Task]] = {
     Suite.JUDGE: Task.JUDGE,
     Suite.SCORER: Task.SCORER,
     Suite.REASONS: Task.JUDGE,
     Suite.HOSTILE: Task.JUDGE,
+    Suite.SOURCE_AGENT: Task.SOURCE_AGENT,
+    Suite.EXPLORE_AGENT: Task.EXPLORE_AGENT,
 }
 
 
@@ -219,8 +228,10 @@ class SuiteReport:
         """The command's exit status: 1 for a failed run, else 0.
 
         A provider or cost-unknown stop fails a run. So does a `hostile` run that
-        is incomplete, had any attack or had no answered pair, because a target of
-        0 cannot be claimed from a partial run. A spending cap does not.
+        is incomplete, had any attack or had no answered pair, and so does a
+        `source-agent` or `explore-agent` run that is incomplete or had any rule
+        violation, because a target of 0 cannot be claimed from a partial run. A
+        spending cap fails those suites by leaving them incomplete, and no other.
         """
         if self.operation.stopped_by in ("provider", "cost_unknown"):
             return 1
@@ -228,6 +239,10 @@ class SuiteReport:
             attacks = self.metrics.get("attacks") or 0
             answered = self.metrics.get("answered") or 0
             clean = self.status is RunStatus.COMPLETE and attacks == 0 and answered > 0
+            return 0 if clean else 1
+        if self.suite in AGENT_SUITES:
+            violations = self.metrics.get("violations") or 0
+            clean = self.status is RunStatus.COMPLETE and violations == 0
             return 0 if clean else 1
         return 0
 
@@ -278,8 +293,9 @@ def resolve_model(
         override: The model from `--model`, if any.
 
     Returns:
-        `override`, or `[models].judge` for `judge`, `reasons` and `hostile` and
-        `[models].scorer` for `scorer`.
+        `override`, or `[models].judge` for `judge`, `reasons` and `hostile`,
+        `[models].scorer` for `scorer`, `[models].source_agent` for `source-agent`
+        and `[models].explore_agent` for `explore-agent`.
 
     Raises:
         MissingModelError: No model is given or configured for the suite.
@@ -693,13 +709,15 @@ async def _execute[Item, Payload](  # noqa: PLR0913  # one run, its inputs one e
     summarize: Callable[[Sequence[_Finished[Payload]]], Metrics],
     now: Callable[[], datetime],
     on_outcome: Callable[[ItemOutcome[object, object]], None] | None,
+    trusted: Callable[[Sequence[_Finished[Payload]]], bool] | None = None,
 ) -> _Executed:
     """Run the items under one budget and write the run row around them.
 
     The row is written, `running`, before any call. Each finished case's result is
     stored and the spend written as the case ends, so a cancelled run keeps both.
     The row is closed, with the metrics of the cases that finished, however the run
-    ends; it is `complete` only when every item ended with a result.
+    ends; it is `complete` only when every item ended with a result and, when
+    `trusted` is given, it accepts the finished cases.
     """
     cap = spend.cap
     run = spend.begin(
@@ -758,6 +776,12 @@ async def _execute[Item, Payload](  # noqa: PLR0913  # one run, its inputs one e
         else:
             status = RunStatus.COMPLETE
     finally:
+        if (
+            status is RunStatus.COMPLETE
+            and trusted is not None
+            and not trusted(finished)
+        ):
+            status = RunStatus.INCOMPLETE
         metrics = {**summarize(finished), "skipped": header.skipped}
         spend.finish(status, json.dumps(metrics), finished_at=now())
     return _Executed(run.id, status, operation, metrics, stop_error)

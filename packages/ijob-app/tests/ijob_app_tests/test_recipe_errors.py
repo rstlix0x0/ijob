@@ -1,4 +1,4 @@
-from ijob_ai.errors import LlmError, TaskOutputError
+from ijob_ai.errors import CapReachedError, LlmError, TaskOutputError
 from ijob_app.recipe_errors import (
     NoTrialJobsError,
     RecipeCapReachedError,
@@ -30,3 +30,8 @@ def test_recipe_output_error_is_a_task_output_error_that_keeps_its_parts() -> No
 def test_the_other_errors_are_llm_errors() -> None:
     assert isinstance(NoTrialJobsError(), LlmError)
     assert isinstance(RecipeCapReachedError(), LlmError)
+
+
+def test_recipe_cap_error_is_a_cap_error() -> None:
+    assert isinstance(RecipeCapReachedError(), CapReachedError)
+    assert isinstance(RecipeCapReachedError(started=False), CapReachedError)

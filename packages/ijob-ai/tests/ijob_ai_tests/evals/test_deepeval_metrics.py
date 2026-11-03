@@ -13,7 +13,9 @@ from ijob_ai.errors import CapReachedError, TaskOutputError
 from ijob_ai.evals.deepeval_metrics import (
     FAITHFUL_STEPS,
     GRADER_VERSION,
+    INSTRUCTION_STEPS,
     GraderModel,
+    grade_instruction,
     grade_reason,
     keep_match,
     load_deepeval,
@@ -177,6 +179,62 @@ def test_grade_prompt_carries_the_steps_and_the_case() -> None:
 def test_faithful_steps_are_the_three_fixed_steps() -> None:
     assert len(FAITHFUL_STEPS) == 3
     assert FAITHFUL_STEPS[0].startswith("List each fact")
+
+
+def test_instruction_steps_are_the_three_fixed_steps() -> None:
+    assert len(INSTRUCTION_STEPS) == 3
+    assert INSTRUCTION_STEPS[0] == "List what the instruction asks for."
+    assert INSTRUCTION_STEPS != FAITHFUL_STEPS
+
+
+def test_grade_instruction_builds_the_case() -> None:
+    engine = FakeAsyncEngine([GRADE], cost=0.005)
+    budget = Budget(1.0)
+
+    result = asyncio.run(
+        grade_instruction(
+            grader_on(engine, budget),
+            instruction="THE-INSTRUCTION",
+            proposals=["Acme: hires remote", "Beta: fits the stack"],
+        )
+    )
+
+    assert len(engine.requests) == 1
+    sent = repr(engine.requests[0])
+    assert "THE-INSTRUCTION" in sent
+    assert "Acme: hires remote\\nBeta: fits the stack" in sent
+    assert all(step in sent for step in INSTRUCTION_STEPS)
+    assert not any(step in sent for step in FAITHFUL_STEPS)
+    assert result.score == pytest.approx(0.7)
+    assert result.passed is True
+    assert budget.spent == pytest.approx(0.005)
+
+
+def test_grade_instruction_without_proposals_fails_without_a_call() -> None:
+    engine = FakeAsyncEngine([GRADE])
+    budget = Budget(1.0)
+
+    result = asyncio.run(
+        grade_instruction(
+            grader_on(engine, budget), instruction="find something", proposals=[]
+        )
+    )
+
+    assert result.score == 0.0
+    assert result.passed is False
+    assert engine.requests == []
+    assert budget.spent == 0.0
+
+
+def test_grade_instruction_score_outside_range_is_a_task_output_error() -> None:
+    engine = FakeAsyncEngine(['{"reason": "odd", "score": 11}'])
+
+    with pytest.raises(TaskOutputError):
+        asyncio.run(
+            grade_instruction(
+                grader_on(engine, Budget(1.0)), instruction="i", proposals=["a: b"]
+            )
+        )
 
 
 def test_grader_unusable_answer_is_a_task_output_error() -> None:

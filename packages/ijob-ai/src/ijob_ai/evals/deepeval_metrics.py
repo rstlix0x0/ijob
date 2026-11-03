@@ -15,7 +15,7 @@ the run's budget.
 
 import os
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import cache
 from typing import Any, Final, Protocol, Self, cast, override
@@ -34,6 +34,11 @@ FAITHFUL_STEPS: Final[tuple[str, ...]] = (
     "Check that each fact appears in the input.",
     "Give 10 if all appear, and take off in proportion to those that do not.",
 )
+INSTRUCTION_STEPS: Final[tuple[str, ...]] = (
+    "List what the instruction asks for.",
+    "Check each proposal against it.",
+    "Give 10 if all fit, and take off in proportion to those that do not.",
+)
 KEEP: Final = "keep"
 REJECT: Final = "reject"
 DEFAULT_TOLERANCE: Final = 20
@@ -41,6 +46,8 @@ PASS_THRESHOLD: Final = 0.5
 
 _EMPTY_REASON = "the reason is empty"
 _FAITHFUL_NAME = "Faithful"
+_FOLLOWING_NAME = "Instruction following"
+_NO_PROPOSALS = "there are no proposals"
 _GRADER_INSTRUCTIONS = "Follow the prompt and answer in the output fields."
 _PROMPT_FIELD = "prompt"
 _ANSWER_FIELD = "answer"
@@ -100,6 +107,8 @@ class DeepEval:
             seconds and model name.
         faithful: Builds the G-Eval metric that grades facts against the input,
             on a grader.
+        following: Builds the G-Eval metric that grades proposals against an
+            instruction, on a grader.
         case: Builds an `LLMTestCase` from input, actual output and expected
             output.
         g_eval_class: The `GEval` class.
@@ -109,6 +118,7 @@ class DeepEval:
     score_close: Callable[[int], Metric]
     grader: Callable[[dspy.LM, Provider, Budget, float, str], GraderModel]
     faithful: Callable[[GraderModel], Metric]
+    following: Callable[[GraderModel], Metric]
     case: Callable[[str, str, str | None], object]
     g_eval_class: type[Any]
 
@@ -302,16 +312,22 @@ def load_deepeval() -> DeepEval:
     ) -> GraderModel:
         return Grader(lm, provider, budget, timeout_s, name)
 
-    def make_faithful(grader: GraderModel) -> Metric:
+    def make_g_eval(name: str, steps: tuple[str, ...], grader: GraderModel) -> Metric:
         return GEval(
-            name=_FAITHFUL_NAME,
-            evaluation_steps=list(FAITHFUL_STEPS),
+            name=name,
+            evaluation_steps=list(steps),
             evaluation_params=[SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT],
             model=cast(DeepEvalBaseLLM, grader),
             threshold=PASS_THRESHOLD,
             async_mode=True,
             verbose_mode=False,
         )
+
+    def make_faithful(grader: GraderModel) -> Metric:
+        return make_g_eval(_FAITHFUL_NAME, FAITHFUL_STEPS, grader)
+
+    def make_following(grader: GraderModel) -> Metric:
+        return make_g_eval(_FOLLOWING_NAME, INSTRUCTION_STEPS, grader)
 
     def make_case(input_text: str, actual: str, expected: str | None) -> object:
         return LLMTestCase(
@@ -323,6 +339,7 @@ def load_deepeval() -> DeepEval:
         score_close=ScoreClose,
         grader=make_grader,
         faithful=make_faithful,
+        following=make_following,
         case=make_case,
         g_eval_class=GEval,
     )
@@ -429,6 +446,42 @@ async def grade_reason(
         return CaseResult(score=0.0, passed=False, reason=_EMPTY_REASON)
     metric = load_deepeval().faithful(grader)
     result = await measure_case(metric, input=input, actual_output=actual_output)
+    if not 0.0 <= result.score <= 1.0:
+        msg = f"grade {result.score} is outside 0.0 to 1.0"
+        raise TaskOutputError(Task.EVAL_GRADER.value, msg)
+    return result
+
+
+async def grade_instruction(
+    grader: GraderModel,
+    *,
+    instruction: str,
+    proposals: Sequence[str],
+) -> CaseResult:
+    """Grade whether proposals fit the instruction that asked for them.
+
+    Args:
+        grader: The model that grades, from `make_grader`.
+        instruction: The instruction the explore agent was given.
+        proposals: The proposals, each as company and reason; they reach the
+            grader one per line.
+
+    Returns:
+        The score from 0.0 to 1.0, passing at 0.5 or above, with the grader's
+        reason. No proposals fail with score 0.0 and no model call, so they cost
+        nothing.
+
+    Raises:
+        CapReachedError: The grader's budget has reached its cap.
+        TaskOutputError: The grader's answer could not be used, including a
+            score outside 0.0 to 1.0 after scaling.
+    """
+    if not proposals:
+        return CaseResult(score=0.0, passed=False, reason=_NO_PROPOSALS)
+    metric = load_deepeval().following(grader)
+    result = await measure_case(
+        metric, input=instruction, actual_output="\n".join(proposals)
+    )
     if not 0.0 <= result.score <= 1.0:
         msg = f"grade {result.score} is outside 0.0 to 1.0"
         raise TaskOutputError(Task.EVAL_GRADER.value, msg)
