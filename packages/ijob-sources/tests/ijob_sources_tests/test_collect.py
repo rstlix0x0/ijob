@@ -1,4 +1,5 @@
 import asyncio
+from typing import cast
 
 import pytest
 from ijob_core.model import SourceKind, SourceRef, parse_source_key
@@ -115,3 +116,32 @@ def test_collect_tells_when_each_source_ends() -> None:
     asyncio.run(run())
 
     assert sorted(failed) == [False, True]
+
+
+def test_each_batch_is_handed_over_before_the_source_counts_as_ended() -> None:
+    order: list[str] = []
+    good = _FakeSource(_ref("good"), SourceBatch(drafts=[], rejected=0))
+
+    async def save(ref: SourceRef, _batch: SourceBatch) -> None:
+        order.append(f"saved {ref}")
+
+    def done(failed: bool) -> None:  # noqa: FBT001
+        order.append(f"done {failed}")
+
+    asyncio.run(
+        collect([good], cast("PoliteClient", object()), on_done=done, on_batch=save)
+    )
+
+    assert order == [f"saved {good.ref}", "done False"]
+
+
+def test_each_failure_is_reported_as_it_happens() -> None:
+    bad = _FakeSource(_ref("bad"), SourceNotFoundError("https://x"))
+    seen: list[SourceFailure] = []
+
+    result = asyncio.run(
+        collect([bad], cast("PoliteClient", object()), on_failure=seen.append)
+    )
+
+    assert seen == result.failures
+    assert seen[0].ref == bad.ref

@@ -1126,8 +1126,8 @@ def test_filters_from_config_and_flags(tmp_path: Path) -> None:
     )
 
     assert by_config.exit_code == by_flag.exit_code == 0
-    assert _titles(by_config) == ["Platform Engineer", "Staff Engineer"]
-    assert _titles(by_flag) == ["Backend Engineer", "Platform Engineer"]
+    assert _titles(by_config) == ["Staff Engineer"]
+    assert _titles(by_flag) == ["Backend Engineer"]
 
 
 def test_filters_from_default_config_location(tmp_path: Path) -> None:
@@ -1138,7 +1138,7 @@ def test_filters_from_default_config_location(tmp_path: Path) -> None:
 
     result = _search(_lever_only(_ACME_JOBS), tmp_path, "--source", "lever:acme")
 
-    assert _titles(result) == ["Data Engineer", "Platform Engineer", "Staff Engineer"]
+    assert _titles(result) == ["Data Engineer", "Staff Engineer"]
 
 
 _JOBICY_PAGES = {
@@ -2061,7 +2061,14 @@ def _judged(
     """Run `ijob search` on the Jobicy source against the seeded database."""
     _env(tmp_path)
     app_ = _judge_app(tmp_path, engines, cap=cap)
-    argv = ["search", *_JOBICY_SEARCH, *args, "--db", str(tmp_path / "ijob.db")]
+    argv = [
+        "search",
+        "--judge",
+        *_JOBICY_SEARCH,
+        *args,
+        "--db",
+        str(tmp_path / "ijob.db"),
+    ]
     return CliRunner().invoke(app_, argv, env=_env(tmp_path))
 
 
@@ -2178,7 +2185,14 @@ def test_search_provider_failure_prints_partial_exit_1(tmp_path: Path) -> None:
 
     result = CliRunner().invoke(
         app_,
-        ["search", *_JOBICY_SEARCH, "--dropped", "--db", str(tmp_path / "ijob.db")],
+        [
+            "search",
+            "--judge",
+            *_JOBICY_SEARCH,
+            "--dropped",
+            "--db",
+            str(tmp_path / "ijob.db"),
+        ],
         env=_env(tmp_path),
     )
 
@@ -2210,7 +2224,7 @@ def test_search_without_judge_model_exits_1(tmp_path: Path) -> None:
 
     result = CliRunner().invoke(
         app_,
-        ["search", *_JOBICY_SEARCH, "--db", str(tmp_path / "ijob.db")],
+        ["search", "--judge", *_JOBICY_SEARCH, "--db", str(tmp_path / "ijob.db")],
         env=_env(tmp_path),
     )
 

@@ -18,8 +18,8 @@
 # Role patterns are regular expressions, matched case-insensitively. Single
 # quotes keep each backslash as written.
 # [filters.role]
-# include = ['\bengineer', '\bdeveloper', 'エンジニア', '開発']
-# exclude = ['\bsales\b', '\brecruit', '\bmarketing\b', '\baccount executive\b']
+# include = ['\bproduct manager', '\bproject manager']
+# exclude = ['\bintern\b', '\bjunior\b']
 
 # Each model is written <provider>/<model>. A task needs its model set before it
 # runs.

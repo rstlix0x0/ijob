@@ -31,12 +31,20 @@ import hashlib
 import json
 import sqlite3
 import tempfile
-from collections.abc import AsyncIterator, Callable, Collection, Iterator, Sequence
+import threading
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Iterator,
+    Sequence,
+)
 from contextlib import AsyncExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 from ijob_core.dedupe import normalise_company
 from ijob_core.errors import InvalidValueError
@@ -48,14 +56,21 @@ from ijob_core.model import (
     Posting,
     PostingId,
     ResumeProfile,
+    Score,
     SourceKind,
     SourceRef,
     StoredCv,
     Vote,
 )
-from ijob_core.store import SourceOrigin, SourceRow, Store
+from ijob_core.store import RecordResult, SourceOrigin, SourceRow, Store
 from ijob_core.traces import PruneReport, TraceSummary, TraceTree
-from ijob_sources.collect import CollectResult, Source, SourceFailure, collect
+from ijob_sources.collect import (
+    CollectResult,
+    Source,
+    SourceBatch,
+    SourceFailure,
+    collect,
+)
 from ijob_sources.details import describe
 from ijob_sources.detect import resolve_url, verify_new_source
 from ijob_sources.errors import FetchedPage, SourcesError
@@ -99,6 +114,7 @@ type ClientFactory = Callable[[ConditionalCache | None], PoliteClient]
 MAX_CV_BYTES: Final = 20_000_000
 _PDF_MAGIC: Final = b"%PDF-"
 _CV_FILE_NAME: Final = "cv.pdf"
+_STOP_WAIT_S: Final = 5.0
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -223,6 +239,25 @@ class PostingDetail:
     label: Label | None
     description: str | None
     unavailable_reason: str | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SourceEvent:
+    """One source ended a fetch.
+
+    Attributes:
+        ref: The source.
+        new: How many postings it added.
+        listed: How many jobs it showed.
+        rejected: How many jobs it dropped as unusable.
+        failure: Why it failed, or `None` when it was saved.
+    """
+
+    ref: SourceRef
+    new: int = 0
+    listed: int = 0
+    rejected: int = 0
+    failure: SourceFailure | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,31 +449,56 @@ class Service:
         refs: Sequence[SourceRef],
         *,
         on_progress: Callable[[FetchProgress], None] | None = None,
+        on_source: Callable[[SourceEvent], None] | None = None,
     ) -> RefreshReport:
         """Fetch the chosen sources that are due and record what they show.
 
-        The clock is read twice: once to split the sources by interval before
-        fetching, and once after fetching, which stamps both the recorded
-        sightings and the fetch times.
+        Each source is saved the moment its fetch ends, on its own connection
+        off the event loop, so its jobs can be listed while the others are still
+        fetching and stopping early keeps them. A source's sightings and fetch
+        time are stamped with the one time it was saved.
 
         Args:
             refs: The sources to read; empty means every source in the table.
             on_progress: Called once before the first fetch and as each source
                 ends.
+            on_source: Called as each source is saved or fails.
 
         Returns:
             What was fetched, kept, rejected, refused and found stale.
 
         Raises:
             UnknownSourceError: A named source has no row or was removed.
-            sqlite3.Error: A store read or write failed.
+            ExceptionGroup: Saving a source failed, or a source raised something
+                other than a `SourcesError`; the group holds that exception.
+            sqlite3.Error: A store read failed.
         """
         rows = self._choose_sources(refs)
         due, kept = _split_by_interval(rows, self._now())
         sources, refused = self._build_sources(due)
-        result = await self._collect(sources, on_progress)
-        seen_at = self._now()
-        fetched = self._record(due, result, seen_at)
+        saving = asyncio.Lock()
+
+        async def save(ref: SourceRef, batch: SourceBatch) -> None:
+            async with saving:
+                result = await asyncio.to_thread(
+                    self._record_source, ref, batch, self._now()
+                )
+            if on_source is not None:
+                on_source(
+                    SourceEvent(
+                        ref=ref,
+                        new=result.new,
+                        listed=len(batch.drafts) + len(batch.still_listed),
+                        rejected=batch.rejected,
+                    )
+                )
+
+        def failed(failure: SourceFailure) -> None:
+            if on_source is not None:
+                on_source(SourceEvent(ref=failure.ref, failure=failure))
+
+        result = await self._collect(sources, on_progress, save, failed)
+        fetched = [row.ref for row in due if row.ref in result.batches]
         return RefreshReport(
             due=due,
             kept=kept,
@@ -450,7 +510,153 @@ class Service:
             },
             failures=list(result.failures),
             refused=refused,
-            stale=self._stale(rows, seen_at),
+            stale=self._stale(rows, self._now()),
+        )
+
+    async def refresh_off_loop(
+        self,
+        refs: Sequence[SourceRef],
+        *,
+        on_progress: Callable[[FetchProgress], None],
+        on_source: Callable[[SourceEvent], None],
+    ) -> RefreshReport:
+        """Fetch as `refresh` does, on a thread and an event loop of its own.
+
+        Reading a source's jobs is work for the processor, so doing it on the
+        caller's loop would freeze whatever that loop also draws. Both callbacks
+        run on the caller's loop. Cancelling this stops the fetch; each source
+        already saved stays saved.
+
+        Args:
+            refs: The sources to read; empty means every source in the table.
+            on_progress: Called once before the first fetch and as each source
+                ends.
+            on_source: Called as each source is saved or fails.
+
+        Returns:
+            What was fetched, kept, rejected, refused and found stale.
+
+        Raises:
+            UnknownSourceError: A named source has no row or was removed.
+            ExceptionGroup: Saving a source failed, or a source raised something
+                other than a `SourcesError`; the group holds that exception.
+            sqlite3.Error: A store read failed.
+        """
+        here = asyncio.get_running_loop()
+        started = threading.Event()
+        there: list[asyncio.AbstractEventLoop] = []
+        running: list[asyncio.Task[RefreshReport]] = []
+
+        def progress(now: FetchProgress) -> None:
+            here.call_soon_threadsafe(on_progress, now)
+
+        def source(event: SourceEvent) -> None:
+            here.call_soon_threadsafe(on_source, event)
+
+        async def fetch(service: Service) -> RefreshReport:
+            there.append(asyncio.get_running_loop())
+            task = asyncio.current_task()
+            if task is not None:
+                running.append(cast("asyncio.Task[RefreshReport]", task))
+            started.set()
+            return await service.refresh(refs, on_progress=progress, on_source=source)
+
+        def run() -> RefreshReport:
+            with open_service(
+                self._home,
+                self._db_path,
+                self._client_factory,
+                now=self._now,
+                use_cache=self._cache is not None,
+                llm=self._llm,
+                resolver=self._resolver,
+            ) as service:
+                return asyncio.run(fetch(service))
+
+        try:
+            return await asyncio.to_thread(run)
+        except asyncio.CancelledError:
+            started.wait(_STOP_WAIT_S)
+            if there and running:
+                there[0].call_soon_threadsafe(running[0].cancel)
+            raise
+
+    async def list_jobs(
+        self, layers: FilterLayers, refs: Sequence[SourceRef]
+    ) -> list[Posting]:
+        """List the open postings that pass the filters, without descriptions.
+
+        This is the fast read a list is made from: it holds no description, so
+        read a posting with `detail` or `score` it to get at the text.
+
+        Args:
+            layers: The filters the config file and the flags set.
+            refs: The sources to read; empty means every source.
+
+        Returns:
+            The postings that pass the layers and the stored instructions'
+            filters, newest first.
+
+        Raises:
+            UnknownSourceError: A named source has no row or was removed.
+            InvalidValueError: A filter in the stored instructions is unusable.
+            sqlite3.Error: A store read failed.
+        """
+        stored = self._store.instructions()
+        layer = None if stored is None else json.loads(stored.filters_json)
+        spec, _ = effective_filters(layers, layer)
+        self._choose_sources(refs)
+        at = self._now()
+
+        def read() -> list[Posting]:
+            with Store.open(self._db_path) as store:
+                postings = store.list_open(now=at, sources=refs or None)
+            return [posting for posting in postings if keep(posting, spec, now=at)]
+
+        return await asyncio.to_thread(read)
+
+    def source_job_counts(self) -> dict[str, int]:
+        """Count the jobs each source has shown, keyed by its reference text."""
+        counts: dict[str, int] = {}
+        for refs in self._store.sources_by_posting().values():
+            for ref in refs:
+                counts[str(ref)] = counts.get(str(ref), 0) + 1
+        return counts
+
+    def saved_detail(self, posting_id: PostingId) -> PostingDetail:
+        """Read a posting's detail as stored, with no network.
+
+        Args:
+            posting_id: The posting to read.
+
+        Returns:
+            The posting with its sources, label and any stored description.
+
+        Raises:
+            UnknownPostingError: The id names no posting.
+        """
+        posting = self._require_posting(posting_id)
+        return PostingDetail(
+            posting=posting,
+            sources=self._store.posting_sources(posting_id),
+            label=self._store.label(posting_id),
+            description=posting.description,
+            unavailable_reason=None,
+        )
+
+    def job_sources(self) -> dict[PostingId, list[SourceRef]]:
+        """Read which sources have shown each posting, in one query."""
+        return self._store.sources_by_posting()
+
+    def saved_scores(self) -> dict[PostingId, Score]:
+        """Read the newest stored score of each posting against the current profile.
+
+        Returns:
+            The scores; empty when no profile is stored.
+        """
+        stored = self._store.cv_profile()
+        return (
+            {} if stored is None else self._store.saved_scores(stored.profile.sha256())
         )
 
     async def search_postings(
@@ -607,6 +813,40 @@ class Service:
             self._store,
             postings,
             self._db_path.parent / _CV_FILE_NAME,
+            now=self._now,
+            on_report=self._keep_report,
+        ):
+            yield item
+
+    async def judge(self, ids: Sequence[PostingId]) -> AsyncIterator[SearchItem]:
+        """Have a model check chosen postings against the user's stored rules.
+
+        Args:
+            ids: The postings to check.
+
+        Yields:
+            One item per distinct id, or none when no rules are stored.
+
+        Raises:
+            UnknownPostingError: An id names no posting; no call is made.
+            MissingModelError: No model is set for the `judge` task.
+            ProviderUnavailableError: A variable that redirects model calls is
+                set.
+            InvalidValueError: The config file is unusable.
+            sqlite3.Error: A store read or write failed.
+        """
+        self.last_report = None
+        stored = self._store.instructions()
+        if stored is None or not stored.rules:
+            return
+        postings = [
+            self._require_posting(posting_id) for posting_id in dict.fromkeys(ids)
+        ]
+        async for item in judge_operation(
+            self._runtime(),
+            self._store,
+            postings,
+            stored,
             now=self._now,
             on_report=self._keep_report,
         ):
@@ -1363,6 +1603,8 @@ class Service:
         self,
         sources: list[Source],
         on_progress: Callable[[FetchProgress], None] | None = None,
+        on_batch: Callable[[SourceRef, SourceBatch], Awaitable[None]] | None = None,
+        on_failure: Callable[[SourceFailure], None] | None = None,
     ) -> CollectResult:
         """Fetch every source with clients opened and closed on this loop.
 
@@ -1374,6 +1616,8 @@ class Service:
             sources: The sources to fetch.
             on_progress: Called once before the first fetch and as each source
                 ends. It is not called when there is no source.
+            on_batch: Awaited with each source's batch as it arrives.
+            on_failure: Called with each source's failure as it happens.
 
         Returns:
             What `collect` returned for the sources, merged.
@@ -1396,14 +1640,34 @@ class Service:
             on_progress(FetchProgress(total=len(sources), done=0, failed=0))
         async with self._client(self._cache) as client:
             if not recipes:
-                return await collect(others, client, on_done=source_done)
+                return await collect(
+                    others,
+                    client,
+                    on_done=source_done,
+                    on_batch=on_batch,
+                    on_failure=on_failure,
+                )
             async with (
                 self._client(self._cache, public_only=True) as guarded,
                 asyncio.TaskGroup() as group,
             ):
-                plain = group.create_task(collect(others, client, on_done=source_done))
+                plain = group.create_task(
+                    collect(
+                        others,
+                        client,
+                        on_done=source_done,
+                        on_batch=on_batch,
+                        on_failure=on_failure,
+                    )
+                )
                 checked = group.create_task(
-                    collect(recipes, guarded, on_done=source_done)
+                    collect(
+                        recipes,
+                        guarded,
+                        on_done=source_done,
+                        on_batch=on_batch,
+                        on_failure=on_failure,
+                    )
                 )
         first, second = plain.result(), checked.result()
         return CollectResult(
@@ -1411,48 +1675,42 @@ class Service:
             failures=[*first.failures, *second.failures],
         )
 
-    def _record(
-        self, rows: list[SourceRow], result: CollectResult, seen_at: datetime
-    ) -> list[SourceRef]:
-        """Store what the fetched sources showed and note when each was fetched.
+    def _record_source(
+        self, ref: SourceRef, batch: SourceBatch, seen_at: datetime
+    ) -> RecordResult:
+        """Store what one source showed and note when it was fetched.
 
-        Both the postings and the fetch times are stamped with the one `seen_at`,
-        which is what keeps a source's postings open afterwards.
+        Both the postings and the fetch time are stamped with the one `seen_at`,
+        which is what keeps a source's postings open afterwards. This runs on its
+        own connection, so it can be called off the service's thread.
 
         Args:
-            rows: The sources that were due, in order.
-            result: What fetching them returned.
-            seen_at: When the fetch happened, timezone-aware.
+            ref: The source fetched.
+            batch: What it returned.
+            seen_at: When it was saved, timezone-aware.
 
         Returns:
-            The sources that were fetched successfully, in the order of `rows`.
+            What the store did with the source's jobs.
         """
-        fetched = [row.ref for row in rows if row.ref in result.batches]
-        batches = [result.batches[ref] for ref in fetched]
-        still_listed: list[tuple[SourceRef, ExternalId]] = [
-            (ref, external_id)
-            for ref, batch in zip(fetched, batches, strict=True)
-            for external_id in batch.still_listed
-        ]
-        for ref, batch in zip(fetched, batches, strict=True):
+        with Store.open(self._db_path) as store:
+            still_listed: list[tuple[SourceRef, ExternalId]] = [
+                (ref, external_id) for external_id in batch.still_listed
+            ]
             # A skipped item a model already read as a job stays listed, so its
             # posting is not closed while the source still shows the item.
             still_listed.extend(
                 (ref, external_id)
-                for external_id in self._store.add_skipped(
+                for external_id in store.add_skipped(
                     ref,
                     ((item.text, item.url, item.reason) for item in batch.skipped),
                     seen_at=seen_at,
                 )
             )
-        self._store.record(
-            (draft for batch in batches for draft in batch.drafts),
-            seen_at=seen_at,
-            still_listed=still_listed,
-        )
-        for ref in fetched:
-            self._store.mark_fetched(ref, seen_at)
-        return fetched
+            result = store.record(
+                batch.drafts, seen_at=seen_at, still_listed=still_listed
+            )
+            store.mark_fetched(ref, seen_at)
+        return result
 
     def _stale(self, rows: list[SourceRow], at: datetime) -> list[SourceRow]:
         """Pick the chosen sources whose postings are hidden as too old."""

@@ -168,6 +168,15 @@ _MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
         ) STRICT
         """,
     ),
+    (
+        "CREATE INDEX sightings_open ON sightings(posting_id, last_seen, source)",
+        """
+        CREATE INDEX postings_listed ON postings(
+            posted_at, id, title, company, location, url, first_seen, last_seen,
+            salaries, country, remote, role_hint, low_confidence
+        )
+        """,
+    ),
 )
 
 
@@ -324,6 +333,15 @@ _NEWEST_FIRST: Final = "ORDER BY posted_at IS NULL, posted_at DESC, id"
 
 _OPEN_WINDOW: Final = timedelta(days=7)
 
+_BUSY_TIMEOUT_S: Final = 30.0
+
+_SELECT_LISTED: Final = (
+    "SELECT id, title, company, location, url, posted_at, "
+    "first_seen, last_seen, salaries, country, remote, role_hint, "
+    "low_confidence, NULL FROM postings"
+)
+"""Every posting column but the description, which `postings_listed` leaves out."""
+
 
 def _posting(row: tuple[Any, ...]) -> Posting:
     """Build a `Posting` from a row selected with `_SELECT_POSTINGS`."""
@@ -439,7 +457,10 @@ class Store:
         """
         path.parent.mkdir(parents=True, exist_ok=True)
         with ExitStack() as cleanup:
-            conn = cleanup.enter_context(closing(sqlite3.connect(path)))
+            conn = cleanup.enter_context(
+                closing(sqlite3.connect(path, timeout=_BUSY_TIMEOUT_S))
+            )
+            conn.execute("PRAGMA journal_mode = WAL")
             conn.execute("PRAGMA foreign_keys = ON")
             _migrate(conn)
             cleanup.pop_all()
@@ -690,6 +711,81 @@ class Store:
             (cutoff, wanted, wanted),
         ).fetchall()
         return [_posting(row) for row in rows]
+
+    def list_open(
+        self, *, now: datetime, sources: Collection[SourceRef] | None = None
+    ) -> list[Posting]:
+        """Read the open postings without their descriptions, which is fast.
+
+        The same postings in the same order as `open_postings`, each with its
+        `description` set to `None` whether it has one or not: use it to list
+        jobs, and read a posting with `posting` to know its description.
+
+        Args:
+            now: The current time, timezone-aware.
+            sources: When given, only sightings from these sources count.
+
+        Returns:
+            The postings, newest `posted_at` first and those without one last.
+            Empty when `sources` is empty.
+
+        Raises:
+            InvalidValueError: If `now` has no timezone.
+        """
+        cutoff = _cutoff(now)
+        wanted = (
+            None if sources is None else json.dumps([str(source) for source in sources])
+        )
+        rows = self._conn.execute(
+            f"{_SELECT_LISTED} WHERE EXISTS ("  # noqa: S608  # constants above
+            "SELECT 1 FROM sightings JOIN sources ON sources.ref = sightings.source "
+            "WHERE sightings.posting_id = postings.id "
+            "AND sightings.last_seen = sources.last_fetched_at "
+            "AND sources.removed = 0 AND sources.last_fetched_at >= ? "
+            "AND (? IS NULL OR sources.ref IN (SELECT value FROM json_each(?)))) "
+            f"{_NEWEST_FIRST}",
+            (cutoff, wanted, wanted),
+        ).fetchall()
+        return [_posting(row) for row in rows]
+
+    def sources_by_posting(self) -> dict[PostingId, list[SourceRef]]:
+        """Read which sources have shown each posting, in one query.
+
+        Returns:
+            The sources of every posting that has a sighting, sorted by their
+            text form.
+        """
+        rows = self._conn.execute(
+            "SELECT posting_id, source FROM sightings "
+            "INDEXED BY sightings_open ORDER BY posting_id, source"
+        ).fetchall()
+        shown: dict[PostingId, list[SourceRef]] = {}
+        for posting_id, source in rows:
+            shown.setdefault(PostingId(posting_id), []).append(parse_source_ref(source))
+        return shown
+
+    def saved_scores(self, profile_sha256: str) -> dict[PostingId, Score]:
+        """Read the newest stored score of each posting against one profile.
+
+        Unlike `score`, this does not check the posting text, the model or the
+        task version, so a list can show what is known without reading any
+        description.
+
+        Args:
+            profile_sha256: The SHA-256 of the profile the scores were made from.
+
+        Returns:
+            The newest score of every posting scored against that profile.
+        """
+        rows = self._conn.execute(
+            "SELECT posting_id, score, reasons FROM scores "
+            "WHERE profile_sha256 = ? ORDER BY made_at",
+            (profile_sha256,),
+        ).fetchall()
+        return {
+            PostingId(row[0]): Score(score=row[1], reasons=tuple(json.loads(row[2])))
+            for row in rows
+        }
 
     def stale_sources(self, *, now: datetime) -> list[SourceRow]:
         """Read the sources whose last fetch is too old for their postings to show.

@@ -42,8 +42,10 @@ def test_score_and_verdict_edges() -> None:
         ScoreOut(score=50, reasons=[])
     with pytest.raises(ValidationError):
         ScoreOut(score=50, reasons=[])
-    with pytest.raises(ValidationError):
-        ScoreOut(score=50, reasons=["a" * 201])
+    long_reason = ScoreOut(score=50, reasons=["word " * 60]).reasons[0]
+    assert len(long_reason) <= 200
+    assert long_reason.endswith("word…")
+    assert len(ScoreOut(score=50, reasons=["a" * 500]).reasons[0]) == 200
     assert VerdictOut(keep=True, reason="r" * 200, rule=None).rule is None
     assert VerdictOut(keep=False, reason="no", rule=3).rule == 3
     with pytest.raises(ValidationError):

@@ -1,4 +1,4 @@
-"""MyCareersFuture software-engineer jobs as a source of sighting drafts.
+"""MyCareersFuture jobs as a source of sighting drafts.
 
 `MyCareersFutureBoard` walks the MyCareersFuture jobs API through the
 `PoliteClient`, at most five pages, and hands each body to
@@ -37,8 +37,7 @@ from ijob_sources.polite_http import PoliteClient
 _LOGGER = logging.getLogger(__name__)
 _API_ORIGIN: Final = "https://api.mycareersfuture.gov.sg/"
 _FIRST_PAGE_URL: Final = (
-    _API_ORIGIN
-    + "v2/jobs?search=software%20engineer&limit=100&page=0&sortBy=new_posting_date"
+    _API_ORIGIN + "v2/jobs?limit=100&page=0&sortBy=new_posting_date"
 )
 _MAX_PAGES: Final = 5
 _SINGAPORE: Final = CountryCode("SG")
@@ -59,7 +58,7 @@ class MyCareersFuturePage:
 
 
 class MyCareersFutureBoard:
-    """The software-engineer search on MyCareersFuture, read through its API."""
+    """The newest jobs on MyCareersFuture, read through its API."""
 
     def __init__(self, key: SourceKey) -> None:
         """Name the board to read.

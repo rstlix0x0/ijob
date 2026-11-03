@@ -21,7 +21,7 @@ The adapter contract:
 
 import asyncio
 import json
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import Final, Protocol
 
@@ -139,6 +139,8 @@ async def collect(
     client: PoliteClient,
     *,
     on_done: Callable[[bool], None] | None = None,
+    on_batch: Callable[[SourceRef, SourceBatch], Awaitable[None]] | None = None,
+    on_failure: Callable[[SourceFailure], None] | None = None,
 ) -> CollectResult:
     """Fetch every source concurrently and keep going past source failures.
 
@@ -146,13 +148,16 @@ async def collect(
         sources: The sources to fetch.
         client: The client each source makes its requests through.
         on_done: Called as each source ends, with whether it failed.
+        on_batch: Awaited with each source's batch before that source counts as
+            ended, so a caller can save it as soon as it arrives.
+        on_failure: Called with each failure as it happens.
 
     Returns:
         The batches of the sources that succeeded and the failures of the rest.
 
     Raises:
-        ExceptionGroup: A source raised something other than a `SourcesError`;
-            the group holds that exception.
+        ExceptionGroup: A source raised something other than a `SourcesError`,
+            or `on_batch` raised; the group holds that exception.
     """
     batches: dict[SourceRef, SourceBatch] = {}
     failures: list[SourceFailure] = []
@@ -160,10 +165,17 @@ async def collect(
     async def run(source: Source) -> None:
         failed = False
         try:
-            batches[source.ref] = await source.fetch(client)
+            batch = await source.fetch(client)
         except SourcesError as error:
-            failures.append(SourceFailure(source.ref, error))
+            failure = SourceFailure(source.ref, error)
+            failures.append(failure)
             failed = True
+            if on_failure is not None:
+                on_failure(failure)
+        else:
+            batches[source.ref] = batch
+            if on_batch is not None:
+                await on_batch(source.ref, batch)
         if on_done is not None:
             on_done(failed)
 

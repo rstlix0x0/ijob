@@ -29,7 +29,7 @@ _PAGE1 = _FIXTURES.joinpath("page1.json").read_bytes()
 _PAGE2 = _FIXTURES.joinpath("page2.json").read_bytes()
 _JOBS: list[dict[str, Any]] = json.loads(_PAGE1)["data"]
 _KEY = parse_source_key("engineering")
-_FIRST_URL = "https://4dayweek.io/api/v2/jobs?category=engineering&limit=100"
+_FIRST_URL = "https://4dayweek.io/api/v2/jobs?limit=100"
 
 
 def _page(

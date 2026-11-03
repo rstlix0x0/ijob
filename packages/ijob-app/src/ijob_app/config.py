@@ -47,7 +47,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Final, Literal
 
-from ijob_core.countries import CountryCode, parse_country
+from ijob_core.countries import CountryCode, country_named
 from ijob_core.errors import InvalidValueError
 from ijob_core.filters import FilterSpec
 from ijob_core.model import RemoteScope
@@ -101,6 +101,8 @@ class FilterFlags:
     """The filter values a front end collected as text.
 
     Attributes:
+        titles: The words a title must hold, as plain text; empty when none was
+            given. A posting needs any one of them.
         countries: The country values; empty when none was given.
         remotes: The remote-scope values; empty when none was given.
         since: The age limit, or `None`.
@@ -110,6 +112,7 @@ class FilterFlags:
             `None` when no choice was made.
     """
 
+    titles: tuple[str, ...] = ()
     countries: tuple[str, ...] = ()
     remotes: tuple[str, ...] = ()
     since: str | None = None
@@ -450,7 +453,8 @@ def parse_country_flag(text: str, *, field: str = "--country") -> CountryCode:
     """Read a country given as a code or a name.
 
     Args:
-        text: Anything `parse_country` reads, e.g. `SG` or `Japan`.
+        text: A code, a name or a well-known city, e.g. `SG`, `Japan`, `Holland`
+            or `Tokyo`.
         field: The name reported in the error.
 
     Returns:
@@ -459,7 +463,7 @@ def parse_country_flag(text: str, *, field: str = "--country") -> CountryCode:
     Raises:
         InvalidValueError: If `text` names no country.
     """
-    code = parse_country(text)
+    code = country_named(text)
     if code is None:
         raise InvalidValueError(field, f"{text!r} is not a country")
     return code
@@ -477,8 +481,34 @@ def _company_names(values: Sequence[str]) -> tuple[str, ...]:
     return tuple(values)
 
 
+def title_pattern(text: str) -> re.Pattern[str]:
+    """Build the pattern a title search means: whole words, in any case.
+
+    The text is plain, never a pattern. A hyphen counts as part of a word, so
+    `go` finds `Go Engineer` and `Backend (Go)` but not `Go-To-Market`.
+
+    Args:
+        text: The word or words to find, such as `product manager`.
+
+    Returns:
+        A case-insensitive pattern for those words in that order.
+
+    Raises:
+        InvalidValueError: The text is blank.
+    """
+    words = text.split()
+    if not words:
+        raise InvalidValueError("title", "must not be blank")
+    body = r"\s+".join(map(re.escape, words))
+    # `go` the language, and not `Go To Market`.
+    tail = r"(?!\s+to\b)" if [word.casefold() for word in words] == ["go"] else ""
+    return re.compile(rf"(?<![\w-]){body}(?![\w-]){tail}", re.IGNORECASE)
+
+
 def _lay_flags(spec: FilterSpec, flags: FilterFlags) -> FilterSpec:
     """Set each filter a flag was given for, and keep the rest of `spec`."""
+    if flags.titles:
+        spec = replace(spec, include=tuple(map(title_pattern, flags.titles)))
     if flags.countries:
         spec = replace(spec, countries=_country_codes(flags.countries))
     if flags.remotes:
@@ -497,6 +527,8 @@ def _lay_flags(spec: FilterSpec, flags: FilterFlags) -> FilterSpec:
 def _flags_given(flags: FilterFlags) -> frozenset[FilterField]:
     """Name the fields `_lay_flags` sets from `flags`."""
     given: set[FilterField] = set()
+    if flags.titles:
+        given.add("include")
     if flags.countries:
         given.add("countries")
     if flags.remotes:

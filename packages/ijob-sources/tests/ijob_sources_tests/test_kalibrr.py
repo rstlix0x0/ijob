@@ -28,7 +28,7 @@ _PAGE1 = _FIXTURES.joinpath("page1.json").read_bytes()
 _JOBS: list[dict[str, Any]] = json.loads(_PAGE0)["jobs"]
 _VLINK, _HIDDEN, _EMPTY = _JOBS
 _KEY = parse_source_key("software-engineer")
-_URL = "https://www.kalibrr.com/kjs/job_board/search?limit=15&offset={offset}&text=software%20engineer"
+_URL = "https://www.kalibrr.com/kjs/job_board/search?limit=15&offset={offset}"
 
 
 def _page(jobs: list[Any], *, count: object = 1) -> bytes:

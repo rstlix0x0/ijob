@@ -24,16 +24,17 @@ from ijob_core.model import SourceRef
 from ijob_sources.errors import SourcesError, UnrecognizedPageError
 
 from ijob_app.cli_llm import CONFIG_HELP, DB_HELP, report_notes
-from ijob_app.llm_ops import cost_line
+from ijob_app.cli_output import ask, say_cost, say_done, say_error, say_note, working
 from ijob_app.llm_text import recipe_proposal_lines
 from ijob_app.recipe_ops import RecipeProposal
 from ijob_app.render import error_notes, error_text
 from ijob_app.service import Service
+from ijob_app.view import is_terminal, make_console, recipe_view
 
 _EXIT_REFUSED: Final = 1
 _EXIT_BAD_ARGUMENT: Final = 2
 
-_CONFIRM_PROMPT: Final = "Store this source? [y/N]"
+_CONFIRM_PROMPT: Final = "Store this source?"
 _AFFIRMATIVE: Final = frozenset({"y", "yes"})
 _NO_MODEL_NOTE: Final = "note: set [models].source_recipe to let ijob learn this page"
 
@@ -54,12 +55,12 @@ def recipe_failures() -> Iterator[None]:
     try:
         yield
     except InvalidValueError as error:
-        typer.echo(f"error: {error_text(error)}", err=True)
+        say_error(f"{error_text(error)}")
         raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
     except (SourcesError, LlmError, sqlite3.Error) as error:
-        typer.echo(f"error: {error}", err=True)
+        say_error(f"{error}")
         for note in error_notes(error):
-            typer.echo(note, err=True)
+            say_note(note)
         raise typer.Exit(code=_EXIT_REFUSED) from error
 
 
@@ -71,17 +72,27 @@ def _require_confirmation(*, yes: bool, is_interactive: Callable[[], bool]) -> N
             absent and the user cannot be asked.
     """
     if not yes and not is_interactive():
-        typer.echo("error: confirmation needed; pass --yes", err=True)
+        say_error("confirmation needed; pass --yes")
         raise typer.Exit(code=_EXIT_REFUSED)
 
 
 def _show(proposal: RecipeProposal) -> None:
     """Print what a recipe reads, then what learning it cost and any warnings."""
-    for line in recipe_proposal_lines(proposal):
-        typer.echo(line)
-    typer.echo(cost_line(proposal.report), err=True)
+    if is_terminal():
+        make_console().print(
+            recipe_view(
+                proposal.recipe_format,
+                proposal.recipe_url,
+                proposal.invalid,
+                proposal.jobs,
+            )
+        )
+    else:
+        for line in recipe_proposal_lines(proposal):
+            typer.echo(line)
+    say_cost(proposal.report)
     for note in report_notes(proposal.report):
-        typer.echo(note, err=True)
+        say_note(note)
 
 
 def confirm_and_store(
@@ -106,15 +117,13 @@ def confirm_and_store(
     """
     if not yes:
         _require_confirmation(yes=yes, is_interactive=is_interactive)
-        answer = typer.prompt(
-            _CONFIRM_PROMPT, default="", show_default=False, prompt_suffix=" "
-        )
+        answer = ask(_CONFIRM_PROMPT)
         if answer.strip().lower() not in _AFFIRMATIVE:
-            typer.echo("not stored")
+            say_done("not stored", "Not stored")
             raise typer.Exit(code=_EXIT_REFUSED)
     with recipe_failures():
         row = service.accept_recipe(proposal)
-    typer.echo(f"added {row.ref}")
+    say_done(f"added {row.ref}", f"Added {row.ref}")
 
 
 def learn_page(  # noqa: PLR0913 - the page, the error and both confirmation inputs
@@ -149,11 +158,11 @@ def learn_page(  # noqa: PLR0913 - the page, the error and both confirmation inp
     with recipe_failures():
         learns = service.learns_recipes()
     if not learns:
-        typer.echo(f"error: {unrecognized}", err=True)
-        typer.echo(_NO_MODEL_NOTE, err=True)
+        say_error(f"{unrecognized}")
+        say_note(_NO_MODEL_NOTE)
         raise typer.Exit(code=_EXIT_REFUSED)
     _require_confirmation(yes=yes, is_interactive=is_interactive)
-    with recipe_failures():
+    with recipe_failures(), working("Having a model read this page"):
         proposal = asyncio.run(
             service.analyze_url(url, company, page=unrecognized.page)
         )
@@ -194,7 +203,10 @@ def reanalyze_command(
         source_ref = read_ref(ref)
         _require_confirmation(yes=yes, is_interactive=is_interactive)
         with session as service:
-            with recipe_failures():
+            with (
+                recipe_failures(),
+                working(f"Having a model read {source_ref} again"),
+            ):
                 proposal = asyncio.run(service.analyze_source(source_ref))
             _show(proposal)
             confirm_and_store(service, proposal, yes=yes, is_interactive=is_interactive)

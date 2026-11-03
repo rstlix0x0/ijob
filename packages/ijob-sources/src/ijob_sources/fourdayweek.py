@@ -1,4 +1,4 @@
-"""4dayweek.io engineering jobs as a source of sighting drafts.
+"""4dayweek.io jobs as a source of sighting drafts.
 
 `FourDayWeekBoard` walks the 4dayweek.io jobs API through the `PoliteClient`,
 at most five pages, and hands each body to `parse_fourdayweek`, which turns it
@@ -33,9 +33,7 @@ from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
 
 _LOGGER = logging.getLogger(__name__)
-_FIRST_PAGE_URL: Final = (
-    "https://4dayweek.io/api/v2/jobs?category=engineering&limit=100"
-)
+_FIRST_PAGE_URL: Final = "https://4dayweek.io/api/v2/jobs?limit=100"
 _MAX_PAGES: Final = 5
 _ON_SITE: Final = frozenset({"onsite", "hybrid"})
 
@@ -55,7 +53,7 @@ class FourDayWeekPage:
 
 
 class FourDayWeekBoard:
-    """The engineering jobs on 4dayweek.io, read through its jobs API."""
+    """The jobs on 4dayweek.io, read through its jobs API."""
 
     def __init__(self, key: SourceKey) -> None:
         """Name the board to read.

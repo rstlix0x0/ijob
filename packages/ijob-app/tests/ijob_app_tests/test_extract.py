@@ -1,6 +1,6 @@
 import asyncio
 import json
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -289,8 +289,15 @@ def test_no_model_is_an_error_and_makes_no_call(env: _Env) -> None:
 
 
 def _refresh_with(service: Service, items: Sequence[SkippedItem]) -> None:
-    async def collect(_self: Service, _sources: object, _on: object) -> CollectResult:
+    async def collect(
+        _self: Service,
+        _sources: object,
+        _on: object,
+        save: Callable[[SourceRef, SourceBatch], Awaitable[None]],
+        _failed: object,
+    ) -> CollectResult:
         batch = SourceBatch(drafts=[], rejected=0, skipped=tuple(items))
+        await save(_REF, batch)
         return CollectResult(batches={_REF: batch}, failures=[])
 
     with patch.object(Service, "_collect", collect):
@@ -399,7 +406,9 @@ def test_search_prints_a_note_when_skipped_jobs_wait(
 ) -> None:
     _seed(env.db, _PROSE, _OTHER)
 
-    async def collect(_self: Service, _sources: object, _on: object) -> CollectResult:
+    async def collect(
+        _self: Service, _sources: object, _on: object, _save: object, _failed: object
+    ) -> CollectResult:
         return CollectResult(batches={}, failures=[])
 
     monkeypatch.setattr(Service, "_collect", collect)

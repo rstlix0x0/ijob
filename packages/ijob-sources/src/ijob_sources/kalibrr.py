@@ -1,4 +1,4 @@
-"""Kalibrr software-engineer jobs as a source of sighting drafts.
+"""Kalibrr jobs as a source of sighting drafts.
 
 `KalibrrBoard` walks the Kalibrr job-board search through the `PoliteClient`,
 at most five pages, and hands each body to `parse_kalibrr`, which turns it into
@@ -39,8 +39,7 @@ from ijob_sources.polite_http import PoliteClient
 
 _LOGGER = logging.getLogger(__name__)
 _SEARCH_URL: Final = (
-    "https://www.kalibrr.com/kjs/job_board/search"
-    "?limit=15&offset={offset}&text=software%20engineer"
+    "https://www.kalibrr.com/kjs/job_board/search?limit=15&offset={offset}"
 )
 _JOB_URL: Final = "https://www.kalibrr.com/c/{code}/jobs/{id}/{slug}"
 _PAGE_SIZE: Final = 15
@@ -64,7 +63,7 @@ class KalibrrPage:
 
 
 class KalibrrBoard:
-    """The software-engineer search on Kalibrr, read through its job-board API."""
+    """The newest jobs on Kalibrr, read through its job-board API."""
 
     def __init__(self, key: SourceKey) -> None:
         """Name the board to read.
