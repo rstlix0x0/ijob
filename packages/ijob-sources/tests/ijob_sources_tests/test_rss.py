@@ -360,7 +360,7 @@ def test_feed_urls_are_those_of_the_spec() -> None:
         "golang": "https://www.golangprojects.com/rss.xml",
         "elixir": "https://elixirjobs.net/rss",
         "djinni-python": "https://djinni.co/jobs/rss/?primary_keyword=Python",
-        "bsj": "https://berlinstartupjobs.com/engineering/feed/",
+        "bsj": "https://berlinstartupjobs.com/feed/",
     }
 
 

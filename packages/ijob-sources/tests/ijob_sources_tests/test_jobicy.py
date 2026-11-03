@@ -23,7 +23,7 @@ from ijob_sources.jobicy import JobicyBoard, description_from_raw, parse_jobicy
 from ijob_sources.polite_http import CachedResponse, PoliteClient
 
 _KEY = parse_source_key("engineering")
-_FIRST_URL = "https://jobicy.com/api/v2/remote-jobs?count=50&industry=engineering"
+_FIRST_URL = "https://jobicy.com/api/v2/remote-jobs?count=50"
 
 
 def _fixture(name: str) -> bytes:
@@ -298,7 +298,6 @@ def test_paging_until_has_more_false() -> None:
     assert len(requests) == 2
     assert str(requests[0].url) == _FIRST_URL
     assert requests[1].url.params["cursor"] == _CURSOR
-    assert requests[1].url.params["industry"] == "engineering"
     assert requests[1].url.params["count"] == "50"
     assert [draft.external_id for draft in batch.drafts] == [
         str(job["id"]) for job in [*_JOBS1, *_JOBS2]

@@ -28,15 +28,27 @@ from ijob_core.errors import InvalidValueError
 from ijob_core.model import PostingId
 from ijob_core.traces import SpanNode, TraceSummary
 
+from ijob_app.cli_output import ask, say_done, say_error, say_note, working
+from ijob_app.cli_search import live_score_command
 from ijob_app.config import FilterFlags, read_filter_layers
 from ijob_app.llm_ops import STATUS_TEXT, OperationReport, ScoreItem, ScoreStatus
 from ijob_app.llm_text import (
     MISSING_MARK,
+    filter_items,
     instruction_lines,
     score_summary,
     shadow_line,
 )
 from ijob_app.service import Service
+from ijob_app.view import (
+    fix_line,
+    instructions_view,
+    is_terminal,
+    make_console,
+    notice_line,
+    trace_tree,
+    traces_table,
+)
 
 _EXIT_REFUSED: Final = 1
 _EXIT_BAD_ARGUMENT: Final = 2
@@ -54,7 +66,7 @@ _NS_PER_MS: Final = 1_000_000
 _BYTES_PER_MB: Final = 2**20
 _FAILING_STOPS: Final = frozenset({"provider", "cost_unknown"})
 
-_CONFIRM_PROMPT: Final = "Store these? [y/N]"
+_CONFIRM_PROMPT: Final = "Store these?"
 _AFFIRMATIVE: Final = frozenset({"y", "yes"})
 
 
@@ -103,10 +115,10 @@ def llm_failures() -> Iterator[None]:
     try:
         yield
     except InvalidValueError as error:
-        typer.echo(f"error: {error}", err=True)
+        say_error(f"{error}")
         raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
     except LlmError as error:
-        typer.echo(f"error: {error}", err=True)
+        say_error(f"{error}")
         raise typer.Exit(code=_EXIT_REFUSED) from error
 
 
@@ -167,27 +179,37 @@ def instructions_app(
                 layers = read_filter_layers(
                     session.config, FilterFlags(), default=session.default_config
                 )
-                proposal = asyncio.run(
-                    session.service.propose_instructions(layers, text)
+                with working("Having a model read what you wrote"):
+                    proposal = asyncio.run(
+                        session.service.propose_instructions(layers, text)
+                    )
+            if is_terminal():
+                make_console().print(
+                    instructions_view(
+                        filter_items(proposal.instruction_filters), proposal.rules
+                    )
                 )
-            for line in instruction_lines(proposal.instruction_filters, proposal.rules):
-                typer.echo(line)
+            else:
+                for line in instruction_lines(
+                    proposal.instruction_filters, proposal.rules
+                ):
+                    typer.echo(line)
             for shadowed in proposal.shadowed:
-                typer.echo(shadow_line(shadowed))
+                if is_terminal():
+                    say_note(shadow_line(shadowed))
+                else:
+                    typer.echo(shadow_line(shadowed))
             if not yes:
                 if not is_interactive():
-                    typer.echo("error: confirmation needed; pass --yes", err=True)
+                    say_error("confirmation needed; pass --yes")
                     raise typer.Exit(code=_EXIT_REFUSED)
-                answer = typer.prompt(
-                    _CONFIRM_PROMPT,
-                    default="",
-                    show_default=False,
-                    prompt_suffix=" ",
-                )
+                answer = ask(_CONFIRM_PROMPT)
                 if answer.strip().lower() not in _AFFIRMATIVE:
                     raise typer.Exit(code=_EXIT_REFUSED)
             with llm_failures():
                 session.service.accept_instructions(proposal)
+            if is_terminal():
+                say_done("", "Saved", "filters apply now, rules run with --judge")
 
     @group.command("show")
     def show_instructions(
@@ -197,10 +219,19 @@ def instructions_app(
         with open_session(db, None, models=False) as session:
             stored = session.service.instructions()
         if stored is None:
-            typer.echo("no instructions set")
+            if is_terminal():
+                make_console().print(notice_line("No instructions set"))
+                make_console().print(fix_line('ijob instructions set "what you want"'))
+            else:
+                typer.echo("no instructions set")
+            return
+        filters: Mapping[str, object] = json.loads(stored.filters_json)
+        if is_terminal():
+            make_console().print(
+                instructions_view(filter_items(filters), stored.rules, text=stored.text)
+            )
             return
         typer.echo(f"text: {stored.text}")
-        filters: Mapping[str, object] = json.loads(stored.filters_json)
         for line in instruction_lines(filters, stored.rules):
             typer.echo(line)
 
@@ -211,7 +242,7 @@ def instructions_app(
         """Remove your stored instructions."""
         with open_session(db, None, models=False) as session:
             session.service.clear_instructions()
-        typer.echo("cleared")
+        say_done("cleared", "Instructions cleared")
 
     return group
 
@@ -262,6 +293,15 @@ def score_command(app: typer.Typer, open_session: SessionOpener) -> None:
         """Score postings against your CV, from 0 to 100, with the reasons."""
         ids = list(dict.fromkeys(PostingId(each) for each in posting_ids))
         with open_session(db, config, models=True) as session:
+            if is_terminal():
+                with llm_failures():
+                    report = live_score_command(session.service, ids)
+                if report is not None:
+                    for note in report_notes(report):
+                        say_note(note)
+                    if stop_exits(report):
+                        raise typer.Exit(code=_EXIT_REFUSED)
+                return
             with llm_failures():
                 items = asyncio.run(_collect_scores(session.service, ids))
             report = session.service.last_report
@@ -272,7 +312,7 @@ def score_command(app: typer.Typer, open_session: SessionOpener) -> None:
         if report is None:
             return
         for note in report_notes(report):
-            typer.echo(note, err=True)
+            say_note(note)
         typer.echo(score_summary(report), err=True)
         if stop_exits(report):
             raise typer.Exit(code=_EXIT_REFUSED)
@@ -344,6 +384,9 @@ def traces_app(open_session: SessionOpener) -> typer.Typer:
             return
         with open_session(db, None, models=False) as session:
             summaries = session.service.traces(limit)
+        if is_terminal():
+            make_console().print(traces_table(summaries))
+            return
         for summary in summaries:
             typer.echo(_trace_row(summary))
 
@@ -357,6 +400,9 @@ def traces_app(open_session: SessionOpener) -> typer.Typer:
         """Print one trace as a tree of spans."""
         with open_session(db, None, models=False) as session, llm_failures():
             tree = session.service.trace(trace_id)
+        if is_terminal():
+            make_console().print(trace_tree(tree.roots))
+            return
         for root in tree.roots:
             for line in _span_lines(root, 0):
                 typer.echo(line)
@@ -369,6 +415,10 @@ def traces_app(open_session: SessionOpener) -> typer.Typer:
         with open_session(db, None, models=False) as session, llm_failures():
             report = session.service.prune_traces()
         megabytes = report.size_bytes / _BYTES_PER_MB
-        typer.echo(f"pruned {report.removed} traces, size {megabytes:.1f} MB")
+        say_done(
+            f"pruned {report.removed} traces, size {megabytes:.1f} MB",
+            f"Pruned {report.removed} traces",
+            f"{megabytes:.1f} MB now",
+        )
 
     return group

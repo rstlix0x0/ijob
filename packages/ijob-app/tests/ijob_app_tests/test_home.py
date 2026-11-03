@@ -219,7 +219,7 @@ def test_template_settings_are_valid_once_uncommented(tmp_path: Path) -> None:
     assert spec != load_filters(tmp_path / "absent.toml", explicit=False)
 
 
-def test_template_role_example_mirrors_the_built_in_defaults(tmp_path: Path) -> None:
+def test_template_role_example_is_a_usable_filter(tmp_path: Path) -> None:
     home = IjobHome(tmp_path / "home")
     setup_home(home)
     lines = home.config.read_text(encoding="utf-8").splitlines()
@@ -230,9 +230,10 @@ def test_template_role_example_mirrors_the_built_in_defaults(tmp_path: Path) -> 
         encoding="utf-8",
     )
 
-    assert load_filters(enabled, explicit=True) == load_filters(
-        tmp_path / "absent.toml", explicit=False
-    )
+    spec = load_filters(enabled, explicit=True)
+
+    assert spec.include
+    assert spec.exclude
 
 
 def test_setup_creates_a_migrated_seeded_database(tmp_path: Path) -> None:

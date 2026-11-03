@@ -1,4 +1,4 @@
-"""Jobicy remote engineering jobs as a source of sighting drafts.
+"""Jobicy remote jobs as a source of sighting drafts.
 
 `JobicyBoard` walks the Jobicy remote-jobs API one cursor page at a time through
 the `PoliteClient` and hands each body to `parse_jobicy`, which turns it into a
@@ -37,9 +37,7 @@ from ijob_sources.payload import raw_object
 from ijob_sources.polite_http import PoliteClient
 
 _LOGGER = logging.getLogger(__name__)
-_FIRST_URL: Final = (
-    "https://jobicy.com/api/v2/remote-jobs?count=50&industry=engineering"
-)
+_FIRST_URL: Final = "https://jobicy.com/api/v2/remote-jobs?count=50"
 _MAX_PAGES: Final = 5
 _PERIODS: Final = {"yearly": Period.YEAR, "hourly": Period.HOUR}
 
@@ -58,7 +56,7 @@ class JobicyPage:
 
 
 class JobicyBoard:
-    """The Jobicy remote engineering jobs, read page by page."""
+    """The Jobicy remote jobs, read page by page."""
 
     def __init__(self, key: SourceKey) -> None:
         """Name the source to read.

@@ -18,6 +18,7 @@ from ijob_app.config import (
     read_filter_layers,
     read_filters,
     spec_from_flags,
+    title_pattern,
 )
 from ijob_core.countries import CountryCode
 from ijob_core.errors import InvalidValueError
@@ -26,13 +27,8 @@ from ijob_core.model import Posting, PostingId, RemoteScope
 from ijob_core.money import Money, Period
 
 _NOW = datetime(2026, 10, 31, 12, 0, tzinfo=UTC)
-_DEFAULT_INCLUDE = (r"\bengineer", r"\bdeveloper", "エンジニア", "開発")
-_DEFAULT_EXCLUDE = (
-    r"\bsales\b",
-    r"\brecruit",
-    r"\bmarketing\b",
-    r"\baccount executive\b",
-)
+_DEFAULT_INCLUDE: tuple[str, ...] = ()
+_DEFAULT_EXCLUDE: tuple[str, ...] = ()
 _SINCE_AND_SALARY = (
     '[filters]\nsince = "3d"\n[filters.min_salary]\n'
     'amount = 1\ncurrency = "USD"\nperiod = "year"\n'
@@ -72,32 +68,50 @@ def test_default_config_when_file_missing(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("title", "matches"),
-    [
-        (
-            "Toptal: Salesforce Developers with AI-Assisted Coding Experience",
-            (True, False),
-        ),
-        ("Software Engineer", (True, False)),
-        ("Engineering", (True, False)),
-        (
-            "28卒対象 / セキュリティエンジニア インターンシップ- Mercari Group",
-            (True, False),
-        ),
-        ("Account Executive - Commercial, Spotify Technology", (False, True)),
-        ("Sales Engineer", (True, True)),
-    ],
+    "title",
+    ["Software Engineer", "Account Executive", "Nurse", "Sales Manager"],
 )
-def test_default_patterns(
-    tmp_path: Path, title: str, matches: tuple[bool, bool]
-) -> None:
-    """`matches` is the probe table's (include, exclude) columns."""
+def test_defaults_keep_any_role(tmp_path: Path, title: str) -> None:
     spec = load_filters(tmp_path / "absent.toml", explicit=False)
 
-    included = any(p.search(title) for p in spec.include)
-    excluded = any(p.search(title) for p in spec.exclude)
-    assert (included, excluded) == matches
-    assert keep(_posting(title), spec, now=_NOW) is (not excluded)
+    assert keep(_posting(title), spec, now=_NOW)
+
+
+@pytest.mark.parametrize(
+    ("words", "title", "found"),
+    [
+        ("golang", "Backend Engineer (Golang)", True),
+        ("go", "Senior Engineer - Go", True),
+        ("go", "Head of Go-To-Market", False),
+        ("go", "Django Developer", False),
+        ("product manager", "Sr. Product  Manager, Payments", True),
+        ("product manager", "Manager of Product", False),
+        ("c++", "C++ Developer", True),
+    ],
+)
+def test_title_pattern_finds_whole_words(words: str, title: str, found: bool) -> None:  # noqa: FBT001
+    assert bool(title_pattern(words).search(title)) is found
+
+
+def test_go_the_language_is_not_go_to_market() -> None:
+    assert title_pattern("go").search("Backend Engineer (Go)")
+    assert not title_pattern("go").search("Head of Go To Market")
+    assert title_pattern("go to").search("Go To Market Lead")
+
+
+def test_title_pattern_refuses_blank() -> None:
+    with pytest.raises(InvalidValueError, match="title"):
+        title_pattern("  ")
+
+
+def test_title_flag_replaces_the_role_include(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text("", encoding="utf-8")
+    layers = read_filter_layers(config, FilterFlags(titles=("nurse",)))
+    spec, _ = effective_filters(layers, {"role": {"include": ["engineer"]}})
+
+    assert keep(_posting("ICU Nurse"), spec, now=_NOW)
+    assert not keep(_posting("Software Engineer"), spec, now=_NOW)
 
 
 def test_full_config_round_trip(tmp_path: Path) -> None:
@@ -171,7 +185,7 @@ def test_missing_explicit_config_raises(tmp_path: Path) -> None:
     with pytest.raises(InvalidValueError, match=re.escape(str(path))):
         load_filters(path, explicit=True)
 
-    assert load_filters(path, explicit=False).include
+    assert load_filters(path, explicit=False).include == ()
 
 
 def test_unreadable_config_raises_naming_path(tmp_path: Path) -> None:
@@ -286,7 +300,7 @@ def test_bad_config_message_reads_well(tmp_path: Path, body: str, message: str) 
 def test_other_top_level_tables_are_ignored(tmp_path: Path) -> None:
     path = _write(tmp_path, '[display]\ncolour = "none"\n')
 
-    assert load_filters(path, explicit=True).include
+    assert load_filters(path, explicit=True).include == ()
 
 
 @pytest.mark.parametrize(

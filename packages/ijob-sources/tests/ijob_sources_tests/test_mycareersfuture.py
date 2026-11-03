@@ -26,7 +26,7 @@ _NEXT = json.loads(_PAGE0)["_links"]["next"]["href"]
 _KEY = parse_source_key("software-engineer")
 _FIRST_URL = (
     "https://api.mycareersfuture.gov.sg/v2/jobs"
-    "?search=software%20engineer&limit=100&page=0&sortBy=new_posting_date"
+    "?limit=100&page=0&sortBy=new_posting_date"
 )
 _API = "https://api.mycareersfuture.gov.sg/v2/jobs?limit=100&page={page}"
 

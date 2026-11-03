@@ -22,8 +22,17 @@ from pydantic import (
 
 _MAX_REASONS = 5
 _ITEM = Annotated[str, StringConstraints(min_length=1, max_length=100)]
-_REASON = Annotated[str, StringConstraints(min_length=1, max_length=200)]
+_MAX_REASON_LENGTH = 200
+_REASON = Annotated[str, StringConstraints(min_length=1, max_length=_MAX_REASON_LENGTH)]
 _RULE = Annotated[str, StringConstraints(min_length=1, max_length=200)]
+
+
+def _shorten(reason: str) -> str:
+    """Cut a reason that is too long at its last whole word, marking the cut."""
+    if len(reason) <= _MAX_REASON_LENGTH:
+        return reason
+    head, _, _ = reason[: _MAX_REASON_LENGTH - 1].rpartition(" ")
+    return f"{head or reason[: _MAX_REASON_LENGTH - 1]}…"
 
 
 class _Strict(BaseModel):
@@ -137,7 +146,8 @@ class ScoreOut(_Strict):
     Attributes:
         score: The fit, an integer from 0 to 100.
         reasons: 1 to 5 reasons, each 1 to 200 characters. A model that gives
-            more keeps its first 5, since the score itself is still good.
+            more keeps its first 5, and a longer reason is cut at a word, since
+            the score itself is still good and was paid for.
     """
 
     score: Annotated[int, Field(ge=0, le=100)]
@@ -146,8 +156,13 @@ class ScoreOut(_Strict):
     @field_validator("reasons", mode="before")
     @classmethod
     def _keep_first_reasons(cls, value: object) -> object:
-        """Cut a list of reasons to the most the field holds."""
-        return value[:_MAX_REASONS] if isinstance(value, list) else value
+        """Cut a list of reasons, and each reason, to the most the field holds."""
+        if not isinstance(value, list):
+            return value
+        return [
+            _shorten(reason) if isinstance(reason, str) else reason
+            for reason in value[:_MAX_REASONS]
+        ]
 
 
 class RecipeFieldsOut(_Strict):

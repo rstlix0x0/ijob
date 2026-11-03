@@ -19,11 +19,13 @@ from ijob_ai.errors import MissingModelError
 from ijob_core.model import SourceRef
 
 from ijob_app.cli_llm import CONFIG_HELP, DB_HELP, report_notes
+from ijob_app.cli_output import say_cost, say_error, say_note
 from ijob_app.cli_progress import ProgressLine
 from ijob_app.cli_recipes import recipe_failures
+from ijob_app.cli_search import live_extract_command
 from ijob_app.extract_ops import ExtractProgress, ExtractReport
-from ijob_app.llm_ops import cost_line
 from ijob_app.service import Service
+from ijob_app.view import is_terminal
 
 _EXIT_REFUSED: Final = 1
 _NO_MODEL_NOTE: Final = "note: set [models].job_extract to let ijob read skipped jobs"
@@ -88,6 +90,18 @@ def extract_command(
         """Have the job_extract model read each job a parser skipped, once."""
         session = open_session(db, config)
         chosen: Sequence[SourceRef] = list(dict.fromkeys(map(read_ref, refs or [])))
+        if is_terminal():
+            with session as service, recipe_failures():
+                try:
+                    drawn = live_extract_command(service, chosen)
+                except MissingModelError as error:
+                    say_error(f"{error}")
+                    say_note(_NO_MODEL_NOTE)
+                    raise typer.Exit(code=_EXIT_REFUSED) from error
+            if drawn is not None:
+                for note in report_notes(drawn.report):
+                    say_note(note)
+            return
         progress = ProgressLine(sys.stderr)
         with session as service, recipe_failures():
             try:
@@ -98,13 +112,13 @@ def extract_command(
                     )
                 )
             except MissingModelError as error:
-                typer.echo(f"error: {error}", err=True)
-                typer.echo(_NO_MODEL_NOTE, err=True)
+                say_error(f"{error}")
+                say_note(_NO_MODEL_NOTE)
                 raise typer.Exit(code=_EXIT_REFUSED) from error
             finally:
                 progress.close()
         for line in extract_lines(result):
             typer.echo(line)
-        typer.echo(cost_line(result.report), err=True)
+        say_cost(result.report)
         for note in report_notes(result.report):
-            typer.echo(note, err=True)
+            say_note(note)

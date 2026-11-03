@@ -6,7 +6,8 @@ satisfies `dspy.LM`'s need for a sync engine; ijob calls models asynchronously.
 """
 
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import NoReturn, Protocol
 
@@ -36,6 +37,18 @@ _ASYNC_ONLY = "claude-sdk runs async only"
 _OUTPUT_LABEL = "claude call"
 
 
+@asynccontextmanager
+async def _closed(
+    messages: AsyncIterator[Message],
+) -> AsyncGenerator[AsyncIterator[Message]]:
+    """Give the messages, then end the call that produces them if it is still on."""
+    try:
+        yield messages
+    finally:
+        if isinstance(messages, AsyncGenerator):
+            await messages.aclose()
+
+
 class SdkQuery(Protocol):
     """The part of `claude_agent_sdk.query` that the engine calls."""
 
@@ -53,7 +66,8 @@ def build_options(
 
     The call reads no settings, loads no tools or MCP servers, persists no
     session, and blanks the API-key and auth-token variables so the CLI stays
-    on the user's login.
+    on the user's login. Thinking is off: each task fills one typed answer, and
+    thinking would only make it slower.
 
     Args:
         cli_path: The resolved `claude` executable.
@@ -77,6 +91,7 @@ def build_options(
         cwd=cwd,
         model=model,
         system_prompt=system_prompt,
+        thinking={"type": "disabled"},
     )
 
 
@@ -195,12 +210,18 @@ class ClaudeAsyncEngine:
                 cwd=Path(scratch),
             )
             try:
-                async for message in self._query(prompt=prompt, options=options):
-                    if isinstance(message, AssistantMessage):
-                        assistant_model = message.model
-                    elif isinstance(message, ResultMessage):
-                        result = message
-                        _meter_result(meter, message, assistant_model)
+                async with _closed(
+                    self._query(prompt=prompt, options=options)
+                ) as messages:
+                    async for message in messages:
+                        if isinstance(message, AssistantMessage):
+                            assistant_model = message.model
+                        elif isinstance(message, ResultMessage):
+                            # The answer is here: stop, rather than wait for the
+                            # CLI to exit, which can take half a minute.
+                            result = message
+                            _meter_result(meter, message, assistant_model)
+                            break
             except CLINotFoundError as exc:
                 raise ProviderUnavailableError(str(exc)) from exc
             except ClaudeSDKError as exc:

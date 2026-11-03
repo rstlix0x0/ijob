@@ -184,6 +184,11 @@ def _value(value: object) -> str:
     return str(value)
 
 
+def filter_items(filters: Mapping[str, object]) -> list[tuple[str, str]]:
+    """List each filter's dotted name and its value as text."""
+    return [(name, _value(value)) for name, value in _flat("", filters)]
+
+
 def instruction_lines(
     filters: Mapping[str, object], rules: tuple[str, ...]
 ) -> list[str]:

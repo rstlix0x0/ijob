@@ -90,11 +90,11 @@ def _draft(
     return SightingDraft(source=source, external_id=ExternalId(external_id), **values)
 
 
-def test_fresh_database_is_version_6(tmp_path: Path) -> None:
+def test_fresh_database_is_version_7(tmp_path: Path) -> None:
     path = tmp_path / "ijob.db"
     with Store.open(path):
         pass
-    assert _scalar(path, "PRAGMA user_version") == 6
+    assert _scalar(path, "PRAGMA user_version") == 7
     tables = _scalar(
         path,
         "SELECT group_concat(name) FROM "
@@ -108,7 +108,8 @@ def test_fresh_database_is_version_6(tmp_path: Path) -> None:
         "AND name NOT LIKE 'sqlite_%' ORDER BY name)",
     )
     assert indexes == (
-        "postings_canonical_url,postings_fingerprint,sightings_posting_id"
+        "postings_canonical_url,postings_fingerprint,postings_listed,"
+        "sightings_open,sightings_posting_id"
     )
 
 
@@ -123,7 +124,7 @@ def test_open_is_idempotent(tmp_path: Path) -> None:
         )
     with Store.open(path):
         pass
-    assert _scalar(path, "PRAGMA user_version") == 6
+    assert _scalar(path, "PRAGMA user_version") == 7
     assert _scalar(path, "SELECT count(*) FROM postings") == 1
 
 
@@ -337,8 +338,8 @@ def test_failed_migration_leaves_version_zero(
     opened: list[_TrackedConnection] = []
     real_connect = sqlite3.connect
 
-    def tracking_connect(database: Path) -> _TrackedConnection:
-        conn = real_connect(database, factory=_TrackedConnection)
+    def tracking_connect(database: Path, timeout: float) -> _TrackedConnection:
+        conn = real_connect(database, timeout=timeout, factory=_TrackedConnection)
         opened.append(conn)
         return conn
 
@@ -389,7 +390,7 @@ def test_version_1_database_migrates_and_keeps_rows(tmp_path: Path) -> None:
         conn.execute("PRAGMA user_version = 1")
     with Store.open(path) as store:
         postings = store.postings(sources=[_A])
-    assert _scalar(path, "PRAGMA user_version") == 6
+    assert _scalar(path, "PRAGMA user_version") == 7
     assert len(postings) == 1
     posting = postings[0]
     assert (posting.title, posting.company) == ("Engineer", "Acme")
@@ -900,7 +901,7 @@ def test_migration_3_on_version_2_database(tmp_path: Path) -> None:
     _version_2_database(path)
     with Store.open(path) as store:
         (posting,) = store.postings(sources=[_A])
-    assert _scalar(path, "PRAGMA user_version") == 6
+    assert _scalar(path, "PRAGMA user_version") == 7
     assert posting.title == "Engineer"
     assert posting.description is None
     tables = _scalar(
@@ -1121,7 +1122,7 @@ def test_migration_4_creates_tables(tmp_path: Path) -> None:
         cv = store.cv()
         assert store.cv_profile() is None
         assert store.instructions() is None
-    assert _scalar(path, "PRAGMA user_version") == 6
+    assert _scalar(path, "PRAGMA user_version") == 7
     assert posting is not None
     assert posting.title == "Engineer"
     assert cv == StoredCv("cv.pdf", "ab" * 32, 10, _T1)
@@ -1150,7 +1151,7 @@ def test_migration_5_adds_source_recipes(tmp_path: Path) -> None:
     fresh = tmp_path / "fresh.db"
     with Store.open(fresh):
         pass
-    assert _scalar(fresh, "PRAGMA user_version") == 6
+    assert _scalar(fresh, "PRAGMA user_version") == 7
     assert _rows(fresh, "PRAGMA table_info(source_recipes)") == [
         (0, "ref", "TEXT", 1, None, 1),
         (1, "recipe", "TEXT", 1, None, 0),
@@ -1167,7 +1168,7 @@ def test_migration_5_adds_source_recipes(tmp_path: Path) -> None:
     with Store.open(upgraded) as store:
         row = store.source(_A)
         assert store.recipe(_A) is None
-    assert _scalar(upgraded, "PRAGMA user_version") == 6
+    assert _scalar(upgraded, "PRAGMA user_version") == 7
     assert _rows(upgraded, "PRAGMA table_info(source_recipes)") == _rows(
         fresh, "PRAGMA table_info(source_recipes)"
     )
@@ -1516,3 +1517,67 @@ def test_marked_skipped_items_leave_the_pending_list(tmp_path: Path) -> None:
 def test_marking_a_job_needs_an_external_id(tmp_path: Path) -> None:
     with Store.open(tmp_path / "ijob.db") as store, pytest.raises(InvalidValueError):
         store.mark_skipped(_A, skipped_item_id("one"), SkippedStatus.JOB)
+
+
+def test_list_open_matches_open_postings_without_descriptions(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.import_seeds([(_A, "Alpha"), (_B, "Beta")])
+        store.record(
+            [_draft(_A, "1", description="Long text", url="https://example.com/a")],
+            seen_at=_T1,
+        )
+        store.record([_job(_B, "1")], seen_at=_T1)
+        store.mark_fetched(_A, _T1)
+        store.mark_fetched(_B, _T1)
+        full = store.open_postings(now=_T1)
+        listed = store.list_open(now=_T1)
+        narrowed = store.list_open(now=_T1, sources=[_B])
+
+    assert [posting.id for posting in listed] == [posting.id for posting in full]
+    assert any(posting.description for posting in full)
+    assert all(posting.description is None for posting in listed)
+    assert [posting.title for posting in narrowed] == [f"Engineer {_B} 1"]
+
+
+def test_list_open_rejects_a_time_with_no_zone(tmp_path: Path) -> None:
+    with (
+        Store.open(tmp_path / "ijob.db") as store,
+        pytest.raises(InvalidValueError),
+    ):
+        store.list_open(now=_T1.replace(tzinfo=None))
+
+
+def test_sources_by_posting_reads_every_sighting(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.import_seeds([(_A, "Alpha"), (_B, "Beta")])
+        store.record([_draft(_B, "1", url="https://example.com/same")], seen_at=_T1)
+        store.record([_draft(_A, "1", url="https://example.com/same")], seen_at=_T1)
+        [posting] = store.postings(sources=[_A, _B])
+        shown = store.sources_by_posting()
+
+    assert shown == {posting.id: [_A, _B]}
+
+
+def test_saved_scores_keep_the_newest_for_one_profile(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.import_seeds([(_A, "Alpha")])
+        store.record([_draft(_A, "1")], seen_at=_T1)
+        [posting] = store.postings(sources=[_A])
+        older = Score(score=10, reasons=("older",))
+        newer = Score(score=90, reasons=("newer",))
+        other = Score(score=50, reasons=("other",))
+        store.put_score(posting.id, "a", "p", "m", "1", older, made_at=_T1)
+        store.put_score(posting.id, "b", "p", "m", "1", newer, made_at=_T2)
+        store.put_score(posting.id, "c", "q", "m", "1", other, made_at=_T2)
+
+        assert store.saved_scores("p") == {posting.id: newer}
+        assert store.saved_scores("q") == {posting.id: other}
+        assert store.saved_scores("none") == {}
+
+
+def test_two_connections_can_read_while_one_writes(tmp_path: Path) -> None:
+    path = tmp_path / "ijob.db"
+    with Store.open(path) as writer, Store.open(path) as reader:
+        writer.import_seeds([(_A, "Alpha")])
+        assert _scalar(path, "PRAGMA journal_mode") == "wal"
+        assert [row.ref for row in reader.sources()] == [_A]

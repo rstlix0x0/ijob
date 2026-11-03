@@ -18,7 +18,7 @@ _FIXTURES = Path(__file__).parent / "fixtures" / "yc"
 _SWE = (_FIXTURES / "software_engineer.html").read_text(encoding="utf-8")
 _REMOTE = (_FIXTURES / "remote.html").read_text(encoding="utf-8")
 _KEY = parse_source_key("swe")
-_SWE_URL = "https://www.ycombinator.com/jobs/role/software-engineer"
+_SWE_URL = "https://www.ycombinator.com/jobs"
 _REMOTE_URL = "https://www.ycombinator.com/jobs/role/software-engineer/remote"
 
 

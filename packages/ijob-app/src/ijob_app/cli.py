@@ -16,42 +16,47 @@ be a directory and otherwise exits `1` with `error: ijob home not found at
 <path>, run: ijob setup`, creating nothing. `--db` and `--config` replace the database
 and the config file inside the home.
 
-`ijob search` lists the open, filtered postings of the sources in the database's
-table. It validates every flag and the config file before it touches the cache,
-the database or the network, then opens the HTTP cache and the database and
-imports the bundled seed list. It skips a source fetched more recently than its
-kind's refresh interval, fetches the rest through one client backed by the
-cache, records what they show and prints the postings that pass the filters, one
-tab-separated line each: the posting id, the title (after a `? ` flag when its
-fields were parsed heuristically), company, location, the sources that showed
-it and its URL. `--source` repeated limits
-the run to the named sources; without it every source in the table is read.
-Problems with a source go to stderr, and so does a notice for each source whose
-last fetch is too old for its postings to show. A source's rejected jobs are
-counted in one `<source>: skipped N invalid jobs` line; `--verbose` also prints
-a line for each rejected job and the reason. The exit status is `0` when at
-least one chosen source was fetched or kept, `1` when every chosen source
-failed or the HTTP cache cannot be opened, and `2` for a flag, source reference
-or config file that cannot be used.
+On a terminal every command draws with the parts in `ijob_app.view`: boxes,
+tables, progress and a one-line result, and a problem comes with its fix. In a
+pipe it prints the plain lines described below, so scripts keep working.
 
-When the stored instructions hold rules, `search` also has a model judge each
-posting that passes the filters. A kept posting prints as soon as it is judged,
-ending with a tab and a check mark. With `--dropped` the rest print too: a cross
-and the reason, or a dot and why there is no verdict (`cap reached`, `provider
-error`, `judge failed`), with ` (no description)` added when the model saw none.
-A summary goes to stderr, `judged N, cached K, dropped M, not judged U, cost $X of
-$Y`, ending `; stopped: <why>` when judging stopped early. The status is `1`
-after printing when judging stopped for a provider error or an unknown cost. A
-missing judge model or another error of the LLM layer exits `1` before any line
-prints. With no rules the output is the plain lines above.
+`ijob search` lists the open, filtered postings. On a terminal the saved postings
+show at once, while the sources that are due fetch beside them and new postings
+join the list as each source is saved; `ctrl+c` stops it and keeps what finished.
+`--title` narrows the titles by whole words, `--no-fetch` leaves the sources alone,
+`--all` lists every posting at the end, and `--score` has a model score up to
+`--top` postings against the CV, sorting them best first as each score arrives.
 
-`ijob tui` opens the terminal UI on the stored postings: the same filters as
-`search`, a detail pane, refresh, votes and notes, the sources table and the CV.
-It reads the config file and opens the database and HTTP cache before the screen
-appears, so it exits `2` for a config file that cannot be used and `1` when the
-cache cannot be opened. It takes `--db` and `--config`; the file in force, which
-is `--config` or else the home's, sets the starting filters, the models, the
-spending cap and the CV screen's model check.
+In a pipe it validates every flag and the config file, fetches first, then prints
+one tab-separated line per posting: the id, the title (after a `? ` flag when its
+fields were parsed heuristically), company, location, the sources that showed it
+and its URL. With `--score` each line instead holds the id, score, title, company,
+location and URL, as each score arrives. `--source` repeated limits the run to the
+named sources. Problems with a source go to stderr, and so does a notice for each
+source whose last fetch is too old for its postings to show. A source's rejected
+jobs are counted in one `<source>: skipped N invalid jobs` line; `--verbose` also
+prints a line for each rejected job and the reason. The exit status is `0` when at
+least one chosen source was fetched or kept, `1` when every chosen source failed
+or the HTTP cache cannot be opened, and `2` for a flag, source reference or config
+file that cannot be used.
+
+`--judge` has a model check each posting that passes the filters against the
+stored rules. A kept posting prints as soon as it is judged, ending with a tab and
+a check mark. With `--dropped` the rest print too: a cross and the reason, or a dot
+and why there is no verdict (`cap reached`, `provider error`, `judge failed`), with
+` (no description)` added when the model saw none. A summary goes to stderr,
+`judged N, cached K, dropped M, not judged U, cost $X of $Y`, ending
+`; stopped: <why>` when judging stopped early. The status is `1` after printing when
+judging stopped for a provider error or an unknown cost. A missing judge model or
+another error of the LLM layer exits `1` before any line prints.
+
+`ijob fetch` fetches the sources that are due and saves each as it ends. On a
+terminal it prints a line for each source that brought something new or failed.
+
+`ijob tui` opens the terminal UI, which shows the saved postings at once and fetches
+behind them. It reads the config file and opens the database and HTTP cache before
+the screen appears, so it exits `2` for a config file that cannot be used and `1`
+when the cache cannot be opened. It takes `--db` and `--config`.
 
 `ijob sources` manages the database's table of sources. Each `sources` command
 imports the bundled seed list whenever it opens the database, which never
@@ -139,8 +144,9 @@ import logging
 import os
 import sqlite3
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Final
@@ -169,6 +175,7 @@ from ijob_sources.errors import (
 from ijob_sources.polite_http import ConditionalCache, PoliteClient
 from ijob_sources.public_host import HostResolver, system_resolver
 from ijob_sources.registry import HOST_INTERVALS, refresh_interval
+from rich.live import Live
 
 from ijob_app.cli_extract import extract_command, unread_note
 from ijob_app.cli_llm import (
@@ -183,8 +190,16 @@ from ijob_app.cli_llm import (
     stop_exits,
     traces_app,
 )
+from ijob_app.cli_output import rejections_shown, say_done, say_error, say_note, working
 from ijob_app.cli_progress import ProgressLine, fetch_progress_text
 from ijob_app.cli_recipes import learn_page, reanalyze_command
+from ijob_app.cli_search import (
+    JudgeOptions,
+    SearchOptions,
+    live_fetch_command,
+    live_judge_command,
+    live_search_command,
+)
 from ijob_app.config import (
     FilterFlags,
     FilterLayers,
@@ -197,9 +212,15 @@ from ijob_app.home import (
     resolve_home,
     setup_home,
 )
+from ijob_app.job_search import DEFAULT_SCORE_LIMIT
 from ijob_app.llm_config import read_llm_settings
-from ijob_app.llm_ops import JudgeStatus, LlmOptions
-from ijob_app.llm_text import profile_lines, search_summary, verdict_cell
+from ijob_app.llm_ops import JudgeStatus, LlmOptions, ScoreItem
+from ijob_app.llm_text import (
+    profile_lines,
+    score_summary,
+    search_summary,
+    verdict_cell,
+)
 from ijob_app.render import error_text, posting_fields
 from ijob_app.service import (
     CacheUnavailableError,
@@ -211,9 +232,22 @@ from ijob_app.service import (
     open_service,
 )
 from ijob_app.tui import IjobApp
+from ijob_app.view import (
+    fix_line,
+    is_terminal,
+    make_console,
+    next_line,
+    notice_line,
+    posting_detail,
+    profile_view,
+    sources_table,
+    theme_help,
+)
 
 _EXIT_REFUSED: Final = 1
 _EXIT_BAD_ARGUMENT: Final = 2
+_SOURCES_CHROME: Final = 6
+_MIN_SOURCES: Final = 5
 
 
 def _require_home() -> IjobHome:
@@ -233,7 +267,7 @@ def _require_home() -> IjobHome:
         home = resolve_home(os.environ)
         require_home(home)
     except HomeError as error:
-        typer.echo(f"error: {error.reason}", err=True)
+        say_error(f"{error.reason}")
         raise typer.Exit(code=_EXIT_REFUSED) from error
     return home
 
@@ -296,7 +330,7 @@ def _read_ref(text: str) -> SourceRef:
     try:
         return parse_source_ref(text)
     except InvalidValueError as error:
-        typer.echo(f"error: {error}", err=True)
+        say_error(f"{error}")
         raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
 
 
@@ -318,7 +352,7 @@ def _read_company(text: str) -> str:
     """
     company = text.strip()
     if not company:
-        typer.echo("error: --company must not be blank", err=True)
+        say_error("--company must not be blank")
         raise typer.Exit(code=_EXIT_BAD_ARGUMENT)
     return company
 
@@ -336,10 +370,10 @@ def _refusals() -> Iterator[None]:
     try:
         yield
     except CacheUnavailableError as error:
-        typer.echo(f"error: {error.reason}", err=True)
+        say_error(f"{error.reason}")
         raise typer.Exit(code=_EXIT_REFUSED) from error
     except InvalidValueError as error:
-        typer.echo(f"error: {error_text(error)}", err=True)
+        say_error(f"{error_text(error)}")
         raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
 
 
@@ -356,10 +390,10 @@ def _source_failures() -> Iterator[None]:
     try:
         yield
     except InvalidValueError as error:
-        typer.echo(f"error: {error_text(error)}", err=True)
+        say_error(f"{error_text(error)}")
         raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
     except SourcesError as error:
-        typer.echo(f"error: {error}", err=True)
+        say_error(f"{error}")
         raise typer.Exit(code=_EXIT_REFUSED) from error
 
 
@@ -415,10 +449,22 @@ def _sources_app(
     @sources.command("list")
     def list_sources(
         db: Annotated[Path | None, typer.Option(help=DB_HELP)] = None,
+        *,
+        all_sources: Annotated[
+            bool, typer.Option("--all", help="List every source on a terminal.")
+        ] = False,
     ) -> None:
         """Print every source: reference, company, origin and last fetch."""
         with service_on(_require_home(), db) as service:
             rows = service.sources()
+            counts = service.source_job_counts()
+        if is_terminal():
+            console = make_console()
+            room = max(console.height - _SOURCES_CHROME, _MIN_SOURCES)
+            console.print(
+                sources_table(rows, counts, now(), limit=None if all_sources else room)
+            )
+            return
         for row in rows:
             fetched = row.last_fetched_at.isoformat() if row.last_fetched_at else "-"
             typer.echo(f"{row.ref}\t{row.company}\t{row.origin}\t{fetched}")
@@ -435,9 +481,13 @@ def _sources_app(
         home = _require_home()
         source_ref = _read_ref(ref)
         name = _read_company(company)
-        with _source_failures(), service_on(home, db) as service:
+        with (
+            _source_failures(),
+            service_on(home, db) as service,
+            working(f"Checking {source_ref}"),
+        ):
             asyncio.run(service.add_source(source_ref, name))
-        typer.echo(f"added {source_ref}")
+        say_done(f"added {source_ref}", f"Added {source_ref}", "checked with one fetch")
 
     @sources.command()
     def remove(
@@ -451,9 +501,9 @@ def _sources_app(
             with service_on(home, db) as service:
                 service.remove_source(source_ref)
         except UnknownSourceError as error:
-            typer.echo(f"error: {error.reason}", err=True)
+            say_error(f"{error.reason}")
             raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
-        typer.echo(f"removed {source_ref}")
+        say_done(f"removed {source_ref}", f"Removed {source_ref}")
 
     @sources.command("add-url")
     def add_url(
@@ -481,13 +531,14 @@ def _sources_app(
             service_on(home, db, llm_for(home, config)) as service,
         ):
             try:
-                added = asyncio.run(service.add_url(url, name))
+                with working(f"Checking {url}"):
+                    added = asyncio.run(service.add_url(url, name))
             except UnrecognizedPageError as error:
                 learn_page(
                     service, url, name, error, yes=yes, is_interactive=is_interactive
                 )
                 return
-        typer.echo(f"added {added.ref}")
+        say_done(f"added {added.ref}", f"Added {added.ref}", "checked with one fetch")
 
     reanalyze_command(
         sources,
@@ -515,27 +566,6 @@ def _silence_source_logs() -> None:
         logger.addHandler(logging.NullHandler())
 
 
-@contextmanager
-def _print_rejections(*, enabled: bool) -> Iterator[None]:
-    """Print each warning of the sources to stderr, message only, while it runs.
-
-    Args:
-        enabled: Whether to attach the handler at all.
-    """
-    if not enabled:
-        yield
-        return
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setLevel(logging.WARNING)
-    handler.setFormatter(logging.Formatter("%(message)s"))
-    logger = logging.getLogger(_SOURCES_LOGGER)
-    logger.addHandler(handler)
-    try:
-        yield
-    finally:
-        logger.removeHandler(handler)
-
-
 def _report(report: RefreshReport) -> None:
     """Print the sources a refresh kept, then its problems, then its stale sources."""
     for row in report.kept:
@@ -558,17 +588,90 @@ def _report(report: RefreshReport) -> None:
             )
 
 
-def _posting_line(service: Service, posting: Posting) -> str:
+def _plain_refresh(service: Service, refs: list[SourceRef]) -> RefreshReport:
+    """Fetch the sources that are due, reporting on standard error, and return how."""
+    progress = ProgressLine(sys.stderr)
+    try:
+        report = asyncio.run(
+            service.refresh(
+                refs,
+                on_progress=lambda now: progress.show_live(fetch_progress_text(now)),
+            )
+        )
+    finally:
+        progress.close()
+    _report(report)
+    return report
+
+
+def _listing_line(posting: Posting, sources: Iterable[SourceRef]) -> str:
     """Format a posting: id, title, company, location, sources and URL, tab-separated.
 
     The `? ` flag of a low-confidence posting leads the title, after the id.
     """
-    refs = ",".join(str(ref) for ref in service.posting_sources(posting.id))
+    refs = ",".join(str(ref) for ref in sources)
     flag = "? " if posting.low_confidence else ""
     return (
         f"{posting.id}\t{flag}{posting.title}\t{posting.company}"
         f"\t{posting.location or '-'}\t{refs}\t{posting.url}"
     )
+
+
+def _posting_line(service: Service, posting: Posting) -> str:
+    """Format a posting as `_listing_line` does, reading its sources."""
+    return _listing_line(posting, service.posting_sources(posting.id))
+
+
+def _print_listing(
+    service: Service, layers: FilterLayers, refs: list[SourceRef]
+) -> None:
+    """Print the postings that pass the filters, one line each, with no model."""
+    postings = asyncio.run(service.list_jobs(layers, refs))
+    sources = service.job_sources()
+    for posting in postings:
+        typer.echo(_listing_line(posting, sources.get(posting.id, ())))
+
+
+def _scored_line(item: ScoreItem) -> str:
+    """Format a scored posting: id, score, title, company, location and URL."""
+    posting = item.posting
+    score = "-" if item.score is None else item.score.score
+    return (
+        f"{posting.id}\t{score}\t{posting.title}\t{posting.company}"
+        f"\t{posting.location or '-'}\t{posting.url}"
+    )
+
+
+def _print_scored(
+    service: Service, layers: FilterLayers, refs: list[SourceRef], limit: int
+) -> bool:
+    """Print the newest postings that pass the filters as each one is scored.
+
+    Args:
+        service: The open service.
+        layers: The filters the config file and the flags set.
+        refs: The sources to read; empty means every source.
+        limit: The most postings to score.
+
+    Returns:
+        Whether the scoring ended on a stop that makes the command exit `1`.
+    """
+
+    async def stream() -> None:
+        postings = await service.list_jobs(layers, refs)
+        ids = [posting.id for posting in postings[:limit]]
+        async for item in service.score(ids):
+            typer.echo(_scored_line(item))
+
+    with llm_failures():
+        asyncio.run(stream())
+    report = service.last_report
+    if report is None:
+        return False
+    for note in report_notes(report):
+        say_note(note)
+    typer.echo(score_summary(report), err=True)
+    return stop_exits(report)
 
 
 async def _stream_search(
@@ -632,7 +735,7 @@ def _print_search(
     if report is None:
         return False
     for note in report_notes(report):
-        typer.echo(note, err=True)
+        say_note(note)
     typer.echo(search_summary(report), err=True)
     return stop_exits(report)
 
@@ -697,12 +800,15 @@ def _cv_app(
 
     def show_profile(service: Service, *, refresh: bool) -> None:
         """Build or read the profile, print it and report what the call cost."""
-        with llm_failures():
+        with llm_failures(), working("Reading your CV"):
             profile, report = asyncio.run(service.build_profile(refresh=refresh))
-        for line in profile_lines(profile):
-            typer.echo(line)
+        if is_terminal():
+            make_console().print(profile_view(profile))
+        else:
+            for line in profile_lines(profile):
+                typer.echo(line)
         for note in report_notes(report):
-            typer.echo(note, err=True)
+            say_note(note)
 
     @cv.command("set")
     def set_cv(
@@ -717,9 +823,13 @@ def _cv_app(
             try:
                 stored = service.store_cv(path)
             except OSError as error:
-                typer.echo(f"error: cannot store the CV: {error}", err=True)
+                say_error(f"cannot store the CV: {error}")
                 raise typer.Exit(code=_EXIT_REFUSED) from error
-            typer.echo(f"{stored.name}\t{stored.size}\t{stored.sha256}")
+            say_done(
+                f"{stored.name}\t{stored.size}\t{stored.sha256}",
+                f"Stored {stored.name}",
+                f"{stored.size:,} bytes",
+            )
             with llm_failures():
                 configured = (
                     Task.CV_PROFILE in read_llm_settings(llm.config_path).models
@@ -727,7 +837,7 @@ def _cv_app(
             if configured:
                 show_profile(service, refresh=False)
             else:
-                typer.echo("note: profile not built; set [models].cv_profile", err=True)
+                say_note("note: profile not built; set [models].cv_profile")
 
     @cv.command("show")
     def show_cv(
@@ -738,9 +848,19 @@ def _cv_app(
         with service_on(home, db) as service:
             stored = service.cv()
         if stored is None:
-            typer.echo("no CV stored")
+            if is_terminal():
+                console = make_console()
+                console.print(notice_line("No CV stored"))
+                console.print(fix_line("ijob cv set cv.pdf"))
+            else:
+                typer.echo("no CV stored")
         else:
-            typer.echo(f"{stored.name}\t{stored.size}\t{stored.stored_at.isoformat()}")
+            day = stored.stored_at.date().isoformat()
+            say_done(
+                f"{stored.name}\t{stored.size}\t{stored.stored_at.isoformat()}",
+                stored.name,
+                f"{stored.size:,} bytes, stored {day}",
+            )
 
     @cv.command("profile")
     def profile_cv(
@@ -790,6 +910,33 @@ def _detail_lines(detail: PostingDetail) -> list[str]:
     return lines
 
 
+def _draw_detail(
+    service: Service, posting_id: PostingId, now: Callable[[], datetime]
+) -> None:
+    """Draw a posting at once, and fetch its description beneath it if it is missing.
+
+    Args:
+        service: The open service.
+        posting_id: The posting to show.
+        now: The wall clock.
+
+    Raises:
+        UnknownPostingError: The id names no posting.
+    """
+    console = make_console()
+    score = service.saved_scores().get(posting_id)
+    saved = service.saved_detail(posting_id)
+    if saved.description is not None:
+        console.print(posting_detail(saved, now(), score=score))
+        return
+    pending = replace(saved, unavailable_reason="fetching…")
+    with Live(
+        posting_detail(pending, now(), score=score), console=console, transient=True
+    ):
+        detail = asyncio.run(service.detail(posting_id))
+    console.print(posting_detail(detail, now(), score=score))
+
+
 def _posting_commands(
     app: typer.Typer,
     client_factory: ClientFactory,
@@ -819,8 +966,12 @@ def _posting_commands(
     ) -> None:
         """Print a posting's details and its description."""
         home = _require_home()
+        identifier = PostingId(posting_id)
         with _refusals(), service_on(home, db) as service:
-            detail = asyncio.run(service.detail(PostingId(posting_id)))
+            if is_terminal():
+                _draw_detail(service, identifier, now)
+                return
+            detail = asyncio.run(service.detail(identifier))
         for line in _detail_lines(detail):
             typer.echo(line)
 
@@ -842,21 +993,25 @@ def _posting_commands(
         """Set, replace or clear your vote on a posting."""
         home = _require_home()
         if (vote is None) == (not clear) or (clear and note is not None):
-            typer.echo(
-                "error: give a vote (up or down) with an optional --note, "
-                "or --clear alone",
-                err=True,
+            say_error(
+                "give a vote (up or down) with an optional --note, or --clear alone"
             )
             raise typer.Exit(code=_EXIT_BAD_ARGUMENT)
         identifier = PostingId(posting_id)
         with _refusals(), service_on(home, db) as service:
             if vote is None:
                 service.clear_label(identifier)
-                typer.echo(f"{identifier}\tcleared")
+                say_done(f"{identifier}\tcleared", f"Label cleared on {identifier}")
                 return
-            detail = asyncio.run(service.label(identifier, vote, note))
+            with working("Saving your label"):
+                detail = asyncio.run(service.label(identifier, vote, note))
         if detail.label is not None:
-            typer.echo(f"{identifier}\t{detail.label.vote}\t{detail.label.note or '-'}")
+            word = "good" if vote is Vote.UP else "bad"
+            say_done(
+                f"{identifier}\t{detail.label.vote}\t{detail.label.note or '-'}",
+                f"Labeled {word}",
+                f"{detail.posting.title}, {detail.posting.company}",
+            )
 
 
 def _session_opener(
@@ -972,44 +1127,33 @@ def make_app(  # noqa: PLR0915  # one registration per command
         `tui` commands and its `sources`, `cv`, `instructions` and `traces`
         groups.
     """
+    theme_help()
     app = typer.Typer(
-        add_completion=False, help="Collect and list job postings.", callback=_root
+        add_completion=False,
+        help="Find jobs in any field.",
+        callback=_root,
+        no_args_is_help=True,
     )
     ask = is_interactive or _stdin_is_terminal
     llm_for = _llm_resolver(llm_options)
     app.add_typer(
         _sources_app(client_factory, now, llm_for, ask, resolver), name="sources"
     )
-    _llm_groups(app, client_factory, now, llm_for, ask, resolver)
-    _posting_commands(app, client_factory, now, resolver)
 
     @app.command()
-    def setup() -> None:
-        """Create the ijob home with its config, database and cache directory."""
-        try:
-            items = setup_home(resolve_home(os.environ))
-        except HomeError as error:
-            typer.echo(f"error: {error.reason}", err=True)
-            raise typer.Exit(code=_EXIT_REFUSED) from error
-        except (OSError, sqlite3.Error) as error:
-            typer.echo(f"error: cannot set up the ijob home: {error}", err=True)
-            raise typer.Exit(code=_EXIT_REFUSED) from error
-        for item in items:
-            typer.echo(f"{item.outcome}\t{item.path}")
-            if item.exposed_mode is not None:
-                typer.echo(
-                    f"warning: {item.path} has mode {item.exposed_mode:04o}, so "
-                    f"other users can read it; run: chmod 700 {item.path}",
-                    err=True,
-                )
-
-    @app.command()
-    def search(  # noqa: PLR0913, PLR0917 - one parameter per command-line option
+    def search(  # noqa: PLR0913, PLR0917 - one parameter per option
         source: Annotated[
             list[str] | None,
             typer.Option(
                 help="Read only this source, as kind:key. Repeat for several. "
                 "Default: every source in the database."
+            ),
+        ] = None,
+        title: Annotated[
+            list[str] | None,
+            typer.Option(
+                help='Keep titles holding these words, such as "product manager". '
+                "Repeat for several."
             ),
         ] = None,
         country: Annotated[
@@ -1040,6 +1184,30 @@ def make_app(  # noqa: PLR0915  # one registration per command
             ),
         ] = None,
         *,
+        score: Annotated[
+            bool,
+            typer.Option("--score", help="Score the jobs against your CV, best first."),
+        ] = False,
+        top: Annotated[
+            int,
+            typer.Option(min=1, help="The most jobs to score, newest first."),
+        ] = DEFAULT_SCORE_LIMIT,
+        judge: Annotated[
+            bool,
+            typer.Option(
+                "--judge", help="Have a model check the jobs against your rules."
+            ),
+        ] = False,
+        all_jobs: Annotated[
+            bool, typer.Option("--all", help="List every job at the end.")
+        ] = False,
+        fetch: Annotated[
+            bool,
+            typer.Option(
+                "--fetch/--no-fetch",
+                help="Fetch the sources that are due. Saved jobs show either way.",
+            ),
+        ] = True,
         verbose: Annotated[
             bool,
             typer.Option("--verbose", help="Also print each rejected job and why."),
@@ -1048,7 +1216,7 @@ def make_app(  # noqa: PLR0915  # one registration per command
             bool,
             typer.Option(
                 "--dropped",
-                help="Also list the postings not kept, with the reason.",
+                help="With --judge, also list the postings not kept, with the reason.",
             ),
         ] = False,
         db: Annotated[Path | None, typer.Option(help=DB_HELP)] = None,
@@ -1057,14 +1225,15 @@ def make_app(  # noqa: PLR0915  # one registration per command
             typer.Option(help=CONFIG_HELP),
         ] = None,
     ) -> None:
-        """Fetch the sources, record their jobs and list the open, filtered ones.
+        """List the saved jobs at once, while fetching what is due beside them.
 
-        Each line starts with the posting's id, which `show` and `label` take.
-        When you have set instructions with rules, each line ends with the
-        verdict of a model that judged the posting against them.
+        With --score a model scores the jobs against your CV and they sort best
+        first as each score arrives. In a pipe the output is plain lines, each
+        starting with the job's id, after any fetch has ended.
         """
         home = _require_home()
         flags = FilterFlags(
+            titles=tuple(title or ()),
             countries=tuple(country or ()),
             remotes=tuple(remote or ()),
             since=since,
@@ -1076,7 +1245,7 @@ def make_app(  # noqa: PLR0915  # one registration per command
             layers = read_filter_layers(config, flags, default=home.config)
             refs = list(dict.fromkeys(map(parse_source_ref, source or [])))
         except InvalidValueError as error:
-            typer.echo(f"error: {error}", err=True)
+            say_error(f"{error}")
             raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
 
         try:
@@ -1089,31 +1258,108 @@ def make_app(  # noqa: PLR0915  # one registration per command
                     llm=llm_for(home, config),
                     resolver=resolver,
                 ) as service,
-                _print_rejections(enabled=verbose),
+                rejections_shown(enabled=verbose),
             ):
-                progress = ProgressLine(sys.stderr)
-                try:
-                    report = asyncio.run(
-                        service.refresh(
-                            refs,
-                            on_progress=lambda now: progress.show_live(
-                                fetch_progress_text(now)
-                            ),
-                        )
+                if is_terminal() and judge:
+                    halted = live_judge_command(
+                        service,
+                        layers,
+                        refs,
+                        now,
+                        JudgeOptions(
+                            title=", ".join(title) if title else None,
+                            fetch=fetch,
+                            limit=top,
+                            show_all=all_jobs,
+                            show_dropped=dropped,
+                        ),
                     )
-                finally:
-                    progress.close()
-                _report(report)
-                halted = _print_search(service, layers, refs, show_dropped=dropped)
+                    report = None
+                elif is_terminal():
+                    halted = live_search_command(
+                        service,
+                        layers,
+                        refs,
+                        now,
+                        SearchOptions(
+                            title=", ".join(title) if title else None,
+                            fetch=fetch,
+                            score=score,
+                            score_limit=top,
+                            show_all=all_jobs,
+                            config=config or home.config,
+                        ),
+                    )
+                    report = None
+                else:
+                    report = _plain_refresh(service, refs) if fetch else None
+                    if judge:
+                        halted = _print_search(
+                            service, layers, refs, show_dropped=dropped
+                        )
+                    elif score:
+                        halted = _print_scored(service, layers, refs, top)
+                    else:
+                        _print_listing(service, layers, refs)
+                        halted = False
                 if note := unread_note(service.unread_count(refs)):
-                    typer.echo(note, err=True)
+                    say_note(note)
         except CacheUnavailableError as error:
-            typer.echo(f"error: {error.reason}", err=True)
+            say_error(f"{error.reason}")
             raise typer.Exit(code=_EXIT_REFUSED) from error
         except UnknownSourceError as error:
-            typer.echo(f"error: {error.reason}", err=True)
+            say_error(f"{error.reason}")
             raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
-        if halted or (report.due and not report.fetched and not report.kept):
+        failed_all = (
+            report is not None and report.due and not report.fetched and not report.kept
+        )
+        if halted or failed_all:
+            raise typer.Exit(code=_EXIT_REFUSED)
+
+    @app.command("fetch")
+    def fetch_sources(
+        source: Annotated[
+            list[str] | None,
+            typer.Option(
+                help="Fetch only this source, as kind:key. Repeat for several. "
+                "Default: every source in the database."
+            ),
+        ] = None,
+        *,
+        verbose: Annotated[
+            bool,
+            typer.Option("--verbose", help="Also print each rejected job and why."),
+        ] = False,
+        db: Annotated[Path | None, typer.Option(help=DB_HELP)] = None,
+    ) -> None:
+        """Fetch the sources that are due and save their jobs as each one ends."""
+        home = _require_home()
+        try:
+            refs = list(dict.fromkeys(map(parse_source_ref, source or [])))
+        except InvalidValueError as error:
+            say_error(f"{error}")
+            raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
+        try:
+            with (
+                open_service(
+                    home, db, client_factory, now=now, resolver=resolver
+                ) as service,
+                rejections_shown(enabled=verbose),
+            ):
+                if is_terminal():
+                    report = live_fetch_command(service, refs)
+                else:
+                    report = _plain_refresh(service, refs)
+                    typer.echo(
+                        f"fetched {len(report.fetched)} of {len(report.due)} sources"
+                    )
+        except CacheUnavailableError as error:
+            say_error(f"{error.reason}")
+            raise typer.Exit(code=_EXIT_REFUSED) from error
+        except UnknownSourceError as error:
+            say_error(f"{error.reason}")
+            raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
+        if report is not None and report.due and not report.fetched and not report.kept:
             raise typer.Exit(code=_EXIT_REFUSED)
 
     @app.command()
@@ -1137,7 +1383,33 @@ def make_app(  # noqa: PLR0915  # one registration per command
                 resolver=resolver,
             ) as service,
         ):
-            IjobApp(service, config, default_config=home.config).run()
+            IjobApp(service, config, default_config=home.config, now=now).run()
+
+    _llm_groups(app, client_factory, now, llm_for, ask, resolver)
+    _posting_commands(app, client_factory, now, resolver)
+
+    @app.command()
+    def setup() -> None:
+        """Create the ijob home with its config, database and cache directory."""
+        try:
+            items = setup_home(resolve_home(os.environ))
+        except HomeError as error:
+            say_error(f"{error.reason}")
+            raise typer.Exit(code=_EXIT_REFUSED) from error
+        except (OSError, sqlite3.Error) as error:
+            say_error(f"cannot set up the ijob home: {error}")
+            raise typer.Exit(code=_EXIT_REFUSED) from error
+        for item in items:
+            say_done(f"{item.outcome}\t{item.path}", str(item.path), str(item.outcome))
+            if item.exposed_mode is not None:
+                say_note(
+                    f"warning: {item.path} has mode {item.exposed_mode:04o}, so "
+                    f"other users can read it; run: chmod 700 {item.path}"
+                )
+        if is_terminal():
+            make_console().print(
+                next_line("ijob fetch", "ijob cv set cv.pdf", "ijob tui")
+            )
 
     return app
 

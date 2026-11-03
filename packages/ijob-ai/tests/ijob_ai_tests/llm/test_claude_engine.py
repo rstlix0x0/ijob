@@ -74,6 +74,8 @@ def test_build_options_argv(tmp_path: Path) -> None:
         "--strict-mcp-config",
         "--setting-sources=",
         "--no-session-persistence",
+        "--thinking",
+        "disabled",
         "--input-format",
         "stream-json",
     ]
@@ -421,3 +423,12 @@ def test_timeout_kills_child(tmp_path: Path) -> None:
     assert pid_file.exists(), "the fake CLI never started"
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_file.read_text(encoding="utf-8")), 0)
+
+
+def test_stops_reading_once_the_result_arrives() -> None:
+    fake = FakeQuery(_result(), raises=AssertionError("kept reading after the result"))
+
+    with open_meter():
+        response = asyncio.run(_engine(fake).complete(REQUEST))
+
+    assert response.finish_reason == "stop"

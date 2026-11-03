@@ -480,7 +480,9 @@ def test_search_prints_tracing_warnings_and_dropped_spans(
     monkeypatch.setenv(_OTEL_DISABLED, "true")
     _refuse_trace_writes(monkeypatch)
 
-    result = _invoke(app_, tmp_path, "search", "--source", "jobicy:engineering")
+    result = _invoke(
+        app_, tmp_path, "search", "--judge", "--source", "jobicy:engineering"
+    )
 
     assert result.exit_code == 0, result.stderr
     notes = [line for line in result.stderr.splitlines() if "warning" in line]
@@ -541,7 +543,9 @@ def _searched(tmp_path: Path) -> typer.Typer:
     """Run a judged search over two postings; return the app that ran it."""
     _seed(tmp_path, "one", "two", rules=True)
     app_ = _model_app(tmp_path, FakeEngines(FakeAsyncEngine([verdict_answer()])))
-    result = _invoke(app_, tmp_path, "search", "--source", "jobicy:engineering")
+    result = _invoke(
+        app_, tmp_path, "search", "--judge", "--source", "jobicy:engineering"
+    )
     assert result.exit_code == 0, result.stderr
     return app_
 

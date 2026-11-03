@@ -1,7 +1,17 @@
 # ijob
 
-An R&D project and portfolio piece: exploring how to build an agentic job search for software
-engineers with LLMs. It is a personal research project, not a product.
+A tool for finding jobs in any field, and an R&D project and portfolio piece on building agentic
+systems and apps with LLMs.
+
+## Use it
+
+```bash
+uv run ijob setup                            # create ~/.ijob
+uv run ijob search --title "product manager" # saved jobs at once, fetching beside them
+uv run ijob cv set cv.pdf                    # read your CV
+uv run ijob search --title golang --score    # best first, as each score arrives
+uv run ijob tui                              # the terminal UI
+```
 
 ## What it explores
 
@@ -19,11 +29,13 @@ engineers with LLMs. It is a personal research project, not a product.
 
 ## Research milestones
 
-1. Ranked search: narrow postings by title, then score them against a CV and rank them.
-2. Evaluation: DeepEval suites that measure the judge and the scorer.
-3. Optimization: GEPA and other DSPy optimizers tuning cheap models against a frontier baseline.
-4. Observability: evaluation and optimization runs recorded in Langfuse.
-5. Agents: agents for source discovery and for following custom instructions.
+1. Fast ranked search: results for any role in under a second, narrowed by title, then scored
+   against a CV and ranked.
+2. TUI rewrite: a new interface that opens at once and never freezes.
+3. Evals and agents: DeepEval suites for the judge and the scorer, and agents for source discovery
+   and for following custom instructions.
+4. Optimization and observability: GEPA and other DSPy optimizers tuning cheap models against a
+   frontier baseline, with the runs recorded in Langfuse.
 
 ## Workspace layout
 

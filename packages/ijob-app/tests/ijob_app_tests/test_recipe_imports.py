@@ -159,9 +159,9 @@ async def main():
         async with app.run_test() as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            await pilot.press("s")
+            await pilot.press("2")
             await pilot.pause()
-            return type(app.screen).__name__
+            return app.query_one("#panes").current
 
 
 print(asyncio.run(main()))
@@ -220,7 +220,7 @@ def test_add_url_without_model_loads_no_llm_library(tmp_path: Path) -> None:
 def test_tui_start_with_recipe_source_loads_no_llm_library(tmp_path: Path) -> None:
     lines = _run(_TUI, tmp_path)
 
-    assert lines[-2:] == ["SourcesScreen", "False"]
+    assert lines[-2:] == ["sources", "False"]
 
 
 def test_recipe_ops_does_not_load_llm_text() -> None:

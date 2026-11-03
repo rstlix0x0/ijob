@@ -1,7 +1,7 @@
-"""Y Combinator's software-engineer job pages as a source of sighting drafts.
+"""Y Combinator's job pages as a source of sighting drafts.
 
-`YcJobs` reads two listing pages through the `PoliteClient`: all software
-engineering jobs and the remote ones. Each page carries its postings as JSON in
+`YcJobs` reads two listing pages through the `PoliteClient`: the jobs in every
+role and the remote software jobs. Each page carries its postings as JSON in
 the `data-page` attribute of one element. `parse_yc_page` reads that JSON,
 `YcJobs` merges the postings of both pages by `id` and maps each to a draft. A
 posting that cannot be mapped is logged at `WARNING` and counted in
@@ -31,13 +31,13 @@ from ijob_sources.polite_http import PoliteClient
 _LOGGER = logging.getLogger(__name__)
 _ORIGIN: Final = "https://www.ycombinator.com"
 _PAGE_URLS: Final = (
-    f"{_ORIGIN}/jobs/role/software-engineer",
+    f"{_ORIGIN}/jobs",
     f"{_ORIGIN}/jobs/role/software-engineer/remote",
 )
 
 
 class YcJobs:
-    """The software-engineer job pages of Y Combinator."""
+    """The job pages of Y Combinator."""
 
     def __init__(self, key: SourceKey) -> None:
         """Name the source.

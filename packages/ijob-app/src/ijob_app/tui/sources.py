@@ -1,249 +1,315 @@
-"""The screen that lists the job sources and adds or removes them."""
+"""The Sources tab: every source and how its last fetch went, with a fix for problems.
+
+Sources that need a look sort first. Adding a source and any model analysis run
+in the background, and everything else keeps working meanwhile.
+"""
 
 import sqlite3
-from typing import ClassVar, Final, override
+from collections.abc import Callable
+from datetime import datetime
+from typing import ClassVar, Final, Protocol, override
 
 from ijob_ai.errors import LlmError
 from ijob_core.errors import InvalidValueError
 from ijob_core.model import SourceRef, parse_source_ref
+from ijob_core.store import SourceRow
 from ijob_sources.errors import FetchedPage, SourcesError, UnrecognizedPageError
+from rich.text import Text
 from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Horizontal
-from textual.screen import Screen
-from textual.widgets import Button, DataTable, Footer, Input, Static
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import DataTable, Input, Static
 
+from ijob_app.cli_search import failure_reason
+from ijob_app.job_search import JobList
 from ijob_app.llm_ops import cost_line
-from ijob_app.render import error_notes, error_text, plain_cell
+from ijob_app.render import error_notes, error_text
 from ijob_app.service import Service
 from ijob_app.tui.recipe import RecipeProposalScreen
+from ijob_app.view import (
+    AMBER,
+    CORAL,
+    MINT,
+    MUTED,
+    PROMPT_MARK,
+    TEXT,
+    ago_text,
+    clean,
+)
+
+_BUSY: Final = "An add is still running."
 
 
-def _read_company(text: str) -> str:
-    """Trim a company name and refuse a blank one.
+class SourcesHost(Protocol):
+    """What the Sources tab asks of the app that holds it."""
 
-    Raises:
-        InvalidValueError: Nothing is left after trimming.
-    """
-    company = text.strip()
-    if not company:
-        raise InvalidValueError("company", "must not be blank")
-    return company
+    @property
+    def service(self) -> Service:
+        """The open service."""
+        ...
+
+    @property
+    def jobs(self) -> JobList:
+        """What the search has found so far."""
+        ...
+
+    def refetch(self, refs: list[SourceRef]) -> None:
+        """Fetch these sources again, or every source that is due."""
+        ...
+
+    def now(self) -> datetime:
+        """Read the wall clock."""
+        ...
 
 
-_BUSY_TEXT: Final = "an analysis is running; wait for it to finish"
-
-
-def _error_text(
-    error: InvalidValueError | SourcesError | LlmError | sqlite3.Error,
-) -> str:
-    """Say why an action failed, with the notes the error carries.
-
-    The text is the bare reason for the service's own refusals, then one line
-    for each note, such as what a failed analysis cost.
-    """
+def _error_text(error: Exception) -> str:
+    """Say why an action failed, with the notes the error carries."""
     text = error_text(error) if isinstance(error, InvalidValueError) else str(error)
     return "\n".join([text, *error_notes(error)])
 
 
-class SourcesScreen(Screen[None]):
-    """List the sources; add one by reference or by URL, or remove one.
-
-    A URL no source kind recognizes is offered to the model: it learns a recipe
-    from the page that was already read, and the user accepts or cancels it in a
-    modal. Progress, cost and the outcome show on the status line; an error from
-    an action shows under the inputs, followed by the cost when a paid analysis
-    failed. While an add runs, or the modal is open, a further add is refused so
-    a paid analysis is never started twice. Escape returns to the screen below.
-    """
+class SourcesPane(Vertical):
+    """Every source, how it stands, and how to add or fix one."""
 
     BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("escape", "back", "back"),
+        Binding("a", "add", "add"),
+        Binding("t", "retry", "try again"),
+        Binding("x", "remove", "remove"),
     ]
-    DEFAULT_CSS = """
-    SourcesScreen .entry { height: auto; }
-    SourcesScreen .entry Input { width: 1fr; }
-    SourcesScreen #sources { height: 1fr; }
-    SourcesScreen #error { color: $error; width: 1fr; height: auto; }
-    SourcesScreen #status { height: 1; }
+    DEFAULT_CSS = f"""
+    SourcesPane #add-box {{ height: 3; }}
+    SourcesPane #add-row {{ height: 1; }}
+    SourcesPane #add-mark {{ width: 2; color: {AMBER}; text-style: bold; }}
+    SourcesPane #add-url {{ width: 3fr; }}
+    SourcesPane #add-company {{ width: 1fr; }}
+    SourcesPane #source-body {{ height: 1fr; }}
+    SourcesPane #source-list {{ width: 63%; height: 100%; }}
+    SourcesPane #sources-table {{ height: 1fr; }}
+    SourcesPane #source-details-box {{ width: 1fr; height: 100%; }}
+    SourcesPane #sources-status {{ height: 1; color: {MUTED}; }}
     """
 
-    def __init__(self, service: Service) -> None:
-        """Build the screen over an open service.
+    def __init__(self, host: SourcesHost, *, id: str) -> None:  # noqa: A002  # Textual's name
+        """Build the tab over the app that holds it.
 
         Args:
-            service: The service that lists, adds and removes the sources; it
-                must have been opened on the thread that runs the app.
+            host: The app, which holds the service and the jobs.
+            id: The widget's id.
         """
-        super().__init__()
-        self._service = service
+        super().__init__(id=id)
+        self._host = host
         self._adding = False
+        self._shown: list[tuple[str, str]] = []
+        self._selected: str | None = None
 
     @override
     def compose(self) -> ComposeResult:
-        """Lay out the table, the entry rows, the remove button, error and status."""
-        yield DataTable(id="sources", cursor_type="row")
-        with Horizontal(classes="entry"):
-            yield Input(placeholder="kind:key", id="ref")
-            yield Input(placeholder="company", id="company")
-            yield Button("Add", id="add")
-        with Horizontal(classes="entry"):
-            yield Input(placeholder="url", id="url")
-            yield Input(placeholder="company", id="url-company")
-            yield Button("Add URL", id="add-url")
-        with Horizontal(classes="entry"):
-            yield Button("Remove", id="remove")
-            yield Static("", id="error", markup=False)
-        yield Static("", id="status", markup=False)
-        yield Footer()
+        """Lay out the add box, the list and the details."""
+        with Vertical(id="add-box", classes="box") as box:
+            box.border_title = "Add a source"
+            with Horizontal(id="add-row"):
+                yield Static(PROMPT_MARK, id="add-mark", markup=False)
+                yield Input(placeholder="careers URL or kind:key", id="add-url")
+                yield Input(placeholder="company", id="add-company")
+        with Horizontal(id="source-body"):
+            with Vertical(id="source-list", classes="box") as listing:
+                listing.border_title = "Sources"
+                yield DataTable(id="sources-table", cursor_type="row")
+            with VerticalScroll(id="source-details-box", classes="box") as details:
+                details.border_title = "Details"
+                yield Static(id="source-details", markup=False)
+        yield Static(id="sources-status", markup=False)
 
     def on_mount(self) -> None:
-        """Fill the table and put the cursor in it."""
-        table = self.query_one("#sources", DataTable)
-        table.add_columns("source", "company", "origin", "last fetched")
-        self._reload()
-        table.focus()
+        """Set the columns and fill the list."""
+        table = self.query_one("#sources-table", DataTable)
+        table.add_column("SOURCE", width=30, key="ref")
+        table.add_column("JOBS", width=6, key="jobs")
+        table.add_column("STATE", width=11, key="state")
+        table.add_column("LAST", width=9, key="last")
+        self.redraw()
 
-    def action_back(self) -> None:
-        """Return to the screen below."""
-        self.dismiss(None)
+    def _states(self) -> dict[str, tuple[str, str, str]]:
+        """Work out each source's state word, its color and its reason."""
+        states: dict[str, tuple[str, str, str]] = {}
+        for event in self._host.jobs.events:
+            if event.failure is None:
+                states[str(event.ref)] = ("✓ ok", MINT, "")
+            else:
+                reason = failure_reason(event.failure.error)
+                states[str(event.ref)] = ("✗ failed", CORAL, reason)
+        return states
 
-    @on(Button.Pressed, "#add")
-    @on(Input.Submitted, "#company")
-    def _add_pressed(self) -> None:
-        """Add the source named in the first row, unless an add is running."""
-        if not self._begin_add():
-            return
-        self._add(
-            self.query_one("#ref", Input).value,
-            self.query_one("#company", Input).value,
+    def redraw(self) -> None:
+        """Bring the list up to date, problems first, keeping the cursor."""
+        states = self._states()
+        rows = self._host.service.sources()
+        counts = self._host.service.source_job_counts()
+        running = self._host.jobs.fetch is not None and (
+            self._host.jobs.fetch_report is None
         )
 
-    @on(Button.Pressed, "#add-url")
-    @on(Input.Submitted, "#url-company")
-    def _add_url_pressed(self) -> None:
-        """Add the source the URL in the second row leads to, if no add is running."""
-        if not self._begin_add():
-            return
-        self._add_url(
-            self.query_one("#url", Input).value,
-            self.query_one("#url-company", Input).value,
+        def word(row: SourceRow) -> tuple[str, str, str]:
+            known = states.get(str(row.ref))
+            if known is not None:
+                return known
+            if running:
+                return ("● fetching", AMBER, "")
+            if row.last_fetched_at is None:
+                return ("never", MUTED, "")
+            return ("✓ ok", MINT, "")
+
+        order = {CORAL: 0, AMBER: 1}
+        problem_first = sorted(
+            rows, key=lambda row: (order.get(word(row)[1], 2), str(row.ref))
         )
+        shown = [(str(row.ref), word(row)[0]) for row in problem_first]
+        if shown != self._shown:
+            self._shown = shown
+            self._fill(problem_first, word, counts)
+        self._draw_details(states)
+        healthy = sum(1 for _, state in shown if state.startswith("✓"))
+        problems = sum(1 for _, state in shown if state.startswith("✗"))
+        self.query_one(
+            "#source-list"
+        ).border_title = f"{len(shown)} sources, {healthy} ok, {problems} failed"
 
-    @on(Button.Pressed, "#remove")
-    def _remove_pressed(self) -> None:
-        """Remove the source under the cursor."""
-        table = self.query_one("#sources", DataTable)
-        if table.row_count == 0:
-            return
-        key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
-        if key is None:
-            return
-        try:
-            self._service.remove_source(parse_source_ref(key))
-        except InvalidValueError as error:
-            self._show_error(_error_text(error))
-            return
-        self._show_error("")
-        self._reload()
-
-    def _begin_add(self) -> bool:
-        """Claim the screen for an add, or say that one is running.
-
-        Returns:
-            Whether the caller may start its add; it must start one, and the
-            add releases the claim when it ends.
-        """
-        if self._adding:
-            self._show_status(_BUSY_TEXT)
-            return False
-        self._adding = True
-        return True
-
-    @work(exclusive=True, group="sources")
-    async def _add(self, ref_text: str, company_text: str) -> None:
-        """Verify a source with one fetch and add it."""
-        try:
-            ref: SourceRef = parse_source_ref(ref_text.strip())
-            company = _read_company(company_text)
-            await self._service.add_source(ref, company)
-        except (InvalidValueError, SourcesError) as error:
-            self._show_error(_error_text(error))
-            return
-        finally:
-            self._adding = False
-        self._show_error("")
-        self._reload()
-
-    @work(exclusive=True, group="sources")
-    async def _add_url(self, url: str, company_text: str) -> None:
-        """Work out what a URL is, verify it and add it.
-
-        A page no source kind recognizes goes to `_learn_recipe` with the page
-        that was read.
-        """
-        self._show_status("")
-        try:
-            company = _read_company(company_text)
-            try:
-                await self._service.add_url(url.strip(), company)
-            except UnrecognizedPageError as unrecognized:
-                await self._learn_recipe(url.strip(), company, unrecognized.page)
-                return
-        except (InvalidValueError, SourcesError, LlmError, sqlite3.Error) as error:
-            self._show_status("")
-            self._show_error(_error_text(error))
-            return
-        finally:
-            self._adding = False
-        self._show_error("")
-        self._reload()
-
-    async def _learn_recipe(
-        self, url: str, company: str, page: FetchedPage | None
+    def _fill(
+        self,
+        rows: list[SourceRow],
+        word: Callable[[SourceRow], tuple[str, str, str]],
+        counts: dict[str, int],
     ) -> None:
-        """Learn a recipe for a page, show it and store it if the user accepts.
-
-        Runs inside the `sources` worker, which `push_screen_wait` needs.
-        """
-        self._show_error("")
-        self._show_status(f"analyzing {url}\N{HORIZONTAL ELLIPSIS}")
-        proposal = await self._service.analyze_url(url, company, page=page)
-        self._show_status(cost_line(proposal.report))
-        for warning in proposal.report.warnings:
-            self.notify(warning, severity="warning", markup=False)
-        if proposal.report.dropped_spans:
-            self.notify(
-                f"{proposal.report.dropped_spans} spans not stored",
-                severity="warning",
-                markup=False,
-            )
-        if await self.app.push_screen_wait(RecipeProposalScreen(proposal)):
-            row = self._service.accept_recipe(proposal)
-            self._reload()
-            self._show_status(f"added {row.ref}")
-        else:
-            self._show_status("not stored")
-
-    def _show_error(self, text: str) -> None:
-        """Show a message under the inputs; empty clears it."""
-        self.query_one("#error", Static).update(text)
-
-    def _show_status(self, text: str) -> None:
-        """Show progress, cost or the outcome above the footer; empty clears it."""
-        self.query_one("#status", Static).update(text)
-
-    def _reload(self) -> None:
-        """Fill the table with the sources that were not removed."""
-        table = self.query_one("#sources", DataTable)
+        """Rebuild the table."""
+        table = self.query_one("#sources-table", DataTable)
         table.clear()
-        for row in self._service.sources():
-            fetched = row.last_fetched_at.isoformat() if row.last_fetched_at else "-"
+        now = self._host.now()
+        for row in rows:
+            state, color, _ = word(row)
+            last = "-"
+            if row.last_fetched_at is not None:
+                last = ago_text(row.last_fetched_at, now)
             table.add_row(
-                plain_cell(str(row.ref)),
-                plain_cell(row.company),
-                plain_cell(str(row.origin)),
-                fetched,
+                Text(clean(str(row.ref)), style=TEXT, no_wrap=True),
+                Text(f"{counts.get(str(row.ref), 0):,}", justify="right"),
+                Text(state, style=color),
+                Text(last, style=MUTED),
                 key=str(row.ref),
             )
+        if self._selected is not None:
+            for number, row in enumerate(rows):
+                if str(row.ref) == self._selected:
+                    table.move_cursor(row=number, animate=False, scroll=False)
+                    break
+
+    def _draw_details(self, states: dict[str, tuple[str, str, str]]) -> None:
+        """Draw the selected source and how to fix it."""
+        widget = self.query_one("#source-details", Static)
+        if self._selected is None:
+            widget.update(Text("Select a source to see how it stands.", style=MUTED))
+            return
+        state = states.get(self._selected)
+        lines = Text(clean(self._selected), style=f"bold {TEXT}")
+        lines.append("\n\n")
+        if state is None or state[1] != CORAL:
+            lines.append("Nothing to fix.", style=MUTED)
+        else:
+            lines.append("✗ Failed\n", style=f"bold {CORAL}")
+            lines.append(f"{clean(state[2])}\n\n", style=TEXT)
+            lines.append("FIX IT\n", style=f"bold {MUTED}")
+            lines.append(" t ", style=f"bold on {AMBER} #0e1117")
+            lines.append(" try again now\n", style=TEXT)
+            lines.append(" x ", style=f"bold on {AMBER} #0e1117")
+            lines.append(" remove this source\n\n", style=TEXT)
+            lines.append(
+                "Other sources keep fetching. Finished ones already show on the "
+                "Jobs tab.",
+                style=MUTED,
+            )
+        widget.update(lines)
+
+    @on(DataTable.RowHighlighted, "#sources-table")
+    def _highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Show the source under the cursor."""
+        self._selected = event.row_key.value
+        self._draw_details(self._states())
+
+    def action_add(self) -> None:
+        """Move to the add box."""
+        self.query_one("#add-url", Input).focus()
+
+    def action_retry(self) -> None:
+        """Fetch the selected source again."""
+        if self._selected is not None:
+            self._host.refetch([parse_source_ref(self._selected)])
+            self.notify(f"Fetching {self._selected}", markup=False)
+
+    def action_remove(self) -> None:
+        """Remove the selected source."""
+        if self._selected is None:
+            return
+        try:
+            self._host.service.remove_source(parse_source_ref(self._selected))
+        except InvalidValueError as error:
+            self.notify(_error_text(error), severity="error", markup=False)
+            return
+        self.notify(f"Removed {self._selected}", markup=False)
+        self._selected = None
+        self.redraw()
+
+    @on(Input.Submitted, "#add-url, #add-company")
+    def _submitted(self) -> None:
+        """Add the source in the add box, in the background."""
+        target = self.query_one("#add-url", Input).value.strip()
+        company = self.query_one("#add-company", Input).value.strip()
+        if not target or not company:
+            self._status("Give a URL or kind:key, and the company.")
+            return
+        if self._adding:
+            self._status(_BUSY)
+            return
+        self._adding = True
+        self._status(f"Checking {target} in the background.")
+        self._add(target, company)
+
+    def _status(self, text: str) -> None:
+        """Say how the last action went."""
+        self.query_one("#sources-status", Static).update(text)
+
+    @work(exclusive=True, group="add-source")
+    async def _add(self, target: str, company: str) -> None:
+        """Check a source and add it, learning a recipe for a page it cannot read."""
+        service = self._host.service
+        try:
+            if target.startswith(("http://", "https://")):
+                try:
+                    await service.add_url(target, company)
+                except UnrecognizedPageError as unrecognized:
+                    await self._learn(target, company, unrecognized.page)
+                    return
+            else:
+                await service.add_source(parse_source_ref(target), company)
+        except (InvalidValueError, SourcesError, LlmError, sqlite3.Error) as error:
+            self._status("")
+            self.notify(_error_text(error), severity="error", markup=False)
+            return
+        finally:
+            self._adding = False
+        self._status(f"Added {target}.")
+        self.query_one("#add-url", Input).value = ""
+        self.query_one("#add-company", Input).value = ""
+        self.redraw()
+
+    async def _learn(self, url: str, company: str, page: FetchedPage | None) -> None:
+        """Have a model learn a page, and store it if the user accepts."""
+        service = self._host.service
+        self._status(f"Having a model read {url}.")
+        proposal = await service.analyze_url(url, company, page=page)
+        self._status(cost_line(proposal.report))
+        if await self.app.push_screen_wait(RecipeProposalScreen(proposal)):
+            row = service.accept_recipe(proposal)
+            self._status(f"Added {row.ref}.")
+            self.redraw()
+        else:
+            self._status("Not stored.")

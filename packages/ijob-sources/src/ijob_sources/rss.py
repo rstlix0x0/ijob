@@ -258,7 +258,7 @@ FEEDS: Final[Mapping[SourceKey, FeedSpec]] = MappingProxyType(
             detail=False,
         ),
         SourceKey("bsj"): FeedSpec(
-            "https://berlinstartupjobs.com/engineering/feed/",
+            "https://berlinstartupjobs.com/feed/",
             _split_last(" // "),
             None,
             detail=False,

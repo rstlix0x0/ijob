@@ -1,10 +1,11 @@
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 from ijob_core.countries import CountryCode
-from ijob_core.filters import FilterSpec, keep
+from ijob_core.filters import FilterSpec, keep, remote_scope
 from ijob_core.model import Posting, PostingId, RemoteScope
 from ijob_core.money import Money, Period
 
@@ -24,12 +25,13 @@ def _posting(  # noqa: PLR0913  # builder mirrors the optional fields of Posting
     country: CountryCode | None = None,
     remote: RemoteScope | None = None,
     role_hint: str | None = None,
+    location: str | None = None,
 ) -> Posting:
     return Posting(
         id=PostingId(1),
         title=title,
         company=company,
-        location=None,
+        location=location,
         url="https://example.com/job/1",
         posted_at=posted_at,
         first_seen=_NOW,
@@ -107,26 +109,71 @@ def test_country_in_set_keeps() -> None:
 
 
 @pytest.mark.parametrize(
-    ("country", "remote"),
+    ("country", "remote", "location", "kept"),
     [
-        (None, RemoteScope.NONE),
-        (_DE, None),
-        (_DE, RemoteScope.REGION),
-        (_DE, RemoteScope.WORLDWIDE),
+        (_DE, None, "Berlin", False),
+        (None, None, "Berlin", False),
+        (None, None, "Singapore", True),
+        (None, None, "Remote", False),
+        (None, None, None, False),
+        (None, None, "Anywhere in the World", True),
+        (_DE, RemoteScope.REGION, "Europe", False),
+        (_DE, RemoteScope.WORLDWIDE, "Berlin", True),
+        (_SG, None, None, True),
+        (None, None, "Berlin or Singapore", True),
+        (_SG, None, "Tokyo, Japan", False),
+        (_DE, None, "Singapore", True),
+        (_SG, None, "Hybrid", True),
     ],
 )
-def test_country_passes_unknown_or_wide(
-    country: CountryCode | None, remote: RemoteScope | None
+def test_country_shows_only_what_it_can_confirm(
+    country: CountryCode | None,
+    remote: RemoteScope | None,
+    location: str | None,
+    kept: bool,  # noqa: FBT001
 ) -> None:
     spec = FilterSpec(countries=frozenset({_SG}))
-    assert keep(_posting(country=country, remote=remote), spec, now=_NOW)
+    posting = _posting(country=country, remote=remote, location=location)
+    assert keep(posting, spec, now=_NOW) is kept
+
+
+@pytest.mark.parametrize(
+    ("location", "scope"),
+    [
+        ("Remote - US", RemoteScope.COUNTRY),
+        ("Remote - EMEA", RemoteScope.REGION),
+        ("Remote, AMER", RemoteScope.REGION),
+        ("US-Remote", RemoteScope.COUNTRY),
+        ("Remote", RemoteScope.WORLDWIDE),
+        ("Worldwide", RemoteScope.WORLDWIDE),
+        ("Berlin", RemoteScope.NONE),
+        ("Hybrid", RemoteScope.NONE),
+        (None, None),
+    ],
+)
+def test_remote_scope_reads_the_location(
+    location: str | None, scope: RemoteScope | None
+) -> None:
+    assert remote_scope(_posting(location=location)) is scope
+
+
+def test_remote_scope_a_source_states_wins() -> None:
+    posting = _posting(remote=RemoteScope.NONE, location="Remote")
+    assert remote_scope(posting) is RemoteScope.NONE
+
+
+def test_remote_filter_drops_what_it_cannot_read() -> None:
+    spec = FilterSpec(remote=frozenset({RemoteScope.WORLDWIDE}))
+    assert not keep(_posting(location=None), spec, now=_NOW)
+    assert keep(_posting(location="Remote"), spec, now=_NOW)
+    assert not keep(_posting(location="Berlin"), spec, now=_NOW)
 
 
 def test_remote_filter() -> None:
     spec = FilterSpec(remote=frozenset({RemoteScope.WORLDWIDE}))
     assert not keep(_posting(remote=RemoteScope.NONE), spec, now=_NOW)
     assert keep(_posting(remote=RemoteScope.WORLDWIDE), spec, now=_NOW)
-    assert keep(_posting(remote=None), spec, now=_NOW)
+    assert not keep(_posting(remote=None), spec, now=_NOW)
 
 
 def test_since() -> None:
@@ -135,7 +182,13 @@ def test_since() -> None:
     fresh = _posting(posted_at=_NOW - timedelta(days=3))
     assert not keep(old, spec, now=_NOW)
     assert keep(fresh, spec, now=_NOW)
-    assert keep(_posting(posted_at=None), spec, now=_NOW)
+    assert keep(_posting(posted_at=None), spec, now=_NOW)  # first seen just now
+
+
+def test_since_with_no_date_goes_by_when_it_was_first_seen() -> None:
+    spec = FilterSpec(since=timedelta(days=7))
+    long_seen = replace(_posting(), first_seen=_NOW - timedelta(days=30))
+    assert not keep(long_seen, spec, now=_NOW)
 
 
 def test_since_keeps_exact_boundary() -> None:
@@ -216,11 +269,12 @@ def test_salary_year_against_month_threshold() -> None:
         _money("1", "USD", Period.MONTH),
         _money("1", "SGD", Period.HOUR),
         _money("1", "SGD", None),
+        _money("9000000", "XXX", Period.YEAR),
     ],
 )
-def test_salary_incomparable_passes(salary: Money) -> None:
+def test_salary_it_cannot_compare_is_dropped(salary: Money) -> None:
     spec = FilterSpec(min_salary=_money("6000", "SGD", Period.MONTH))
-    assert keep(_posting(salaries=(salary,)), spec, now=_NOW)
+    assert not keep(_posting(salaries=(salary,)), spec, now=_NOW)
 
 
 def test_salary_hour_threshold_compares_hour_only() -> None:
@@ -228,12 +282,14 @@ def test_salary_hour_threshold_compares_hour_only() -> None:
     assert not keep(
         _posting(salaries=(_money("40", "SGD", Period.HOUR),)), spec, now=_NOW
     )
-    assert keep(_posting(salaries=(_money("1", "SGD", Period.MONTH),)), spec, now=_NOW)
+    assert not keep(
+        _posting(salaries=(_money("1", "SGD", Period.MONTH),)), spec, now=_NOW
+    )
 
 
-def test_min_salary_without_salaries_passes() -> None:
+def test_min_salary_drops_a_job_that_states_none() -> None:
     spec = FilterSpec(min_salary=_money("6000", "SGD", Period.MONTH))
-    assert keep(_posting(), spec, now=_NOW)
+    assert not keep(_posting(), spec, now=_NOW)
 
 
 def test_require_salary() -> None:
@@ -247,3 +303,24 @@ def test_rules_combine_with_and() -> None:
     spec = FilterSpec(include=(_ENGINEER,), companies=("acme",))
     assert keep(_posting(company="Acme"), spec, now=_NOW)
     assert not keep(_posting(company="Other"), spec, now=_NOW)
+
+
+@pytest.mark.parametrize(
+    ("salary", "kept"),
+    [
+        (_money("100000", "USD", Period.YEAR), True),
+        (_money("80000", "EUR", Period.YEAR), True),
+        (_money("40000", "USD", Period.YEAR), False),
+        (_money("120000", "USD", None), True),
+        (_money("9000", "SGD", None), True),
+        (_money("40", "USD", Period.HOUR), True),
+        (_money("15000000", "JPY", Period.YEAR), True),
+        (_money("3000000", "JPY", Period.YEAR), False),
+    ],
+)
+def test_salary_compares_across_currencies_and_periods(
+    salary: Money,
+    kept: bool,  # noqa: FBT001
+) -> None:
+    spec = FilterSpec(min_salary=_money("6000", "SGD", Period.MONTH))
+    assert keep(_posting(salaries=(salary,)), spec, now=_NOW) is kept

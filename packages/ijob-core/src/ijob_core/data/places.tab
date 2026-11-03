@@ -1,0 +1,506 @@
+# Places a job's location text names, each with its ISO 3166 alpha-2 code: other
+# names of countries, then cities that job sources often give without a country.
+# A city whose name several countries share is left out rather than guessed.
+# Name and code are separated by a tab. Names are matched whole and in any case.
+united states	US
+united states of america	US
+usa	US
+u.s.a.	US
+us	US
+u.s.	US
+united kingdom	GB
+great britain	GB
+britain	GB
+uk	GB
+u.k.	GB
+england	GB
+scotland	GB
+wales	GB
+northern ireland	GB
+south korea	KR
+korea	KR
+republic of korea	KR
+czechia	CZ
+czech republic	CZ
+the netherlands	NL
+nederland	NL
+holland	NL
+deutschland	DE
+españa	ES
+italia	IT
+brasil	BR
+schweiz	CH
+suisse	CH
+österreich	AT
+polska	PL
+uae	AE
+united arab emirates	AE
+hong kong sar	HK
+hongkong	HK
+viet nam	VN
+ivory coast	CI
+nippon	JP
+new york	US
+new york city	US
+nyc	US
+san francisco	US
+sf	US
+san francisco bay area	US
+bay area	US
+silicon valley	US
+los angeles	US
+san diego	US
+san jose	US
+sunnyvale	US
+palo alto	US
+mountain view	US
+menlo park	US
+redwood city	US
+santa clara	US
+cupertino	US
+oakland	US
+berkeley	US
+seattle	US
+bellevue	US
+redmond	US
+kirkland	US
+portland	US
+chicago	US
+boston	US
+washington	US
+washington d.c.	US
+washington dc	US
+d.c.	US
+austin	US
+dallas	US
+houston	US
+denver	US
+boulder	US
+atlanta	US
+miami	US
+philadelphia	US
+pittsburgh	US
+phoenix	US
+tempe	US
+minneapolis	US
+detroit	US
+nashville	US
+memphis	US
+southaven	US
+salt lake city	US
+las vegas	US
+raleigh	US
+charlotte	US
+california	US
+texas	US
+florida	US
+illinois	US
+massachusetts	US
+colorado	US
+north carolina	US
+south carolina	US
+virginia	US
+arizona	US
+ohio	US
+michigan	US
+pennsylvania	US
+new jersey	US
+tennessee	US
+oregon	US
+utah	US
+minnesota	US
+toronto	CA
+vancouver	CA
+montreal	CA
+montréal	CA
+ottawa	CA
+calgary	CA
+edmonton	CA
+waterloo	CA
+ontario	CA
+british columbia	CA
+alberta	CA
+quebec	CA
+québec	CA
+mexico city	MX
+ciudad de méxico	MX
+guadalajara	MX
+monterrey	MX
+são paulo	BR
+sao paulo	BR
+rio de janeiro	BR
+buenos aires	AR
+santiago	CL
+bogotá	CO
+bogota	CO
+medellín	CO
+medellin	CO
+lima	PE
+london	GB
+manchester	GB
+edinburgh	GB
+glasgow	GB
+bristol	GB
+leeds	GB
+cardiff	GB
+belfast	GB
+dublin	IE
+cork	IE
+paris	FR
+lyon	FR
+marseille	FR
+toulouse	FR
+nantes	FR
+lille	FR
+bordeaux	FR
+berlin	DE
+munich	DE
+münchen	DE
+hamburg	DE
+frankfurt	DE
+cologne	DE
+köln	DE
+stuttgart	DE
+düsseldorf	DE
+leonberg	DE
+amsterdam	NL
+rotterdam	NL
+utrecht	NL
+the hague	NL
+eindhoven	NL
+brussels	BE
+antwerp	BE
+ghent	BE
+luxembourg city	LU
+zurich	CH
+zürich	CH
+geneva	CH
+genève	CH
+basel	CH
+lausanne	CH
+vienna	AT
+wien	AT
+madrid	ES
+barcelona	ES
+valencia	ES
+seville	ES
+málaga	ES
+malaga	ES
+lisbon	PT
+lisboa	PT
+porto	PT
+rome	IT
+roma	IT
+milan	IT
+milano	IT
+turin	IT
+athens	GR
+stockholm	SE
+gothenburg	SE
+malmö	SE
+oslo	NO
+copenhagen	DK
+københavn	DK
+helsinki	FI
+tallinn	EE
+riga	LV
+vilnius	LT
+warsaw	PL
+warszawa	PL
+krakow	PL
+kraków	PL
+wroclaw	PL
+wrocław	PL
+gdansk	PL
+gdańsk	PL
+masovian voivodeship	PL
+prague	CZ
+praha	CZ
+brno	CZ
+bratislava	SK
+budapest	HU
+bucharest	RO
+cluj-napoca	RO
+sofia	BG
+belgrade	RS
+zagreb	HR
+ljubljana	SI
+kyiv	UA
+kiev	UA
+lviv	UA
+istanbul	TR
+ankara	TR
+tel aviv	IL
+tel-aviv	IL
+jerusalem	IL
+haifa	IL
+dubai	AE
+abu dhabi	AE
+riyadh	SA
+jeddah	SA
+doha	QA
+cairo	EG
+nairobi	KE
+lagos	NG
+accra	GH
+cape town	ZA
+johannesburg	ZA
+bengaluru	IN
+bangalore	IN
+mumbai	IN
+delhi	IN
+new delhi	IN
+gurgaon	IN
+gurugram	IN
+noida	IN
+hyderabad	IN
+chennai	IN
+pune	IN
+kolkata	IN
+karachi	PK
+lahore	PK
+dhaka	BD
+colombo	LK
+tokyo	JP
+osaka	JP
+kyoto	JP
+yokohama	JP
+fukuoka	JP
+nagoya	JP
+sapporo	JP
+kobe	JP
+sendai	JP
+seoul	KR
+busan	KR
+beijing	CN
+shanghai	CN
+shenzhen	CN
+guangzhou	CN
+hangzhou	CN
+taipei	TW
+hsinchu	TW
+kuala lumpur	MY
+penang	MY
+jakarta	ID
+west jakarta	ID
+south jakarta	ID
+bandung	ID
+surabaya	ID
+yogyakarta	ID
+bali	ID
+bangkok	TH
+ho chi minh city	VN
+ho chi minh	VN
+hanoi	VN
+manila	PH
+makati	PH
+quezon city	PH
+cebu	PH
+sydney	AU
+melbourne	AU
+brisbane	AU
+perth	AU
+adelaide	AU
+canberra	AU
+auckland	NZ
+wellington	NZ
+日本	JP
+東京	JP
+大阪	JP
+京都	JP
+横浜	JP
+福岡	JP
+名古屋	JP
+札幌	JP
+神戸	JP
+turkiye	TR
+türkiye	TR
+alabama	US
+alaska	US
+arkansas	US
+connecticut	US
+delaware	US
+hawaii	US
+idaho	US
+indiana	US
+iowa	US
+kansas	US
+kentucky	US
+louisiana	US
+maine	US
+maryland	US
+mississippi	US
+missouri	US
+montana	US
+nebraska	US
+nevada	US
+new hampshire	US
+new mexico	US
+north dakota	US
+oklahoma	US
+rhode island	US
+south dakota	US
+vermont	US
+west virginia	US
+wisconsin	US
+wyoming	US
+berlin-mitte	DE
+leipzig	DE
+dresden	DE
+dortmund	DE
+bochum	DE
+bonn	DE
+bremen	DE
+hannover	DE
+hanover	DE
+karlsruhe	DE
+mannheim	DE
+heidelberg	DE
+nuremberg	DE
+nürnberg	DE
+würzburg	DE
+wiesbaden	DE
+mainz	DE
+bensheim	DE
+viersen	DE
+mülheim	DE
+aachen	DE
+freiburg	DE
+potsdam	DE
+bavaria	DE
+bayern	DE
+hessen	DE
+saxony	DE
+bern	CH
+berne	CH
+lucerne	CH
+luzern	CH
+winterthur	CH
+frauenfeld	CH
+st. gallen	CH
+aarau	CH
+nyon	CH
+baar	CH
+veenendaal	NL
+delft	NL
+leiden	NL
+groningen	NL
+arnhem	NL
+nijmegen	NL
+haarlem	NL
+saint-denis	FR
+fontenay-sous-bois	FR
+strasbourg	FR
+rennes	FR
+grenoble	FR
+montpellier	FR
+hatfield	GB
+oxford	GB
+nottingham	GB
+sheffield	GB
+liverpool	GB
+milton keynes	GB
+sao jose dos campos	BR
+são josé dos campos	BR
+curitiba	BR
+belo horizonte	BR
+florianópolis	BR
+florianopolis	BR
+porto alegre	BR
+bologna	IT
+graz	AT
+linz	AT
+salzburg	AT
+aarhus	DK
+trondheim	NO
+uppsala	SE
+tampere	FI
+minato city	JP
+minato	JP
+shibuya	JP
+shinjuku	JP
+chiyoda	JP
+meguro	JP
+minato-ku	JP
+shibuya-ku	JP
+gangnam	KR
+bengaluru urban	IN
+ahmedabad	IN
+jaipur	IN
+indore	IN
+thane	IN
+navi mumbai	IN
+tangerang	ID
+bekasi	ID
+depok	ID
+semarang	ID
+medan	ID
+malang	ID
+denpasar	ID
+petaling jaya	MY
+johor bahru	MY
+cyberjaya	MY
+chiang mai	TH
+phuket	TH
+da nang	VN
+taguig	PH
+pasig	PH
+davao	PH
+gold coast	AU
+christchurch	NZ
+港区	JP
+渋谷	JP
+新宿	JP
+千代田	JP
+品川	JP
+北海道	JP
+青森	JP
+岩手	JP
+宮城	JP
+秋田	JP
+山形	JP
+福島	JP
+茨城	JP
+栃木	JP
+群馬	JP
+埼玉	JP
+千葉	JP
+神奈川	JP
+新潟	JP
+富山	JP
+石川	JP
+福井	JP
+山梨	JP
+長野	JP
+岐阜	JP
+静岡	JP
+愛知	JP
+三重	JP
+滋賀	JP
+兵庫	JP
+奈良	JP
+和歌山	JP
+鳥取	JP
+島根	JP
+岡山	JP
+広島	JP
+山口	JP
+徳島	JP
+香川	JP
+愛媛	JP
+高知	JP
+佐賀	JP
+長崎	JP
+熊本	JP
+大分	JP
+宮崎	JP
+鹿児島	JP
+沖縄	JP
+한국	KR
+서울	KR
+中国	CN
+北京	CN
+上海	CN
+深圳	CN
+台北	TW
+香港	HK
