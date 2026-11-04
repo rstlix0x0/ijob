@@ -178,6 +178,7 @@ def test_comparable_excludes_incomplete_limited_and_other_versions(
     assert [run.id for run in found.runs] == [run.id for run in kept]
     assert found.task_version == "judge-1"
     assert found.others == 4
+    assert len(found.other_ids) == 4
     left_out = {old.id, stopped.id, partial.id, elsewhere.id}
     assert left_out.isdisjoint(run.id for run in found.runs)
     assert untouched.id not in {run.id for run in found.runs}

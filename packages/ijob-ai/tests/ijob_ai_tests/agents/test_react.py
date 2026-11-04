@@ -204,13 +204,14 @@ def claude_lm(engine: FakeAsyncEngine) -> dspy.LM:
     )
 
 
-def build(
+def build(  # noqa: PLR0913  # one knob of the agent per argument
     engine: FakeAsyncEngine,
     budget: Budget,
     run: AgentRun,
     *,
     max_iters: int = 8,
     tools: Sequence[Callable[..., Any]] = TOOLS,
+    timeout_s: float = 5,
 ) -> GuardedReAct:
     return GuardedReAct(
         Ask,
@@ -219,7 +220,7 @@ def build(
         lm=claude_lm(engine),
         provider=Provider.CLAUDE_SDK,
         budget=budget,
-        timeout_s=5,
+        timeout_s=timeout_s,
         task=Task.SOURCE_AGENT,
         task_version=SOURCE_AGENT_VERSION,
         run=run,
@@ -259,11 +260,78 @@ def test_cap_stops_mid_run() -> None:
 
 def test_unparseable_answer_ends_the_run() -> None:
     engine = FakeAsyncEngine([JUNK], cost=0.01)
+    budget = Budget(1.0)
 
     with pytest.raises(TaskOutputError):
-        asyncio.run(run_loop(build(engine, Budget(1.0), AgentRun())))
+        asyncio.run(run_loop(build(engine, budget, AgentRun())))
+
+    assert len(engine.requests) == 2
+    assert budget.spent == pytest.approx(0.02)
+
+
+def test_an_unparseable_answer_is_asked_for_again() -> None:
+    engine = FakeAsyncEngine([JUNK, *script(CALL_GOOD, CALL_FINISH)], cost=0.01)
+    budget = Budget(1.0)
+
+    prediction = asyncio.run(run_loop(build(engine, budget, AgentRun())))
+
+    assert prediction.answer == "done"
+    assert len(engine.requests) == 4
+    assert budget.spent == pytest.approx(0.04)
+
+
+def test_each_call_of_the_loop_gets_its_own_second_chance() -> None:
+    engine = FakeAsyncEngine(
+        [JUNK, CALL_GOOD, JUNK, CALL_FINISH, JUNK, EXTRACT], cost=0.01
+    )
+
+    prediction = asyncio.run(run_loop(build(engine, Budget(1.0), AgentRun())))
+
+    assert prediction.answer == "done"
+    assert len(engine.requests) == 6
+
+
+def test_no_second_chance_past_the_cap() -> None:
+    engine = FakeAsyncEngine([JUNK], cost=0.01)
+
+    with pytest.raises(CapReachedError):
+        asyncio.run(run_loop(build(engine, Budget(0.01), AgentRun())))
 
     assert len(engine.requests) == 1
+
+
+class _SlowAtFirst(FakeAsyncEngine):
+    """An engine whose first call outlasts any short timeout."""
+
+    def __init__(self, texts: Sequence[str]) -> None:
+        super().__init__(texts)
+        self._waited = False
+
+    @override
+    async def complete(self, request: Any) -> Any:
+        if not self._waited:
+            self._waited = True
+            await asyncio.sleep(5)
+        return await super().complete(request)
+
+
+def test_a_timed_out_call_is_made_again() -> None:
+    engine = _SlowAtFirst(script(CALL_FINISH))
+
+    prediction = asyncio.run(
+        run_loop(build(engine, Budget(1.0), AgentRun(), timeout_s=0.05))
+    )
+
+    assert prediction.answer == "done"
+
+
+def test_a_second_timeout_ends_the_run() -> None:
+    engine = FakeAsyncEngine(script(CALL_FINISH), delay_s=5)
+
+    with pytest.raises(ProviderFailedError):
+        asyncio.run(run_loop(build(engine, Budget(1.0), AgentRun(), timeout_s=0.05)))
+
+    assert len(engine.requests) == 2
 
 
 def test_unknown_tool_ends_the_run() -> None:
@@ -272,7 +340,7 @@ def test_unknown_tool_ends_the_run() -> None:
     with pytest.raises(TaskOutputError):
         asyncio.run(run_loop(build(engine, Budget(1.0), AgentRun())))
 
-    assert len(engine.requests) == 1
+    assert len(engine.requests) == 2
 
 
 def test_provider_failure_ends_the_run() -> None:

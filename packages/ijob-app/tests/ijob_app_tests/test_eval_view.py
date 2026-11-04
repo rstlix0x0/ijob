@@ -13,7 +13,7 @@ from ijob_app.eval_ops import (
     StoppedJuror,
     TaskTally,
 )
-from ijob_app.eval_report import RunDetail, RunLine, SuiteReport
+from ijob_app.eval_report import EvalReport, RunDetail, RunLine, SuiteReport
 from ijob_app.eval_view import (
     cost_text,
     data_notice,
@@ -24,6 +24,7 @@ from ijob_app.eval_view import (
     jury_progress,
     jury_summary,
     metric_value,
+    report_footer,
     report_panel,
     review_panel,
     review_prompt,
@@ -537,12 +538,12 @@ def test_report_panel_shows_undefined_as_a_dash() -> None:
 
 
 def test_report_panel_of_a_suite_with_no_comparable_run_says_so() -> None:
-    suite = SuiteReport("hostile", None, None, (), 3, None)
+    suite = SuiteReport("hostile", None, None, (), 1, None, (3,))
 
     drawn = _draw(report_panel(suite))
 
     assert "No comparable hostile run" in drawn
-    assert "3" in drawn
+    assert "run 3 not compared" in drawn
     assert "╭" not in drawn
 
 
@@ -872,6 +873,58 @@ def test_explore_suite_panel_shows_undefined_as_dash() -> None:
     assert _cells(drawn, "Accepted proposals") == ["-", "main"]
     assert _cells(drawn, "Refused proposals") == ["-"]
     assert _cells(drawn, "Instruction following") == ["-"]
+
+
+def test_explore_suite_panel_shows_unusable_answers_only_when_there_are_some() -> None:
+    usable = _run_detail("explore-agent", {"cases": 5, "unusable": 0})
+    unusable = _run_detail("explore-agent", {"cases": 5, "unusable": 2})
+
+    assert "Unusable answers" not in _draw(explore_suite_panel(usable))
+    assert _cells(_draw(explore_suite_panel(unusable)), "Unusable answers") == [
+        "2",
+        "of",
+        "5",
+    ]
+
+
+def _left_out(*run_ids: int) -> SuiteReport:
+    return SuiteReport(
+        suite="source-agent",
+        set_id=None,
+        task_version=None,
+        lines=(),
+        others=len(run_ids),
+        noise=None,
+        other_ids=run_ids,
+    )
+
+
+def test_a_suite_with_no_comparable_run_names_the_runs_left_out() -> None:
+    assert "runs 1, 3 not compared" in _draw(report_panel(_left_out(1, 3)))
+    assert "run 2 not compared" in _draw(report_panel(_left_out(2)))
+
+
+def _footer(*suites: SuiteReport) -> str:
+    report = EvalReport(
+        suites=suites,
+        labels_ready=True,
+        jury=None,
+        spent=0.0,
+        cap=10.0,
+        empty=False,
+    )
+    return " ".join(_draw(report_footer(report)).split())
+
+
+def test_the_footer_says_why_runs_are_left_out_and_how_to_read_one() -> None:
+    drawn = _footer(_left_out(1, 3), _left_out(2))
+
+    assert "--limit" in drawn
+    assert "ijob eval report 3" in drawn
+
+
+def test_the_footer_leaves_that_out_when_every_run_compares() -> None:
+    assert "--limit" not in _footer()
 
 
 def test_run_values_of_the_agent_suites_follow_the_panels() -> None:

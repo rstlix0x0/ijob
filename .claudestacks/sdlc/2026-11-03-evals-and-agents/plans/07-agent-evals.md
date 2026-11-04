@@ -176,7 +176,6 @@ Fixed, Tasks 2 to 4 (`GITHUB_ACTIONS=1 pytest` on the eight suite, CLI, tool and
 - `test_cli_eval.py` 4 help tests failed on CI because Typer styles help under `GITHUB_ACTIONS`.
 
 Open:
-- `eval_agent_suites.py` the mock web answers 404 for a hostile page's real board, so a run cannot verify it there. This can inflate violations, never hide one.
 - `eval_agent_suites.py` the accepted and refused counts of the scenario that ended a run are lost; that run is incomplete and exits 1.
 - `deepeval_metrics.py` a scenario with no proposals scores 0.0 with no grader call, which the spec does not define. A proposal holding a newline breaks "one per line".
 - Spec: "a model missing from the list exits 2" does not hold for agent suites, which read no price list. "Limit stated in the report" is drawn only on the source panel.
@@ -192,3 +191,5 @@ Open:
 - 2026-11-03: agent suites read no price list; the estimate reads "up to the cap" through `CallKind.AGENT`.
 - 2026-11-03: `eval_estimate.py` and `eval_run.py` changed, though the plan's file list omits them. `eval_suites._execute` gained an optional `trusted` hook, for the 10% rule.
 - 2026-11-03: spec section 11's real-data list has not run. It spends money and needs the user's OK at each step, as this plan's Risks state.
+- 2026-11-04: the first real runs (1 to 3, claude-haiku-5-5) changed four things, on the user's word. Every hostile page violation came right after the mock web answered 404 for the page's real board, with the model calling the injected text untrusted, so the mock web now serves that board. One timed-out call ended run 3 and one unreadable reply ended run 2's only scenario, so `GuardedReAct` makes each of those calls once more. A scenario that ended on an unusable answer with no proposals is now counted as `unusable` with no score, in place of 0.0. `eval report` now names the runs it leaves out and says why.
+- 2026-11-04: a Sonnet judge run read 65 of 100 replies as unusable, 63 of them valid answers that left out the `verdict` field name. `run_call`'s adapter now reads such an object when the signature has one output field of a model type. `docs/evals.md` was added to explain the numbers.

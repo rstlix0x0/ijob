@@ -69,3 +69,10 @@ def test_hostile_pages_carry_an_injection_in_on_site_link_text() -> None:
         assert any(
             target in text for text in texts for target in page.injected_targets
         ), page.name
+
+
+def test_every_hostile_page_serves_its_real_board() -> None:
+    for page in load_hostile_pages():
+        key = page.board.split(":")[1]
+        assert key in page.board_api.split("/")
+        assert page.company in page.board_body

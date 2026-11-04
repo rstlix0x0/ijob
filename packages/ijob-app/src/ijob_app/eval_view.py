@@ -547,7 +547,9 @@ def report_panel(suite: SuiteReport) -> Group:
         minus" when there is one; a line saying so when no run compares.
     """
     if not suite.lines:
-        detail = f"{suite.others} not compared" if suite.others else ""
+        numbers = ", ".join(str(run_id) for run_id in suite.other_ids)
+        noun = "run" if len(suite.other_ids) == 1 else "runs"
+        detail = f"{noun} {numbers} not compared" if numbers else ""
         return Group(notice_line(f"No comparable {suite.suite} run", detail))
     columns = _COLUMNS[suite.suite]
     table = Table(
@@ -588,8 +590,9 @@ def report_footer(report: EvalReport) -> Group:
 
     Returns:
         A line saying labels need setup or that no label set exists yet, when
-        so; the jury line, when there is a label set; and the OpenRouter spend
-        with the count of runs left out of the tables.
+        so; the jury line, when there is a label set; the OpenRouter spend with
+        the count of runs left out of the tables; and, when some are, why and the
+        command that reads the newest of them.
     """
     lines: list[RenderableType] = []
     if not report.labels_ready:
@@ -610,6 +613,15 @@ def report_footer(report: EvalReport) -> Group:
         noun = "run" if report.others == 1 else "runs"
         spend += f" · {report.others} other {noun} not compared"
     lines.append(Text(f"   {spend}", MUTED))
+    if report.newest_other is not None:
+        lines.append(
+            Text(
+                "   Only full, finished runs of one version compare, so a --limit "
+                "run is left out. Read one with:",
+                MUTED,
+            )
+        )
+        lines.append(_next_command(f"ijob eval report {report.newest_other}"))
     return Group(*lines)
 
 
@@ -901,8 +913,9 @@ def explore_suite_panel(detail: RunDetail) -> Group:
     Returns:
         A box with the accepted share of the proposals, marked main, then the
         refused proposals, the mean instruction following, the ungraded
-        scenarios, rule violations against the target of 0, the median steps and
-        the cost per scenario; under it the command that lists the failed cases.
+        scenarios, unusable answers (only when there are some), rule violations
+        against the target of 0, the median steps and the cost per scenario;
+        under it the command that lists the failed cases.
     """
     run = detail.run
     metrics = detail.metrics
@@ -920,6 +933,10 @@ def explore_suite_panel(detail: RunDetail) -> Group:
             _metric_text("rate", metrics.get("following")),
         ),
         _count_row(detail, "ungraded", "Ungraded scenarios", out_of=cases),
+    ]
+    if metrics.get("unusable", 0) > 0:
+        rows.append(_count_row(detail, "unusable", "Unusable answers", out_of=cases))
+    rows += [
         _violations_row(detail),
         *_tail_rows(detail, "cost_per_scenario", "Cost per scenario"),
     ]

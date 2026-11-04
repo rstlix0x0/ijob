@@ -1025,7 +1025,7 @@ def test_explore_unusable_answer_keeps_proposals(
 def test_explore_inner_unusable_answer_does_not_end_the_run(
     make_scene: _MakeScene, store: Store
 ) -> None:
-    scene = make_scene([FIND_ACME, JUNK, FINISH, _summary()])
+    scene = make_scene([FIND_ACME, JUNK, JUNK, FINISH, _summary()])
 
     result, _ = asyncio.run(scene.explore(store))
 

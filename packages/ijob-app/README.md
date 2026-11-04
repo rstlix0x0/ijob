@@ -14,7 +14,8 @@ ijob explore "Find fintech companies hiring in Tokyo"   # propose sources to add
 `[models].explore_agent`, or the one given with `--model`. Each shows what the agent
 did and what it cost, then asks before it adds anything; `--yes` answers for you, and
 without a terminal and without `--yes` they exit `1` before any call. An answer counts
-only if a tool verified it, and the agent's pages stay on the company's site.
+only if a tool verified it, and the agent's pages stay on the company's site. A reply
+that cannot be read and a call that times out are each tried once more.
 
 ## Evals
 
@@ -24,6 +25,8 @@ ijob eval review                       # settle the cases the jury split on
 ijob eval run <suite> [--model PROVIDER/MODEL] [--limit N] [--yes]
 ijob eval report [RUN] [--failures]    # the stored runs, or one run and its failures
 ```
+
+[`docs/evals.md`](../../docs/evals.md) explains what each suite measures and how to read its numbers.
 
 | Suite | Measures | Default model | `--limit` |
 |---|---|---|---|
@@ -40,6 +43,8 @@ cases are easy, since most board names are simple company slugs, so its score fl
 the agent. `explore-agent` runs five made-up instructions, each on an empty
 store so it reads none of your data, and has the `[models].eval_grader` model grade
 how well the proposals follow them. Neither agent suite sends your data anywhere.
+`eval_grader` must be a different model from the one under test, or the run stops with
+an error.
 
 A run that calls an OpenRouter model, the grader included, shows its estimate and asks
 first. An agent suite's estimate reads "up to the cap", because the smaller of

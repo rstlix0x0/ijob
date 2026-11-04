@@ -70,12 +70,14 @@ class Comparison:
         runs: The comparable runs, oldest first.
         others: The suite's runs left out: another set or task version, not
             complete, or limited.
+        other_ids: The numbers of those runs, oldest first.
     """
 
     suite: str
     task_version: str | None
     runs: tuple[EvalRun, ...]
     others: int
+    other_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +126,7 @@ class SuiteReport:
         others: Runs of the suite left out.
         noise: The "plus or minus" when two runs' main metrics differ by less
             than it, else `None`.
+        other_ids: The numbers of the runs left out, oldest first.
     """
 
     suite: str
@@ -132,6 +135,7 @@ class SuiteReport:
     lines: tuple[RunLine, ...]
     others: int
     noise: float | None
+    other_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +163,11 @@ class EvalReport:
     def others(self) -> int:
         """Runs left out of all the tables."""
         return sum(suite.others for suite in self.suites)
+
+    @property
+    def newest_other(self) -> int | None:
+        """The number of the newest run left out, or `None` when none is."""
+        return max((id_ for s in self.suites for id_ in s.other_ids), default=None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,10 +245,18 @@ def comparable_runs(
         run for run in scope if run.status is RunStatus.COMPLETE and not run.limited
     ]
     if not whole:
-        return Comparison(suite, None, (), len(ofsuite))
+        return Comparison(
+            suite, None, (), len(ofsuite), tuple(run.id for run in ofsuite)
+        )
     version = whole[-1].task_version
     same = tuple(run for run in whole if run.task_version == version)
-    return Comparison(suite, version, same, len(ofsuite) - len(same))
+    return Comparison(
+        suite,
+        version,
+        same,
+        len(ofsuite) - len(same),
+        tuple(run.id for run in ofsuite if run not in same),
+    )
 
 
 def current_set(
@@ -375,6 +392,7 @@ def build_report(
                 lines=lines,
                 others=found.others,
                 noise=_noise(suite, lines),
+                other_ids=found.other_ids,
             )
         )
     return EvalReport(

@@ -30,6 +30,7 @@ from ijob_ai.errors import (
     LlmError,
     ProviderFailedError,
     ProviderUnavailableError,
+    TaskOutputError,
 )
 from ijob_ai.llm.budget import Budget
 from ijob_ai.llm.call import run_call
@@ -241,6 +242,13 @@ class _GuardedTool:
         return f"could not run {self._name}; it takes: {takes}"
 
 
+def _worth_repeating(error: LlmError) -> bool:
+    """Tell whether a call may succeed if made again: a bad answer or a timeout."""
+    return isinstance(error, TaskOutputError) or isinstance(
+        error.__cause__, TimeoutError
+    )
+
+
 class GuardedReAct(dspy.ReAct):  # type: ignore[misc]  # dspy exports it untyped
     """`dspy.ReAct` run under a budget, a stored stop and the call boundary.
 
@@ -313,7 +321,11 @@ class GuardedReAct(dspy.ReAct):  # type: ignore[misc]  # dspy exports it untyped
     async def _async_call_with_potential_trajectory_truncation(
         self, module: Any, trajectory: dict[str, Any], **input_args: Any
     ) -> dspy.Prediction:
-        """Make one model call of the loop through `run_call`.
+        """Make one model call of the loop, once more if it can be worth it.
+
+        An answer that cannot be read and a call that timed out are each given
+        one more attempt, which is metered, traced and held to the budget like
+        the first. Any other failure ends the call at once.
 
         ReAct's retry that truncates the trajectory is not used, so a context
         overflow reaches the caller as a provider failure.
@@ -329,8 +341,23 @@ class GuardedReAct(dspy.ReAct):  # type: ignore[misc]  # dspy exports it untyped
         Raises:
             Exception: The run's stored stop, if there is one.
             CapReachedError: The budget has no room for another call.
-            LlmError: Any error `run_call` raises.
+            LlmError: Any other error `run_call` raises; for a repeated failure,
+                that of the second attempt.
         """
+        try:
+            return await self._attempt(module, trajectory, input_args)
+        except (TaskOutputError, ProviderFailedError) as error:
+            if not _worth_repeating(error):
+                raise
+        return await self._attempt(module, trajectory, input_args)
+
+    async def _attempt(
+        self,
+        module: dspy.Predict,
+        trajectory: dict[str, Any],
+        input_args: Mapping[str, Any],
+    ) -> dspy.Prediction:
+        """Honour the stored stop and the budget, then make the call."""
         if self._run.stop is not None:
             raise self._run.stop
         if not self._budget.try_start():

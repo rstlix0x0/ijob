@@ -17,10 +17,12 @@ from ijob_ai.errors import (
     TaskOutputError,
 )
 from ijob_ai.llm.budget import Budget
-from ijob_ai.llm.call import _translate, run_call
+from ijob_ai.llm.call import _ForgivingJSONAdapter, _translate, run_call
 from ijob_ai.llm.reference import Provider
 from ijob_ai.llm.registry import prepare_environment
 from ijob_ai.llm.settings import Task
+from ijob_ai.tasks.outputs import VerdictOut
+from ijob_ai.tasks.signatures import JudgeSig, ScoreSig
 from ijob_ai.tracing import attributes
 from ijob_ai.tracing.setup import Tracing, operation_trace
 from ijob_ai.tracing.sqlite_exporter import SqliteSpanExporter
@@ -541,3 +543,87 @@ def test_translate_unrecognised_failure_is_not_reported_as_timeout() -> None:
     assert isinstance(translated, ProviderFailedError)
     assert "timed out" not in str(translated)
     assert "KeyError" in str(translated)
+
+
+_FLAT_VERDICT = '{"keep": true, "reason": "fits", "rule": null}'
+_FLAT_SCORE = '{"score": 70, "reasons": ["fits"]}'
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        _FLAT_VERDICT,
+        f"```json\n{_FLAT_VERDICT}\n```",
+        f"Here is the verdict.\n\n{_FLAT_VERDICT}",
+        f'{{"verdict": {_FLAT_VERDICT}}}',
+    ],
+)
+def test_a_verdict_reads_with_or_without_its_field_name(reply: str) -> None:
+    parsed = _ForgivingJSONAdapter().parse(JudgeSig, reply)
+
+    assert parsed["verdict"].keep is True
+    assert parsed["verdict"].reason == "fits"
+
+
+@pytest.mark.parametrize("reply", [_FLAT_SCORE, f'{{"score": {_FLAT_SCORE}}}'])
+def test_a_score_reads_with_or_without_its_field_name(reply: str) -> None:
+    parsed = _ForgivingJSONAdapter().parse(ScoreSig, reply)
+
+    assert parsed["score"].score == 70
+    assert parsed["score"].reasons == ["fits"]
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        JUNK,
+        '{"reason": "fits"}',
+        '{"keep": true, "reason": "fits", "rule": 0}',
+        '{"keep": true, "reason": "fits", "rule": null, "extra": 1}',
+        "[1, 2]",
+    ],
+)
+def test_a_flat_answer_that_does_not_fit_is_still_refused(reply: str) -> None:
+    with pytest.raises(AdapterParseError):
+        _ForgivingJSONAdapter().parse(JudgeSig, reply)
+
+
+def test_a_signature_of_several_answers_needs_their_field_names() -> None:
+    class _Two(dspy.Signature):  # type: ignore[misc]
+        """Answer twice."""
+
+        first: VerdictOut = dspy.OutputField()
+        second: VerdictOut = dspy.OutputField()
+
+    with pytest.raises(AdapterParseError):
+        _ForgivingJSONAdapter().parse(_Two, _FLAT_VERDICT)
+
+
+def test_an_answer_of_plain_text_needs_its_field_name() -> None:
+    class _Text(dspy.Signature):  # type: ignore[misc]
+        """Answer in words."""
+
+        text: str = dspy.OutputField()
+
+    with pytest.raises(AdapterParseError):
+        _ForgivingJSONAdapter().parse(_Text, '{"other": 1}')
+
+
+def test_a_flat_answer_passes_the_call_boundary() -> None:
+    engine = FakeAsyncEngine([_FLAT_VERDICT])
+
+    prediction = asyncio.run(
+        run_call(
+            dspy.Predict(JudgeSig),
+            claude_lm(engine),
+            inputs={"posting": "AAA"},
+            provider=Provider.CLAUDE_SDK,
+            budget=Budget(1.0),
+            timeout_s=5,
+            task=Task.JUDGE,
+            task_version="v1",
+            posting_id=PostingId(7),
+        )
+    )
+
+    assert prediction.verdict.keep is True

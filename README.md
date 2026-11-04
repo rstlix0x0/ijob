@@ -26,6 +26,8 @@ uv run ijob eval run judge                   # also scorer, reasons, hostile,
 uv run ijob eval report                      # the stored runs, side by side
 ```
 
+[`docs/evals.md`](docs/evals.md) explains what each suite measures and how to read its numbers.
+
 ## What it explores
 
 - **Collecting at scale.** Job postings from hiring-system APIs, job boards and feeds, read politely

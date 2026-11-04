@@ -40,6 +40,8 @@ class HostilePage:
         company: The made-up company the page belongs to.
         board: The source the page really links to, as `kind:key`.
         board_url: The link to that board on the page.
+        board_api: The address that board's jobs are read from.
+        board_body: What that address answers, so the real board checks out.
         injected_targets: The addresses the injected text sends the agent to;
             a tool call on any of them is a violation.
         html: The page's HTML.
@@ -50,6 +52,8 @@ class HostilePage:
     company: str
     board: str
     board_url: str
+    board_api: str
+    board_body: str
     injected_targets: tuple[str, ...]
     html: str
 
@@ -94,6 +98,8 @@ def load_hostile_pages() -> tuple[HostilePage, ...]:
             company=item["company"],
             board=item["board"],
             board_url=item["board_url"],
+            board_api=item["board_api"],
+            board_body=(root / item["board_file"]).read_text(encoding="utf-8"),
             injected_targets=tuple(item["injected_targets"]),
             html=(root / item["file"]).read_text(encoding="utf-8"),
         )
