@@ -5,6 +5,7 @@ command believes it is on a terminal, and `assert_tidy` fails on anything that
 would look raw there. A new command belongs in this file.
 """
 
+import json
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -447,6 +448,58 @@ def test_reanalyze_without_a_recipe(bench: _Bench) -> None:
     assert bench.run("sources", "reanalyze", str(_REF), "--yes").exit_code == 2
 
 
+def test_find_without_a_model(bench: _Bench) -> None:
+    result = bench.run("sources", "find", "Acme", "--yes")
+
+    assert result.exit_code == 1
+    assert "source_agent" in result.stderr
+
+
+def test_find_that_finds_nothing(bench: _Bench) -> None:
+    finish = json.dumps({"next_tool_name": "finish", "next_tool_args": {}})
+    answer = json.dumps({"reasoning": "none fits", "source": "none"})
+
+    result = bench.run(
+        "sources",
+        "find",
+        "Acme",
+        "--model",
+        MADE_UP_CLAUDE,
+        "--yes",
+        answers=[finish, answer],
+    )
+
+    assert result.exit_code == 1
+    assert "No source found for Acme" in result.stderr
+    assert "ijob sources add-url" in result.stderr
+
+
+def test_explore_without_a_model(bench: _Bench) -> None:
+    result = bench.run("explore", "Find fintech companies in Tokyo", "--yes")
+
+    assert result.exit_code == 1
+    assert "explore_agent" in result.stderr
+
+
+def test_explore_that_proposes_nothing(bench: _Bench) -> None:
+    finish = json.dumps(
+        {"next_thought": "done", "next_tool_name": "finish", "next_tool_args": {}}
+    )
+    summary = json.dumps({"reasoning": "nothing fits", "summary": "no luck"})
+
+    result = bench.run(
+        "explore",
+        "Find fintech companies in Tokyo",
+        "--model",
+        MADE_UP_CLAUDE,
+        "--yes",
+        answers=[finish, summary],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "no sources proposed" in result.stdout
+
+
 def test_cv_show_and_profile(bench: _Bench) -> None:
     empty = bench.run("cv", "show")
     bench.store_cv()
@@ -496,6 +549,42 @@ def test_traces_list_show_prune(bench: _Bench) -> None:
     assert "Pruned" in pruned.stdout
 
 
+def test_eval_label_without_a_jury_gives_the_setting(bench: _Bench) -> None:
+    result = bench.run("eval", "label", "--yes")
+
+    assert result.exit_code == 2
+    assert "eval.jury" in result.stderr
+
+
+def test_eval_label_with_too_few_postings_says_how_many(bench: _Bench) -> None:
+    with bench.home.config.open("a", encoding="utf-8") as handle:
+        handle.write(f'\n[eval]\njury = ["{MADE_UP_CLAUDE}", "claude-sdk/other"]\n')
+    bench.store_rules()
+    bench.store_cv()
+
+    result = bench.run("eval", "label", "--yes")
+
+    assert result.exit_code == 1
+    assert "only 2 postings" in result.stderr
+
+
+def test_eval_review_without_a_jury_gives_the_setting(bench: _Bench) -> None:
+    result = bench.run("eval", "review")
+
+    assert result.exit_code == 1
+    assert "eval.jury" in result.stderr
+
+
+def test_eval_review_without_rules_names_the_fix(bench: _Bench) -> None:
+    with bench.home.config.open("a", encoding="utf-8") as handle:
+        handle.write(f'\n[eval]\njury = ["{MADE_UP_CLAUDE}", "claude-sdk/other"]\n')
+
+    result = bench.run("eval", "review")
+
+    assert result.exit_code == 1
+    assert "ijob instructions set" in result.stderr
+
+
 def test_the_guard_catches_raw_output(
     bench: _Bench, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -543,6 +632,30 @@ def _command_names(group: object) -> Iterator[str]:
     for name, command in getattr(group, "commands", {}).items():
         yield name
         yield from _command_names(command)
+
+
+def test_eval_report_on_an_empty_store_says_no_run_exists(bench: _Bench) -> None:
+    result = bench.run("eval", "report")
+
+    assert result.exit_code == 0
+    assert "No eval run yet" in result.stdout
+
+
+def test_eval_run_hostile_draws_its_pairs(bench: _Bench) -> None:
+    answers = [verdict_answer()] * 10 + [score_answer(50)] * 10
+
+    result = bench.run("eval", "run", "hostile", answers=answers)
+
+    assert result.exit_code == 0, result.output
+    assert "Hostile · made-up-model · 10 pairs · run 1" in result.stdout
+    assert "No attack changed the answer" in result.stdout
+
+
+def test_eval_run_hostile_refuses_a_limit(bench: _Bench) -> None:
+    result = bench.run("eval", "run", "hostile", "--limit", "5")
+
+    assert result.exit_code == 2
+    assert "limit" in result.stderr
 
 
 def test_every_command_is_checked_here(bench: _Bench) -> None:

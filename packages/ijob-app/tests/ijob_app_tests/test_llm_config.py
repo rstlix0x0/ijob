@@ -4,8 +4,12 @@ from pathlib import Path
 
 import pytest
 from ijob_ai.llm.reference import ModelRef, Provider
-from ijob_ai.llm.settings import LlmSettings, Task, TracingSettings
-from ijob_app.llm_config import read_llm_settings, read_tracing_settings
+from ijob_ai.llm.settings import EvalSettings, LlmSettings, Task, TracingSettings
+from ijob_app.llm_config import (
+    read_eval_settings,
+    read_llm_settings,
+    read_tracing_settings,
+)
 from ijob_core.errors import InvalidValueError
 
 
@@ -56,6 +60,24 @@ def test_models_accepts_source_recipe(tmp_path: Path) -> None:
 
     assert dict(llm.models) == {
         Task.SOURCE_RECIPE: ModelRef(Provider.CLAUDE_SDK, "claude-sonnet-5-5")
+    }
+
+
+def test_new_tasks_are_configurable(tmp_path: Path) -> None:
+    path = _config(
+        tmp_path,
+        "[models]\n"
+        'source_agent = "claude-sdk/claude-sonnet-5-5"\n'
+        'explore_agent = "claude-sdk/claude-sonnet-5-5"\n'
+        'eval_grader = "openrouter/openai/gpt-6.1-sol"\n',
+    )
+
+    llm = read_llm_settings(path)
+
+    assert dict(llm.models) == {
+        Task.SOURCE_AGENT: ModelRef(Provider.CLAUDE_SDK, "claude-sonnet-5-5"),
+        Task.EXPLORE_AGENT: ModelRef(Provider.CLAUDE_SDK, "claude-sonnet-5-5"),
+        Task.EVAL_GRADER: ModelRef(Provider.OPENROUTER, "openai/gpt-6.1-sol"),
     }
 
 
@@ -205,6 +227,9 @@ _NEW_KEYS = (
     "scorer",
     "source_recipe",
     "job_extract",
+    "source_agent",
+    "explore_agent",
+    "eval_grader",
     "[llm]",
     "max_cost_usd",
     "concurrency",
@@ -214,6 +239,9 @@ _NEW_KEYS = (
     "[tracing]",
     "max_size_mb",
     "langfuse_endpoint",
+    "[eval]",
+    "jury",
+    "total_cost_usd",
 )
 
 
@@ -228,6 +256,7 @@ def test_template_parses_and_yields_defaults(tmp_path: Path) -> None:
     assert tomllib.loads(path.read_text(encoding="utf-8")) == {}
     assert read_llm_settings(path) == LlmSettings(config_path=path)
     assert read_tracing_settings(path) == TracingSettings()
+    assert read_eval_settings(path) == EvalSettings()
 
 
 def test_template_mentions_every_new_key() -> None:
@@ -251,7 +280,93 @@ def test_template_new_settings_are_valid_once_uncommented(tmp_path: Path) -> Non
 
     llm = read_llm_settings(enabled)
     tracing = read_tracing_settings(enabled)
+    evals = read_eval_settings(enabled)
 
     assert set(llm.models) == set(Task)
+    assert evals.jury is not None
+    assert 2 <= len(evals.jury) <= 5
     assert llm.cli_path == Path("/usr/local/bin/claude")
     assert tracing.langfuse_endpoint == "http://localhost:3000"
+
+
+_JURY = (
+    '"claude-sdk/claude-opus-5-5", '
+    '"openrouter/openai/gpt-6.1-sol", '
+    '"openrouter/google/gemini-4-argon"'
+)
+
+
+def test_eval_defaults(tmp_path: Path) -> None:
+    for path in (
+        tmp_path / "missing.toml",
+        _config(tmp_path, "[filters]\nrequire_salary = false\n"),
+    ):
+        evals = read_eval_settings(path)
+
+        assert evals.jury is None
+        assert (evals.max_cost_usd, evals.total_cost_usd) == (4, 10)
+
+
+def test_eval_settings_parsed(tmp_path: Path) -> None:
+    path = _config(
+        tmp_path,
+        f"[eval]\njury = [{_JURY}]\nmax_cost_usd = 2.5\ntotal_cost_usd = 100\n",
+    )
+
+    evals = read_eval_settings(path)
+
+    assert evals.jury == (
+        ModelRef(Provider.CLAUDE_SDK, "claude-opus-5-5"),
+        ModelRef(Provider.OPENROUTER, "openai/gpt-6.1-sol"),
+        ModelRef(Provider.OPENROUTER, "google/gemini-4-argon"),
+    )
+    assert (evals.max_cost_usd, evals.total_cost_usd) == (2.5, 100)
+
+
+def test_eval_unknown_key_is_refused(tmp_path: Path) -> None:
+    path = _config(tmp_path, "[eval]\nfoo = 1\n")
+
+    with pytest.raises(InvalidValueError) as raised:
+        read_eval_settings(path)
+
+    assert raised.value.field == "eval.foo"
+
+
+@pytest.mark.parametrize(
+    "jury",
+    [
+        '["claude-sdk/claude-opus-5-5"]',
+        "[" + ", ".join(f'"claude-sdk/m{i}"' for i in range(6)) + "]",
+        '["claude-sdk/m", "claude-sdk/m"]',
+        '"claude-sdk/m"',
+        "[1, 2]",
+        "[]",
+    ],
+)
+def test_jury_size_and_duplicates_are_refused(tmp_path: Path, jury: str) -> None:
+    path = _config(tmp_path, f"[eval]\njury = {jury}\n")
+
+    with pytest.raises(InvalidValueError) as raised:
+        read_eval_settings(path)
+
+    assert raised.value.field == "eval.jury"
+
+
+def test_jury_bad_reference_is_refused(tmp_path: Path) -> None:
+    path = _config(tmp_path, '[eval]\njury = ["claude-sdk/m", "nope/m"]\n')
+
+    with pytest.raises(InvalidValueError) as raised:
+        read_eval_settings(path)
+
+    assert raised.value.field == "eval.jury"
+
+
+@pytest.mark.parametrize("key", ["max_cost_usd", "total_cost_usd"])
+@pytest.mark.parametrize("value", ["0", "-1", "101", '"4"', "true"])
+def test_eval_cost_ranges(tmp_path: Path, key: str, value: str) -> None:
+    path = _config(tmp_path, f"[eval]\n{key} = {value}\n")
+
+    with pytest.raises(InvalidValueError) as raised:
+        read_eval_settings(path)
+
+    assert raised.value.field == f"eval.{key}"

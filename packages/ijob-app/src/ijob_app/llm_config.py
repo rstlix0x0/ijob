@@ -1,9 +1,9 @@
-"""LLM and tracing settings read from the user's config file.
+"""LLM, tracing and eval settings read from the user's config file.
 
-The `[models]`, `[llm]`, `[providers.claude-sdk]` and `[tracing]` tables
-become `LlmSettings` and `TracingSettings`. A missing file or table gives the
-defaults; an unknown key or an out-of-range value raises `InvalidValueError`
-naming the key.
+The `[models]`, `[llm]`, `[providers.claude-sdk]`, `[tracing]` and `[eval]`
+tables become `LlmSettings`, `TracingSettings` and `EvalSettings`. A missing
+file or table gives the defaults; an unknown key or an out-of-range value
+raises `InvalidValueError` naming the key.
 """
 
 import tomllib
@@ -12,7 +12,7 @@ from typing import Final
 from urllib.parse import urlsplit
 
 from ijob_ai.llm.reference import ModelRef, parse_model_ref
-from ijob_ai.llm.settings import LlmSettings, Task, TracingSettings
+from ijob_ai.llm.settings import EvalSettings, LlmSettings, Task, TracingSettings
 from ijob_core.errors import InvalidValueError
 
 type _Table = dict[str, object]
@@ -21,6 +21,8 @@ _LLM_KEYS: Final = frozenset({"max_cost_usd", "concurrency", "timeout_s"})
 _CLAUDE_SDK: Final = "claude-sdk"
 _CLAUDE_SDK_KEYS: Final = frozenset({"cli_path"})
 _TRACING_KEYS: Final = frozenset({"max_size_mb", "langfuse_endpoint"})
+_EVAL_KEYS: Final = frozenset({"jury", "max_cost_usd", "total_cost_usd"})
+_JURY_SIZE: Final = range(2, 6)
 _LOCAL_HOSTS: Final = frozenset({"localhost", "127.0.0.1", "::1"})
 _MAX_COST_USD: Final = 100
 _CONCURRENCY: Final = range(1, 17)
@@ -96,6 +98,35 @@ def read_tracing_settings(config_path: Path) -> TracingSettings:
     )
 
 
+def read_eval_settings(config_path: Path) -> EvalSettings:
+    """Read the jury and spending caps of the eval commands.
+
+    Args:
+        config_path: The user's config file; it need not exist.
+
+    Returns:
+        The settings; an absent jury reads as None, and absent caps as 4 and
+        10 US dollars.
+
+    Raises:
+        InvalidValueError: If the file cannot be read or parsed, the table
+            holds an unknown key, the jury is not two to five different valid
+            model references, or a cap is not above 0 and at most 100.
+    """
+    table = _section(_read(config_path), "eval")
+    _only_keys(table, _EVAL_KEYS, "eval")
+    defaults = EvalSettings()
+    return EvalSettings(
+        jury=_jury(table.get("jury")),
+        max_cost_usd=_cost(
+            table.get("max_cost_usd"), "eval.max_cost_usd", defaults.max_cost_usd
+        ),
+        total_cost_usd=_cost(
+            table.get("total_cost_usd"), "eval.total_cost_usd", defaults.total_cost_usd
+        ),
+    )
+
+
 def _read(path: Path) -> _Table:
     """Read the config file; an absent file reads as empty."""
     try:
@@ -142,7 +173,11 @@ def _models(table: _Table) -> dict[Task, ModelRef]:
 
 def _max_cost(value: object, default: float) -> float:
     """Read `[llm].max_cost_usd`: a number above 0 and at most 100."""
-    key = "llm.max_cost_usd"
+    return _cost(value, "llm.max_cost_usd", default)
+
+
+def _cost(value: object, key: str, default: float) -> float:
+    """Read a spending cap: a number above 0 and at most 100."""
     if value is None:
         return default
     if isinstance(value, bool) or not isinstance(value, int | float):
@@ -150,6 +185,30 @@ def _max_cost(value: object, default: float) -> float:
     if not 0 < value <= _MAX_COST_USD:
         raise InvalidValueError(key, f"{value!r} is not above 0 and at most 100")
     return float(value)
+
+
+def _jury(value: object) -> tuple[ModelRef, ...] | None:
+    """Read `[eval].jury`: two to five different model references."""
+    key = "eval.jury"
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise InvalidValueError(key, f"{value!r} is not a list")
+    if len(value) not in _JURY_SIZE:
+        raise InvalidValueError(
+            key,
+            f"{len(value)} entries; use between {_JURY_SIZE.start} and "
+            f"{_JURY_SIZE.stop - 1}",
+        )
+    jury: list[ModelRef] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise InvalidValueError(key, f"{item!r} is not a string")
+        ref = parse_model_ref(item, key)
+        if ref in jury:
+            raise InvalidValueError(key, f"{item!r} appears twice")
+        jury.append(ref)
+    return tuple(jury)
 
 
 def _bounded_int(value: object, key: str, allowed: range, default: int) -> int:

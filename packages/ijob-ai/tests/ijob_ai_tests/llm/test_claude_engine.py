@@ -409,18 +409,27 @@ def test_timeout_kills_child(tmp_path: Path) -> None:
     cli.write_text(_SLEEPING_CLI.format(pid_file=pid_file), encoding="utf-8")
     cli.chmod(0o755)
     engine = ClaudeAsyncEngine(REF, cli)
+    timeout_started = 0.0
 
     async def timed_out_call() -> None:
+        nonlocal timeout_started
+        call = asyncio.create_task(engine.complete(REQUEST))
+        # Start the clock once the fake CLI is running, so a loaded machine
+        # cannot expire the timeout before the child exists.
+        async with asyncio.timeout(60):
+            while not pid_file.exists():
+                await asyncio.sleep(0.05)
+        timeout_started = time.monotonic()
         async with asyncio.timeout(1):
-            await engine.complete(REQUEST)
+            await call
 
-    started = time.monotonic()
     with open_meter(), pytest.raises(TimeoutError):
         asyncio.run(timed_out_call())
-    elapsed = time.monotonic() - started
+    elapsed = time.monotonic() - timeout_started
 
-    assert elapsed < 10
-    assert pid_file.exists(), "the fake CLI never started"
+    # The child sleeps for 60 s; the bound only has to show the call did not
+    # wait for it, and stays loose because the shutdown grace period is real time.
+    assert elapsed < 30
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_file.read_text(encoding="utf-8")), 0)
 

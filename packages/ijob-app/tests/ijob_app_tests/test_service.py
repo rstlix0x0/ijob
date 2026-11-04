@@ -15,8 +15,13 @@ from typing import Any, Protocol
 
 import httpx
 import pytest
-from ijob_ai.errors import NoCvError
+from ijob_ai.errors import MissingModelError, NoCvError
+from ijob_ai.llm.reference import parse_model_ref
+from ijob_app.agent_ops import FoundSource, found_of
 from ijob_app.config import FilterFlags, FilterLayers, read_filter_layers
+from ijob_app.eval_estimate import SUBSCRIPTION, UP_TO_CAP
+from ijob_app.eval_run import RunProgress
+from ijob_app.eval_suites import Suite
 from ijob_app.home import IjobHome
 from ijob_app.llm_ops import (
     STATUS_TEXT,
@@ -41,6 +46,7 @@ from ijob_app.service import (
     open_service,
 )
 from ijob_core.countries import CountryCode
+from ijob_core.eval_records import RunStatus
 from ijob_core.filters import FilterSpec
 from ijob_core.model import (
     ExternalId,
@@ -87,6 +93,7 @@ from .llm_fakes import (
     write_fake_cli,
     write_llm_config,
 )
+from .test_eval_agent_suites import _reading_scripts, _ScriptedEngine
 
 _FIXTURES = (
     Path(__file__).parents[3]
@@ -2305,3 +2312,332 @@ def test_refresh_reports_progress_from_zero_to_all(opener: _Opener) -> None:
         FetchProgress(total=1, done=0, failed=0),
         FetchProgress(total=1, done=1, failed=0),
     ]
+
+
+_FOUND = parse_source_ref("greenhouse:tailscale-test")
+_TRY_TAILSCALE = json.dumps(
+    {
+        "next_thought": "look",
+        "next_tool_name": "try_board",
+        "next_tool_args": {"kind": "greenhouse", "key": "tailscale-test"},
+    }
+)
+_FINISH = json.dumps(
+    {"next_thought": "done", "next_tool_name": "finish", "next_tool_args": {}}
+)
+_TAILSCALE_ANSWER = json.dumps(
+    {"reasoning": "because", "source": "greenhouse:tailscale-test"}
+)
+
+
+class _AgentOpener(Protocol):
+    def __call__(
+        self, engines: FakeEngines, handler: _Handler | None = None
+    ) -> AbstractContextManager[Service]: ...
+
+
+@pytest.fixture
+def agent_opener(
+    tmp_path: Path,
+    home: IjobHome,
+    clock: Callable[[], datetime],
+    client_factory_for: _ClientFactoryBuilder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> _AgentOpener:
+    """Open a service whose agent fake engines answer, over a Greenhouse board.
+
+    A handler replaces the Greenhouse board as the web the service reads.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for name in (
+        "LITELLM_MODEL_COST_MAP_URL",
+        "OPENROUTER_API_BASE",
+        "OPENROUTER_BASE_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    cli = write_fake_cli(tmp_path / "bin")
+    home.root.mkdir(parents=True, exist_ok=True)
+    home.config.write_text(
+        f'[models]\nsource_agent = "{MADE_UP_CLAUDE}"\n'
+        f'explore_agent = "{MADE_UP_CLAUDE}"\n\n[llm]\nconcurrency = 1\n\n'
+        f'[providers.claude-sdk]\ncli_path = "{cli.path}"\n',
+        encoding="utf-8",
+    )
+
+    @contextmanager
+    def open_with(
+        engines: FakeEngines, handler: _Handler | None = None
+    ) -> Iterator[Service]:
+        with open_service(
+            home,
+            tmp_path / "ijob.db",
+            client_factory_for(handler or _serving()),
+            now=clock,
+            llm=LlmOptions(config_path=home.config, engines=engines),
+            resolver=_Resolver(),
+        ) as service:
+            yield service
+
+    return open_with
+
+
+def test_find_source_offers_a_board_and_add_found_stores_it(
+    agent_opener: _AgentOpener,
+) -> None:
+    engines = FakeEngines(FakeAsyncEngine([_TRY_TAILSCALE, _FINISH, _TAILSCALE_ANSWER]))
+
+    with agent_opener(engines) as service:
+        result, report = asyncio.run(service.find_source("Tailscale"))
+        assert result.found is not None
+        row = asyncio.run(service.add_found(result.found))
+
+    assert result.found.ref == _FOUND
+    assert result.found.known is False
+    assert result.stop is None
+    assert report.done == 1
+    assert row.ref == _FOUND
+    assert row.company == "Tailscale"
+
+
+def test_find_source_passes_the_cost_listener_through(
+    agent_opener: _AgentOpener,
+) -> None:
+    engines = FakeEngines(FakeAsyncEngine([_TRY_TAILSCALE, _FINISH, _TAILSCALE_ANSWER]))
+    costs: list[float] = []
+
+    with agent_opener(engines) as service:
+        asyncio.run(service.find_source("Tailscale", on_cost=costs.append))
+
+    assert len(costs) == 2
+    assert costs == sorted(costs)
+    assert all(cost > 0 for cost in costs)
+
+
+def test_find_source_without_a_model_names_the_key(
+    agent_opener: _AgentOpener, home: IjobHome
+) -> None:
+    home.config.write_text("", encoding="utf-8")
+    engines = FakeEngines(FakeAsyncEngine([_FINISH]))
+
+    with agent_opener(engines) as service, pytest.raises(MissingModelError):
+        asyncio.run(service.find_source("Tailscale"))
+
+    assert engines.engine.requests == []
+
+
+def test_explore_proposes_a_board_and_add_found_stores_it(
+    agent_opener: _AgentOpener,
+) -> None:
+    find = json.dumps(
+        {
+            "next_thought": "look",
+            "next_tool_name": "find_source",
+            "next_tool_args": {"company": "Tailscale"},
+        }
+    )
+    propose = json.dumps(
+        {
+            "next_thought": "good",
+            "next_tool_name": "propose",
+            "next_tool_args": {"ref": "greenhouse:tailscale-test", "why": "fits"},
+        }
+    )
+    summary = json.dumps({"reasoning": "because", "summary": "found one"})
+    texts = [
+        find,
+        _TRY_TAILSCALE,
+        _FINISH,
+        _TAILSCALE_ANSWER,
+        propose,
+        _FINISH,
+        summary,
+    ]
+    seen: list[str] = []
+
+    with agent_opener(FakeEngines(FakeAsyncEngine(texts))) as service:
+        result, report = asyncio.run(
+            service.explore(
+                "Find companies like Tailscale",
+                on_step=lambda step: seen.append(step.tool),
+            )
+        )
+        [proposal] = result.proposals
+        row = asyncio.run(service.add_found(found_of(proposal)))
+
+    assert proposal.source.ref == _FOUND
+    assert result.stop is None
+    assert seen == ["find_source", "propose", "finish"]
+    assert report.done == 1
+    assert row.ref == _FOUND
+    assert row.company == "Tailscale"
+
+
+def test_explore_passes_the_cost_listener_through(
+    agent_opener: _AgentOpener,
+) -> None:
+    summary = json.dumps({"reasoning": "because", "summary": "nothing"})
+    engines = FakeEngines(FakeAsyncEngine([_FINISH, summary]))
+    costs: list[float] = []
+
+    with agent_opener(engines) as service:
+        asyncio.run(service.explore("Find companies", on_cost=costs.append))
+
+    assert len(costs) == 1
+    assert costs[0] > 0
+
+
+def test_explore_without_a_model_names_the_key(
+    agent_opener: _AgentOpener, home: IjobHome
+) -> None:
+    home.config.write_text("", encoding="utf-8")
+    engines = FakeEngines(FakeAsyncEngine([_FINISH]))
+
+    with (
+        agent_opener(engines) as service,
+        pytest.raises(MissingModelError, match="explore_agent"),
+    ):
+        asyncio.run(service.explore("Find banks"))
+
+    assert engines.engine.requests == []
+
+
+def test_eval_run_agents_runs_the_source_suite_over_the_service_clients(
+    agent_opener: _LlmOpener,
+) -> None:
+    nothing = [_FINISH, json.dumps({"reasoning": "because", "source": "none"})]
+    engines = FakeEngines(_ScriptedEngine(_reading_scripts(), default=nothing))
+    seen: list[RunProgress] = []
+
+    with agent_opener(engines) as service:
+        offer = asyncio.run(
+            service.eval_prepare_run(Suite.SOURCE_AGENT, model=None, limit=1)
+        )
+        report = asyncio.run(service.eval_run_agents(offer, on_progress=seen.append))
+        runs = service.eval_run_detail(report.run_id)
+
+    assert offer.plan.sends_personal_data is False
+    assert offer.estimate == SUBSCRIPTION
+    assert report.suite is Suite.SOURCE_AGENT
+    assert report.status is RunStatus.COMPLETE
+    assert report.metrics["cases"] == 1
+    assert report.metrics["nothing"] == 1
+    assert report.metrics["hostile_pages"] == 3
+    assert runs.run.limited is True
+    assert [update.total for update in seen] == [4, 4, 4, 4]
+    assert [update.done for update in seen] == [1, 2, 3, 4]
+
+
+def test_eval_run_agents_runs_the_explore_suite_and_leaves_the_sources_alone(
+    agent_opener: _LlmOpener, home: IjobHome
+) -> None:
+    home.config.write_text(
+        home.config.read_text(encoding="utf-8").replace(
+            "[models]\n", '[models]\neval_grader = "claude-sdk/made-up-grader"\n'
+        ),
+        encoding="utf-8",
+    )
+    summary = json.dumps({"reasoning": "because", "summary": "nothing"})
+    engines = FakeEngines(FakeAsyncEngine([_FINISH, summary]))
+
+    with agent_opener(engines) as service:
+        before = service.sources()
+        offer = asyncio.run(
+            service.eval_prepare_run(Suite.EXPLORE_AGENT, model=None, limit=1)
+        )
+        report = asyncio.run(service.eval_run_agents(offer))
+        after = service.sources()
+
+    assert offer.plan.callers == (
+        parse_model_ref(MADE_UP_CLAUDE, "model"),
+        parse_model_ref("claude-sdk/made-up-grader", "model"),
+    )
+    assert report.suite is Suite.EXPLORE_AGENT
+    assert report.status is RunStatus.COMPLETE
+    assert report.metrics["cases"] == 1
+    assert report.metrics["following"] == 0.0
+    assert after == before
+
+
+def test_eval_prepare_run_prices_an_agent_suite_without_the_price_list(
+    agent_opener: _LlmOpener, home: IjobHome
+) -> None:
+    home.config.write_text(
+        '[models]\nsource_agent = "openrouter/made-up/agent"\n', encoding="utf-8"
+    )
+
+    with agent_opener(FakeEngines()) as service:
+        offer = asyncio.run(
+            service.eval_prepare_run(Suite.SOURCE_AGENT, model=None, limit=1)
+        )
+
+    assert offer.estimate == UP_TO_CAP
+    assert offer.costs == (
+        (parse_model_ref("openrouter/made-up/agent", "model"), UP_TO_CAP),
+    )
+
+
+_OPEN_CAREERS = json.dumps(
+    {
+        "next_thought": "look",
+        "next_tool_name": "open_page",
+        "next_tool_args": {"url": "https://careers.acme.test/"},
+    }
+)
+_NONE_ANSWER = json.dumps({"reasoning": "because", "source": "none"})
+
+
+def test_find_source_sends_nothing_to_a_host_off_the_site(
+    agent_opener: _AgentOpener,
+) -> None:
+    hosts: list[str] = []
+
+    def web(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host)
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text=_ALLOWING_ROBOTS)
+        if request.url.host == "careers.acme.test":
+            return httpx.Response(
+                302, headers={"Location": "https://evil.test/landing"}
+            )
+        return httpx.Response(
+            200, text="<html></html>", headers={"Content-Type": "text/html"}
+        )
+
+    engines = FakeEngines(FakeAsyncEngine([_OPEN_CAREERS, _FINISH, _NONE_ANSWER]))
+
+    with agent_opener(engines, web) as service:
+        result, _ = asyncio.run(
+            service.find_source("Acme", "https://careers.acme.test/")
+        )
+
+    assert "careers.acme.test" in hosts
+    assert "evil.test" not in hosts
+    assert result.found is None
+    assert result.violations == []
+
+
+def test_add_found_recipe_of_another_company_is_refused_even_when_removed(
+    recipe_opener: _RecipeOpener, tmp_path: Path
+) -> None:
+    db = tmp_path / "ijob.db"
+    with recipe_opener(_learning_engines()) as service:
+        proposal = asyncio.run(service.analyze_url(_ADDED_URL, "Example Co"))
+    found = FoundSource(
+        ref=proposal.ref,
+        company="Example Co",
+        target_url=proposal.target_url,
+        jobs=len(proposal.jobs),
+        proposal=proposal,
+    )
+    _seed_recipe(db, company="Other Co")
+
+    with recipe_opener(_learning_engines()) as service:
+        service.remove_source(_ADDED_REF)
+        with pytest.raises(SourceCompanyError):
+            asyncio.run(service.add_found(found))
+
+    with Store.open(db) as store:
+        row = store.source(_ADDED_REF)
+    assert row is not None
+    assert (row.company, row.removed) == ("Other Co", True)
+    assert _stored_recipe(db) == _OLD_RECIPE

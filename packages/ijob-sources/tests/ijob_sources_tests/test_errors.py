@@ -7,6 +7,7 @@ from ijob_sources.errors import (
     IdentityMismatchError,
     InvalidRecipeError,
     NotPublicAddressError,
+    OffSiteError,
     ParseError,
     RecipeEvaluationError,
     RecipeFailedError,
@@ -45,6 +46,16 @@ _REF = SourceRef(SourceKind.GREENHOUSE, parse_source_key("prisma"))
 )
 def test_every_error_is_a_sources_error(error: SourcesError) -> None:
     assert isinstance(error, SourcesError)
+
+
+def test_off_site_error_is_a_sources_error() -> None:
+    error = OffSiteError("evil.com")
+
+    assert isinstance(error, SourcesError)
+    assert error.host == "evil.com"
+    assert str(error) == "off the site: evil.com"
+    with pytest.raises(SourcesError):
+        raise error
 
 
 def test_source_not_found_is_http_status_error_with_404() -> None:

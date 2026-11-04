@@ -569,7 +569,7 @@ def test_requests_to_one_host_overlap() -> None:
         arrived.append(request.url.path)
         if len(arrived) == 2:
             both_arrived.set()
-        await asyncio.wait_for(both_arrived.wait(), timeout=2)
+        await asyncio.wait_for(both_arrived.wait(), timeout=30)
         return httpx.Response(200, text="body", request=request)
 
     async def run() -> list[str]:

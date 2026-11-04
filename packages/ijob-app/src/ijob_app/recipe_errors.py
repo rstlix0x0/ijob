@@ -4,15 +4,17 @@
 analysis worker, so they must be `LlmError`s: `run_items` records an `LlmError`
 from a worker as a failed item and the analysis re-raises it for the caller,
 while any other exception from a worker would reach the caller wrapped in an
-exception group. `NoTrialJobsError` is raised after the run; it is an `LlmError`
-too, though a page that reads no jobs is not a model failure.
+exception group. `RecipeCapReachedError` is also a `CapReachedError`, so a
+caller that treats every cap alike, such as an agent run storing its stop,
+handles it without knowing the recipe. `NoTrialJobsError` is an `LlmError` too,
+though a page that reads no jobs is not a model failure.
 
 This module imports `ijob_ai.errors`, so `ijob_app.recipe_ops` imports it only
 inside the functions that need it; a search that learns no recipe loads no
 `ijob_ai` module.
 """
 
-from ijob_ai.errors import LlmError, TaskOutputError
+from ijob_ai.errors import CapReachedError, LlmError, TaskOutputError
 from ijob_ai.llm.settings import Task
 
 
@@ -40,7 +42,7 @@ class NoTrialJobsError(LlmError):
         super().__init__("the proposed recipe read no jobs from the page")
 
 
-class RecipeCapReachedError(LlmError):
+class RecipeCapReachedError(CapReachedError):
     """The cost cap stopped the analysis before a model call it needed."""
 
     def __init__(self, *, started: bool = True) -> None:

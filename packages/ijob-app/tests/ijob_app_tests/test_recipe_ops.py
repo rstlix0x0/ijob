@@ -9,12 +9,14 @@ from typing import override
 import httpx
 import pytest
 from ijob_ai.errors import (
+    CapReachedError,
     CostUnknownError,
     LlmError,
     MissingModelError,
     ProviderFailedError,
     ProviderUnavailableError,
 )
+from ijob_ai.llm.budget import Budget
 from ijob_app import recipe_ops
 from ijob_app.home import IjobHome
 from ijob_app.llm_ops import (
@@ -30,7 +32,14 @@ from ijob_app.recipe_errors import (
     RecipeCapReachedError,
     RecipeOutputError,
 )
-from ijob_app.recipe_ops import RecipeProposal, accept_recipe, analyze_operation
+from ijob_app.recipe_ops import (
+    LearnedRecipe,
+    LoadedPage,
+    RecipeProposal,
+    accept_recipe,
+    analyze_operation,
+    learn_recipe,
+)
 from ijob_core.model import SourceKind, SourceRef
 from ijob_core.store import Store
 from ijob_core.traces import TraceStore
@@ -38,13 +47,14 @@ from ijob_sources.errors import (
     FetchedPage,
     NotPublicAddressError,
     ReservedHostError,
+    SourcesError,
     UnsupportedUrlError,
 )
 from ijob_sources.manual import manual_key
 from ijob_sources.polite_http import ConditionalCache
 from ijob_sources.public_host import public_host_guard
 from ijob_sources.recipe import parse_recipe, recipe_text
-from ijob_sources.recipe_document import RecipeFormat
+from ijob_sources.recipe_document import RecipeFormat, fetch_document
 
 from .conftest import ClientFactoryBuilder
 from .llm_fakes import (
@@ -786,3 +796,157 @@ def test_error_before_the_run_has_no_cost_note(
         )
 
     assert _notes(caught.value) == []
+
+
+def test_analyze_operation_is_unchanged(
+    runtimes: _Runtimes, client_factory_for: ClientFactoryBuilder
+) -> None:
+    engine = FakeAsyncEngine(
+        [json_url_answer("/api/jobs/"), recipe_answer(_JSON_RECIPE)]
+    )
+
+    with pytest.raises(RecipeCapReachedError) as caught:
+        _analyze(runtimes(engine, max_cost_usd=0.0005), _js_site(), client_factory_for)
+
+    assert str(caught.value) == (
+        "cost cap reached before the JSON recipe; raise [llm].max_cost_usd"
+    )
+    assert _notes(caught.value) == ["cost $0.0010 of $0.00"]
+    assert len(engine.requests) == 1
+
+
+def _learn(
+    runtime: LlmRuntime,
+    site: _Site,
+    client_factory_for: ClientFactoryBuilder,
+    budget: Budget,
+) -> LearnedRecipe | SourcesError:
+    async def run() -> LearnedRecipe | SourcesError:
+        cache: ConditionalCache | None = None
+        client = client_factory_for(site)(cache)
+        client.guard_requests(public_host_guard(_resolve))
+        async with client:
+            document, final_url = await fetch_document(client, _URL)
+            return await learn_recipe(
+                runtime,
+                client,
+                LoadedPage(document, final_url),
+                budget,
+                ref=_ref(_URL),
+                target_url=_URL,
+                company=_COMPANY,
+            )
+
+    return asyncio.run(run())
+
+
+def test_learn_recipe_charges_the_budget_it_is_given(
+    runtimes: _Runtimes,
+    client_factory_for: ClientFactoryBuilder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_run_items(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("learn_recipe must not run its own run_items")
+
+    monkeypatch.setattr(recipe_ops, "run_items", no_run_items)
+    engine = FakeAsyncEngine([recipe_answer(_HTML_RECIPE)])
+    budget = Budget(1.0)
+
+    learned = _learn(runtimes(engine), _list_site(), client_factory_for, budget)
+
+    assert isinstance(learned, LearnedRecipe)
+    assert [job.title for job in learned.jobs] == ["Rust Engineer", "Go Engineer"]
+    assert learned.invalid == 0
+    assert learned.recipe_format is RecipeFormat.HTML
+    assert learned.recipe_url == _URL
+    assert learned.recipe == recipe_text(parse_recipe(json.dumps(_HTML_RECIPE)))
+    assert learned.model == MADE_UP_CLAUDE
+    assert budget.spent == pytest.approx(0.001)
+    assert len(engine.requests) == 1
+
+
+def test_learn_recipe_follows_a_json_address_on_the_same_budget(
+    runtimes: _Runtimes, client_factory_for: ClientFactoryBuilder
+) -> None:
+    engine = FakeAsyncEngine(
+        [json_url_answer("/api/jobs/"), recipe_answer(_JSON_RECIPE)]
+    )
+    budget = Budget(1.0)
+
+    learned = _learn(runtimes(engine), _js_site(), client_factory_for, budget)
+
+    assert isinstance(learned, LearnedRecipe)
+    assert learned.recipe_format is RecipeFormat.JSON
+    assert learned.recipe_url == _JSON_URL
+    assert budget.spent == pytest.approx(0.002)
+
+
+def test_learn_recipe_at_the_cap_makes_no_call(
+    runtimes: _Runtimes, client_factory_for: ClientFactoryBuilder
+) -> None:
+    engine = FakeAsyncEngine([recipe_answer(_HTML_RECIPE)])
+    budget = Budget(1.0)
+    budget.charge(1.0)
+
+    with pytest.raises(RecipeCapReachedError) as caught:
+        _learn(runtimes(engine), _list_site(), client_factory_for, budget)
+
+    assert isinstance(caught.value, CapReachedError)
+    assert str(caught.value) == (
+        "cost cap reached before the first model call; raise [llm].max_cost_usd"
+    )
+    assert engine.requests == []
+
+
+def test_learn_recipe_cap_before_the_json_recipe(
+    runtimes: _Runtimes, client_factory_for: ClientFactoryBuilder
+) -> None:
+    engine = FakeAsyncEngine(
+        [json_url_answer("/api/jobs/"), recipe_answer(_JSON_RECIPE)]
+    )
+
+    with pytest.raises(RecipeCapReachedError) as caught:
+        _learn(runtimes(engine), _js_site(), client_factory_for, Budget(0.0005))
+
+    assert str(caught.value) == (
+        "cost cap reached before the JSON recipe; raise [llm].max_cost_usd"
+    )
+    assert len(engine.requests) == 1
+
+
+def test_learn_recipe_returns_a_failed_json_fetch(
+    runtimes: _Runtimes, client_factory_for: ClientFactoryBuilder
+) -> None:
+    engine = FakeAsyncEngine([json_url_answer("/api/missing/")])
+
+    learned = _learn(runtimes(engine), _js_site(), client_factory_for, Budget(1.0))
+
+    assert isinstance(learned, SourcesError)
+    assert len(engine.requests) == 1
+
+
+def test_learn_recipe_reading_no_jobs_raises(
+    runtimes: _Runtimes, client_factory_for: ClientFactoryBuilder
+) -> None:
+    engine = FakeAsyncEngine(
+        [recipe_answer(_recipe_with(items="//li[@class='nothing']"))]
+    )
+
+    with pytest.raises(NoTrialJobsError):
+        _learn(runtimes(engine), _list_site(), client_factory_for, Budget(1.0))
+
+
+def test_learn_recipe_without_a_model_raises(
+    runtimes: _Runtimes, client_factory_for: ClientFactoryBuilder
+) -> None:
+    engine = FakeAsyncEngine()
+
+    with pytest.raises(MissingModelError):
+        _learn(
+            runtimes(engine, source_recipe=None),
+            _list_site(),
+            client_factory_for,
+            Budget(1.0),
+        )
+
+    assert engine.requests == []

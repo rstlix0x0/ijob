@@ -1,4 +1,4 @@
-"""Settings of the LLM layer: tasks, models, limits and tracing."""
+"""Settings of the LLM layer: tasks, models, limits, tracing and evals."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -13,10 +13,13 @@ class Task(StrEnum):
     """A kind of model call; each one is configured with its own model."""
 
     CV_PROFILE = "cv_profile"
+    EVAL_GRADER = "eval_grader"
+    EXPLORE_AGENT = "explore_agent"
     INSTRUCTIONS = "instructions"
     JOB_EXTRACT = "job_extract"
     JUDGE = "judge"
     SCORER = "scorer"
+    SOURCE_AGENT = "source_agent"
     SOURCE_RECIPE = "source_recipe"
 
 
@@ -71,3 +74,19 @@ class TracingSettings:
 
     max_size_mb: int = 256
     langfuse_endpoint: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class EvalSettings:
+    """What the eval commands read from configuration.
+
+    Attributes:
+        jury: Two to five different models that vote on labels, or None when
+            none is configured.
+        max_cost_usd: Spending cap for one eval command, in US dollars.
+        total_cost_usd: Spending cap across all eval commands, in US dollars.
+    """
+
+    jury: tuple[ModelRef, ...] | None = None
+    max_cost_usd: float = 4
+    total_cost_usd: float = 10

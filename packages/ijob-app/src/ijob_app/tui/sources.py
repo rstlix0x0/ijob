@@ -1,15 +1,17 @@
 """The Sources tab: every source and how its last fetch went, with a fix for problems.
 
-Sources that need a look sort first. Adding a source and any model analysis run
-in the background, and everything else keeps working meanwhile.
+Sources that need a look sort first. Adding a source, finding one with the
+agent and any model analysis run in the background, and everything else keeps
+working meanwhile.
 """
 
+import asyncio
 import sqlite3
 from collections.abc import Callable
 from datetime import datetime
-from typing import ClassVar, Final, Protocol, override
+from typing import TYPE_CHECKING, ClassVar, Final, Protocol, override
 
-from ijob_ai.errors import LlmError
+from ijob_ai.errors import CapReachedError, LlmError
 from ijob_core.errors import InvalidValueError
 from ijob_core.model import SourceRef, parse_source_ref
 from ijob_core.store import SourceRow
@@ -21,11 +23,14 @@ from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import DataTable, Input, Static
 
+from ijob_app.agent_ops import SourceResult
+from ijob_app.agent_view import shown_steps, step_what
 from ijob_app.cli_search import failure_reason
 from ijob_app.job_search import JobList
-from ijob_app.llm_ops import cost_line
+from ijob_app.llm_ops import OperationReport, cost_line
 from ijob_app.render import error_notes, error_text
 from ijob_app.service import Service
+from ijob_app.tui.found import SourceFoundScreen
 from ijob_app.tui.recipe import RecipeProposalScreen
 from ijob_app.view import (
     AMBER,
@@ -38,7 +43,12 @@ from ijob_app.view import (
     clean,
 )
 
-_BUSY: Final = "An add is still running."
+if TYPE_CHECKING:
+    from ijob_ai.agents.react import AgentStep
+
+_BUSY: Final = "An add or find is still running."
+_NEEDS_COMPANY: Final = "Give a company, with a URL or kind:key if you have one."
+_CAP_STOP: Final = "Stopped at the cost cap."
 
 
 class SourcesHost(Protocol):
@@ -64,9 +74,13 @@ class SourcesHost(Protocol):
 
 
 def _error_text(error: Exception) -> str:
-    """Say why an action failed, with the notes the error carries."""
+    """Say why an action failed, with the notes the error carries.
+
+    The text can hold words from a provider or a web page, so each line is cut
+    to one line with control characters dropped; the lines stay apart.
+    """
     text = error_text(error) if isinstance(error, InvalidValueError) else str(error)
-    return "\n".join([text, *error_notes(error)])
+    return "\n".join(clean(line) for line in [text, *error_notes(error)])
 
 
 class SourcesPane(Vertical):
@@ -110,7 +124,9 @@ class SourcesPane(Vertical):
             box.border_title = "Add a source"
             with Horizontal(id="add-row"):
                 yield Static(PROMPT_MARK, id="add-mark", markup=False)
-                yield Input(placeholder="careers URL or kind:key", id="add-url")
+                yield Input(
+                    placeholder="URL, kind:key, or blank to find it", id="add-url"
+                )
                 yield Input(placeholder="company", id="add-company")
         with Horizontal(id="source-body"):
             with Vertical(id="source-list", classes="box") as listing:
@@ -260,22 +276,52 @@ class SourcesPane(Vertical):
 
     @on(Input.Submitted, "#add-url, #add-company")
     def _submitted(self) -> None:
-        """Add the source in the add box, in the background."""
+        """Add the source in the add box, or find it when the URL is blank.
+
+        Both run in the background and share one guard, so only one runs at a time.
+        """
         target = self.query_one("#add-url", Input).value.strip()
         company = self.query_one("#add-company", Input).value.strip()
-        if not target or not company:
-            self._status("Give a URL or kind:key, and the company.")
+        if not company:
+            self._status(_NEEDS_COMPANY)
             return
         if self._adding:
             self._status(_BUSY)
             return
         self._adding = True
+        if not target:
+            self.show_progress(company, 0)
+            self._find(company)
+            return
         self._status(f"Checking {target} in the background.")
         self._add(target, company)
 
     def _status(self, text: str) -> None:
         """Say how the last action went."""
         self.query_one("#sources-status", Static).update(text)
+
+    def show_progress(
+        self, company: str, steps: int, spent: float | None = None
+    ) -> None:
+        """Say that a find is running, how many steps it has taken and its cost.
+
+        Does nothing when the status line is not on screen, so a callback that
+        outlives the tab is harmless.
+
+        Args:
+            company: The company being found.
+            steps: How many tool calls the agent has finished.
+            spent: The money the run has spent so far, in US dollars, or `None`
+                before the run has reported any, which leaves the money off.
+        """
+        name = clean(company)
+        text = f"Finding {name} in the background."
+        if steps:
+            text = f"Finding {name} in the background · step {steps}"
+            if spent is not None:
+                text += f" · ${spent:.3f}"
+        for line in self.query("#sources-status").results(Static):
+            line.update(text)
 
     @work(exclusive=True, group="add-source")
     async def _add(self, target: str, company: str) -> None:
@@ -313,3 +359,89 @@ class SourcesPane(Vertical):
             self.redraw()
         else:
             self._status("Not stored.")
+
+    @work(exclusive=True, group="add-source")
+    async def _find(self, company: str) -> None:
+        """Have the agent find a company's source, and add it if the user accepts."""
+        service = self._host.service
+        here = asyncio.get_running_loop()
+        taken = 0
+        spent: float | None = None
+
+        def on_cost(money: float) -> None:
+            nonlocal spent
+            spent = money
+
+        def on_step(_step: "AgentStep") -> None:
+            nonlocal taken
+            taken += 1
+            here.call_soon_threadsafe(self.show_progress, company, taken, spent)
+
+        try:
+            result, report = await service.find_source(
+                company, on_step=on_step, on_cost=on_cost
+            )
+            found = result.found
+            note = self._report_end(company, result, report)
+            if found is None:
+                return
+            if found.known and found.proposal is not None:
+                self._status(f"{found.ref} is already a source. {note}".strip())
+                return
+            if found.proposal is not None:
+                accepted = await self.app.push_screen_wait(
+                    RecipeProposalScreen(found.proposal)
+                )
+            else:
+                steps = [step_what(step) for step in shown_steps(result.steps)]
+                accepted = await self.app.push_screen_wait(
+                    SourceFoundScreen(found, steps, cost_line(report))
+                )
+            if not accepted:
+                self._status(f"Not stored. {note}".strip())
+                return
+            row = await service.add_found(found)
+        except (
+            InvalidValueError,
+            SourcesError,
+            LlmError,
+            sqlite3.Error,
+            ExceptionGroup,
+        ) as error:
+            self._status("")
+            self.notify(_error_text(error), severity="error", markup=False)
+            return
+        finally:
+            self._adding = False
+        self._status(f"Added {row.ref}. {note}".strip())
+        self.query_one("#add-company", Input).value = ""
+        self.redraw()
+
+    def _report_end(
+        self, company: str, result: SourceResult, report: OperationReport
+    ) -> str:
+        """Say how a find ended; return the text that must outlive a later status.
+
+        A cap goes on the status line, after "No source found" when nothing was
+        verified. Any other early stop goes through notify. A run that found
+        nothing and stopped for nothing says so.
+
+        Returns:
+            The cap's text, or an empty string when the run did not hit the cap.
+        """
+        cost = cost_line(report)
+        stop = result.stop
+        name = clean(company)
+        if isinstance(stop, CapReachedError):
+            note = f"{_CAP_STOP} {cost}. Raise [llm].max_cost_usd to spend more."
+            if result.found is None:
+                self._status(f"No source found for {name}. {note}")
+            else:
+                self._status(note)
+            return note
+        self._status(cost)
+        if stop is not None:
+            self.notify(_error_text(stop), severity="error", markup=False)
+        elif result.found is None:
+            self._status(f"No source found for {name}. {cost}. Try its careers URL.")
+        return ""

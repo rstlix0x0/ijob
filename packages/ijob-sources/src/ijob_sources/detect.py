@@ -14,7 +14,7 @@ refused, as is a new source that yields none in `verify_new_source`, because an
 empty board cannot show whose it is.
 """
 
-import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
 from urllib.parse import urlsplit
@@ -36,19 +36,17 @@ from ijob_sources.errors import (
 from ijob_sources.manual import manual_key, parse_feed, parse_jobposting_page
 from ijob_sources.polite_http import MAX_BODY_BYTES, TOO_LARGE_REASON, PoliteClient
 
+BOARD_HOSTS: Final[Mapping[str, SourceKind]] = {
+    "boards.greenhouse.io": SourceKind.GREENHOUSE,
+    "job-boards.greenhouse.io": SourceKind.GREENHOUSE,
+    "jobs.lever.co": SourceKind.LEVER,
+    "jobs.ashbyhq.com": SourceKind.ASHBY,
+    "apply.workable.com": SourceKind.WORKABLE,
+    "jobs.gem.com": SourceKind.GEM,
+}
+"""The hiring-system hosts whose URLs name a source outright, and each one's kind."""
 
-def _board(host: str) -> re.Pattern[str]:
-    """Match a URL on `host` in any case, capturing its first path segment."""
-    return re.compile(rf"^https?://{host}/([^/?#]+)", re.IGNORECASE)
 
-
-_HIRING_SYSTEMS: Final = (
-    (SourceKind.GREENHOUSE, _board(r"(?:boards|job-boards)\.greenhouse\.io")),
-    (SourceKind.LEVER, _board(r"jobs\.lever\.co")),
-    (SourceKind.ASHBY, _board(r"jobs\.ashbyhq\.com")),
-    (SourceKind.WORKABLE, _board(r"apply\.workable\.com")),
-    (SourceKind.GEM, _board(r"jobs\.gem\.com")),
-)
 _NOT_ACCOUNTS: Final = {
     SourceKind.GREENHOUSE: frozenset({"embed"}),
     SourceKind.WORKABLE: frozenset({"j", "api"}),
@@ -110,7 +108,7 @@ async def resolve_url(url: str, *, company: str, client: PoliteClient) -> Resolu
         raise UnsupportedUrlError(url, str(error)) from error
     if parts.scheme not in _WEB_SCHEMES or not parts.hostname:
         raise UnsupportedUrlError(url, _NOT_WEB_ADDRESS)
-    ref = _hiring_system_ref(url)
+    ref = board_ref(url)
     if ref is not None:
         return Resolution(ref=ref, target_url=None, batch=None)
     try:
@@ -120,12 +118,12 @@ async def resolve_url(url: str, *, company: str, client: PoliteClient) -> Resolu
     except ResponseTooLargeError as error:
         raise UnsupportedUrlError(url, TOO_LARGE_REASON) from error
     except (RobotsDisallowedError, HttpStatusError) as error:
-        board = _hiring_system_ref(error.url) if error.url != url else None
+        board = board_ref(error.url) if error.url != url else None
         if board is None:
             raise
         return Resolution(ref=board, target_url=None, batch=None)
     final = _final_address(url, response)
-    ref = _hiring_system_ref(final)
+    ref = board_ref(final)
     if ref is not None:
         return Resolution(ref=ref, target_url=None, batch=None)
     key = manual_key(final)
@@ -203,22 +201,58 @@ async def verify_new_source(source: Source, client: PoliteClient) -> SourceBatch
     return batch
 
 
-def _hiring_system_ref(url: str) -> SourceRef | None:
+def board_host(url: str) -> str | None:
+    """Name the `BOARD_HOSTS` host a URL is on, or `None` when it is on none.
+
+    The host is read as a request would reach it: in any case, with a trailing
+    dot, a port or a user name ignored, and in its ASCII form, so a look-alike
+    spelling is no board host. The URL needs no account in its path.
+
+    Args:
+        url: The absolute URL to check.
+
+    Returns:
+        The board host, in lowercase, or `None`.
+    """
+    try:
+        parsed = httpx.URL(url)
+    except httpx.InvalidURL:
+        return None
+    host = parsed.raw_host.decode("ascii").rstrip(".")
+    if parsed.scheme not in _WEB_SCHEMES or host not in BOARD_HOSTS:
+        return None
+    return host
+
+
+def board_ref(url: str) -> SourceRef | None:
     """Name the hiring-system board a URL is on, or `None` when it is on none.
+
+    Nothing is fetched. A URL is on a board when `board_host` finds its host
+    and its first path segment is the account. A first segment that is one of
+    the system's own paths (Greenhouse `embed`, Workable `j` and `api`) is no
+    account, so such a URL is on no board.
+
+    Args:
+        url: The absolute URL to check.
+
+    Returns:
+        The board the URL names, or `None`.
 
     Raises:
         UnsupportedUrlError: The URL is on a hiring system but its token is not a
             valid source key.
     """
-    for kind, pattern in _HIRING_SYSTEMS:
-        found = pattern.match(url)
-        if found is None:
-            continue
-        token = found.group(1)
-        if token.lower() in _NOT_ACCOUNTS.get(kind, frozenset()):
-            continue
-        try:
-            return SourceRef(kind, parse_source_key(token))
-        except InvalidValueError as error:
-            raise UnsupportedUrlError(url, str(error)) from error
-    return None
+    host = board_host(url)
+    if host is None:
+        return None
+    kind = BOARD_HOSTS[host]
+    try:
+        token = urlsplit(url).path.removeprefix("/").split("/", 1)[0]
+    except ValueError:
+        return None
+    if not token or token.lower() in _NOT_ACCOUNTS.get(kind, frozenset()):
+        return None
+    try:
+        return SourceRef(kind, parse_source_key(token))
+    except InvalidValueError as error:
+        raise UnsupportedUrlError(url, str(error)) from error

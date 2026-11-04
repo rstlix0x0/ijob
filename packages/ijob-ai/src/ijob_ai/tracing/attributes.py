@@ -1,4 +1,4 @@
-"""Span attribute names and values that ijob records for each model call.
+"""Span attribute names and values that ijob records for model and tool calls.
 
 The `gen_ai.*` names follow the OpenTelemetry GenAI convention; ijob owns the
 strings itself rather than importing them from the pre-release incubating
@@ -25,6 +25,9 @@ POSTING_ID: Final = "ijob.posting_id"
 OUTCOME: Final = "ijob.outcome"
 PROMPT: Final = "ijob.prompt"
 COMPLETION: Final = "ijob.completion"
+TOOL_NAME: Final = "ijob.tool.name"
+TOOL_OUTCOME: Final = "ijob.tool.outcome"
+TOOL_VIOLATION: Final = "ijob.tool.violation"
 
 PROVIDER_NAMES: Final = MappingProxyType(
     {

@@ -299,10 +299,6 @@ class LlmRuntime:
     async def registry_for(self, task: "Task") -> "Registry":
         """Return the shared registry once the task's provider is ready.
 
-        For a claude-sdk model, the first call finds the `claude` CLI and runs
-        its version check; later calls reuse the checked path, and a failed
-        check is repeated by the next call.
-
         Args:
             task: The task about to call a model.
 
@@ -314,10 +310,29 @@ class LlmRuntime:
             ProviderUnavailableError: The CLI is missing, not executable, fails
                 its version check or is too old.
         """
+        return await self.registry_for_ref(self.settings.model_for(task))
+
+    async def registry_for_ref(self, ref: "ModelRef") -> "Registry":
+        """Return the shared registry once the reference's provider is ready.
+
+        For a claude-sdk model, the first call finds the `claude` CLI and runs
+        its version check; later calls, for any claude-sdk reference, reuse the
+        checked path, and a failed check is repeated by the next call. An
+        OpenRouter reference needs no CLI and looks none up.
+
+        Args:
+            ref: The model about to be called.
+
+        Returns:
+            The registry shared by every model of this runtime.
+
+        Raises:
+            ProviderUnavailableError: The CLI is missing, not executable, fails
+                its version check or is too old.
+        """
         from ijob_ai.llm.claude_cli import check_version, resolve_cli  # noqa: PLC0415
         from ijob_ai.llm.reference import Provider  # noqa: PLC0415
 
-        ref = self.settings.model_for(task)
         if ref.provider is Provider.CLAUDE_SDK:
             async with self._cli_lock:
                 if self._cli_path is None:
@@ -331,7 +346,7 @@ class LlmRuntime:
     def _claude_engines(self, ref: "ModelRef") -> "tuple[Engine, AsyncEngine]":
         """Build the engine pair for a claude-sdk model on the checked CLI path."""
         if self._cli_path is None:
-            msg = "the claude CLI is not checked; call registry_for first"
+            msg = "the claude CLI is not checked; call registry_for_ref first"
             raise RuntimeError(msg)
         engines = self.options.engines
         if engines is None:
@@ -370,6 +385,7 @@ class _ItemRun[Item, Result]:
 
     async def _outcome(self, item: Item) -> ItemOutcome[Item, Result]:
         from ijob_ai.errors import (  # noqa: PLC0415
+            CapReachedError,
             CostUnknownError,
             LlmError,
             ProviderFailedError,
@@ -388,6 +404,9 @@ class _ItemRun[Item, Result]:
         except CostUnknownError as error:
             self._stop("cost_unknown")
             return ItemOutcome(item, ItemStatus.STOPPED, error=error)
+        except CapReachedError:
+            self._stop("cap")
+            return ItemOutcome(item, ItemStatus.CAP_REACHED)
         except LlmError as error:
             return ItemOutcome(item, ItemStatus.FAILED, error=error)
         return ItemOutcome(item, ItemStatus.DONE, result=result)
@@ -398,13 +417,14 @@ class _ItemRun[Item, Result]:
             self.stopped_by = reason
 
 
-async def run_items[Item, Result](
+async def run_items[Item, Result](  # noqa: PLR0913  # the operation's inputs, one each
     runtime: LlmRuntime,
     operation: str,
     items: Sequence[Item],
     worker: Worker[Item, Result],
     *,
     on_outcome: Callable[[ItemOutcome[Item, Result]], None] | None = None,
+    cap: float | None = None,
 ) -> RunResult[Item, Result]:
     """Run an operation's items under one budget, one concurrency limit and one trace.
 
@@ -427,6 +447,7 @@ async def run_items[Item, Result](
         worker: Does the work of one item with the operation's budget, checking
             nothing itself; it raises an `LlmError` to end that item.
         on_outcome: Called, on the event loop, with each outcome as it is known.
+        cap: The spending cap in US dollars, or None for `[llm].max_cost_usd`.
 
     Returns:
         One outcome per item in item order, and the report.
@@ -443,7 +464,7 @@ async def run_items[Item, Result](
     tracing = start_tracing(
         runtime.home.traces, runtime.tracing_settings, session=runtime.options.session
     )
-    budget = Budget(runtime.settings.max_cost_usd)
+    budget = Budget(runtime.settings.max_cost_usd if cap is None else cap)
     run = _ItemRun(
         budget=budget,
         concurrency=runtime.settings.concurrency,

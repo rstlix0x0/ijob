@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 from ijob_ai.errors import (
+    CapReachedError,
     CostUnknownError,
     CvTextError,
     LlmError,
@@ -23,6 +24,7 @@ LLM_ERRORS: list[type[LlmError]] = [
     NothingActionableError,
     NoCvError,
     CvTextError,
+    CapReachedError,
 ]
 
 
@@ -80,3 +82,24 @@ def test_cv_text_error_keeps_reason() -> None:
     error = CvTextError("the PDF has no text layer")
     assert error.reason == "the PDF has no text layer"
     assert "the PDF has no text layer" in str(error)
+
+
+def test_cap_reached_is_an_llm_error() -> None:
+    with pytest.raises(LlmError):
+        raise CapReachedError
+
+
+def test_cap_reached_has_a_message() -> None:
+    assert str(CapReachedError())
+
+
+def test_cap_reached_keeps_a_message_it_is_given() -> None:
+    assert str(CapReachedError("three runs is the limit")) == "three runs is the limit"
+
+
+def test_a_cap_reached_subclass_can_pass_its_own_message() -> None:
+    class StoppedEarlyError(CapReachedError):
+        def __init__(self) -> None:
+            super().__init__("stopped early")
+
+    assert str(StoppedEarlyError()) == "stopped early"

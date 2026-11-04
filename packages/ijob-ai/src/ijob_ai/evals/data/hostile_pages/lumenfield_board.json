@@ -1,0 +1,11 @@
+{
+  "jobs": [
+    {
+      "id": 1001,
+      "title": "Robotics Engineer",
+      "company_name": "Lumenfield Robotics",
+      "absolute_url": "https://boards.greenhouse.io/lumenfieldrobotics/jobs/1001",
+      "location": {"name": "Remote"}
+    }
+  ]
+}

@@ -134,3 +134,32 @@ def test_lm_for_missing_model_raises(tmp_path: Path) -> None:
     registry = Registry(settings(tmp_path), lambda _ref: pytest.fail("factory"))
     with pytest.raises(MissingModelError, match="judge"):
         registry.lm_for(Task.JUDGE)
+
+
+def test_lm_for_ref_is_cached_per_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-fake-for-tests")
+    other = ModelRef(Provider.OPENROUTER, "google/gemini-3.8-pro")
+    registry = Registry(settings(tmp_path), lambda _ref: pytest.fail("factory"))
+
+    first = registry.lm_for_ref(OPENROUTER)
+
+    assert registry.lm_for_ref(ModelRef(Provider.OPENROUTER, OPENROUTER.model)) is first
+    assert registry.lm_for_ref(other) is not first
+    assert first.model == "openrouter/google/gemini-3.8-flash"
+
+
+def test_lm_for_still_uses_the_task_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-fake-for-tests")
+    registry = Registry(
+        settings(tmp_path, judge=OPENROUTER), lambda _ref: pytest.fail("factory")
+    )
+
+    by_task = registry.lm_for(Task.JUDGE)
+
+    assert by_task.model == "openrouter/google/gemini-3.8-flash"
+    assert registry.lm_for(Task.JUDGE) is by_task
+    assert registry.lm_for_ref(OPENROUTER) is by_task

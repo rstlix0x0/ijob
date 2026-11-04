@@ -61,17 +61,20 @@ def say_done(plain: str, text: str, detail: str = "") -> None:
     typer.echo(plain)
 
 
-def say_error(message: str, fix: str | None = None) -> None:
+def say_error(message: str, fix: str | None = None, *, literal: bool = False) -> None:
     """Report an error on standard error.
 
     Args:
         message: What went wrong; a trailing `; run: <command>` becomes its fix
-            on a terminal.
+            on a terminal, unless `literal` is set.
         fix: The command that fixes it, drawn beneath it on a terminal and
             added as `run: <fix>` in a pipe.
+        literal: Whether `message` comes from outside ijob, such as a provider
+            or a web page. It is then drawn whole, and a `; run: ` in it is
+            text and never a fix.
     """
     if _stderr_is_terminal():
-        bare, found = _split_fix(message)
+        bare, found = (message, None) if literal else _split_fix(message)
         console = make_console(stderr=True)
         console.print(failed_line(bare))
         if (command := fix or found) is not None:
@@ -81,18 +84,21 @@ def say_error(message: str, fix: str | None = None) -> None:
     typer.echo(f"error: {message}{tail}", err=True)
 
 
-def say_note(text: str) -> None:
+def say_note(text: str, *, literal: bool = False) -> None:
     """Report something worth knowing on standard error.
 
     Args:
         text: The note, which may start with `note: ` or `warning: `, and may
-            end in `; run: <command>`, which becomes its fix on a terminal.
+            end in `; run: <command>`, which becomes its fix on a terminal,
+            unless `literal` is set.
+        literal: Whether the text after the prefix comes from outside ijob. It
+            is then drawn whole, and a `; run: ` in it is text and never a fix.
     """
     if _stderr_is_terminal():
         bare = text
         for prefix in _NOTE_PREFIXES:
             bare = bare.removeprefix(prefix)
-        message, fix = _split_fix(bare)
+        message, fix = (bare, None) if literal else _split_fix(bare)
         console = make_console(stderr=True)
         console.print(notice_line(message))
         if fix is not None:

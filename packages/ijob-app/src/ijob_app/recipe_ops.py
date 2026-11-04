@@ -10,6 +10,10 @@ analysis makes at most two model calls and shares one budget and one trace.
 A failure after money was spent carries the cost as a note on the error
 (`BaseException.add_note`), so the caller can show it beside the reason.
 
+`learn_recipe` is the learning step on its own: it takes the caller's budget
+and client and runs no operation, so a caller with a run of its own can charge
+the learning to it. `analyze_operation` runs it as the worker of its one item.
+
 At module level this module imports only `ijob_core`, `ijob_sources` and
 `ijob_app`: every `ijob_ai` import is inside the function that needs it, so a
 search that learns nothing loads no `ijob_ai` module. The same holds for
@@ -57,6 +61,8 @@ if TYPE_CHECKING:
     from ijob_ai.llm.reference import Provider
     from ijob_ai.tasks.source_recipe import ProposedRecipe
 
+    from ijob_app.recipe_errors import RecipeCapReachedError
+
 _OPERATION = "sources add"
 _WEB_SCHEMES = frozenset({"http", "https"})
 
@@ -92,15 +98,42 @@ class RecipeProposal:
 
 
 @dataclass(frozen=True, slots=True)
-class _Page:
-    """A fetched document and the address it finally came from."""
+class LoadedPage:
+    """A fetched document and the address it finally came from.
+
+    Attributes:
+        document: The page, loaded for reading.
+        url: The address the page was served from, where its links resolve from.
+    """
 
     document: Document
     url: str
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LearnedRecipe:
+    """A recipe the model wrote, tried on the page it was learned from.
+
+    Attributes:
+        recipe: The recipe as canonical JSON text, as it would be stored.
+        recipe_format: The kind of document the recipe reads.
+        recipe_url: The address the recipe reads: the page learned from, or the
+            JSON document the model pointed at.
+        jobs: The jobs the recipe read from its first page.
+        invalid: How many entries the recipe selected that were not jobs.
+        model: The reference of the model that learned the recipe.
+    """
+
+    recipe: str
+    recipe_format: RecipeFormat
+    recipe_url: str
+    jobs: tuple[SightingDraft, ...]
+    invalid: int
+    model: str
+
+
 @dataclass(frozen=True, slots=True)
-class _Learned:
+class _Proposed:
     """A recipe the model wrote, and the page it must be tried on.
 
     Attributes:
@@ -110,7 +143,7 @@ class _Learned:
     """
 
     recipe_json: str
-    page: _Page
+    page: LoadedPage
     recipe_url: str
 
 
@@ -169,7 +202,8 @@ async def analyze_operation(  # noqa: PLR0913 - the operation's inputs, one each
     from ijob_ai.errors import LlmError  # noqa: PLC0415
     from ijob_ai.llm.settings import Task  # noqa: PLC0415
 
-    model = runtime.settings.model_for(Task.SOURCE_RECIPE)
+    # Fails before any fetch when no model is set; `learn_recipe` reads it again.
+    runtime.settings.model_for(Task.SOURCE_RECIPE)
     try:
         urlsplit(target_url)
     except ValueError as error:
@@ -185,8 +219,8 @@ async def analyze_operation(  # noqa: PLR0913 - the operation's inputs, one each
     run = await run_items(
         runtime,
         _OPERATION,
-        (_Page(document, final_url),),
-        _Learner(runtime, client, provider=model.provider, target_url=target_url),
+        (LoadedPage(document, final_url),),
+        _Learner(runtime, client, ref=ref, target_url=target_url, company=company),
     )
     try:
         return _proposal(
@@ -195,7 +229,6 @@ async def analyze_operation(  # noqa: PLR0913 - the operation's inputs, one each
             ref=ref,
             target_url=target_url,
             company=company,
-            model=str(model),
         )
     except (LlmError, SourcesError) as error:
         if run.report.spent > 0:
@@ -203,19 +236,20 @@ async def analyze_operation(  # noqa: PLR0913 - the operation's inputs, one each
         raise
 
 
-def _proposal(  # noqa: PLR0913 - the run and the facts of the proposal, one each
-    outcome: ItemOutcome[_Page, _Learned | SourcesError],
+def _proposal(
+    outcome: ItemOutcome[
+        LoadedPage, "LearnedRecipe | SourcesError | RecipeCapReachedError"
+    ],
     report: OperationReport,
     *,
     ref: SourceRef,
     target_url: str,
     company: str,
-    model: str,
 ) -> RecipeProposal:
     """Turn the outcome of the run into a proposal, or raise why it has none.
 
     Raises:
-        RecipeCapReachedError: The cap stopped the run without an error.
+        RecipeCapReachedError: The cap stopped the run, with or without an error.
         RecipeOutputError: The model's answer or recipe is unusable.
         NoTrialJobsError: The recipe reads no job from the page.
         SourcesError: The JSON address could not be fetched or serves HTML.
@@ -224,26 +258,138 @@ def _proposal(  # noqa: PLR0913 - the run and the facts of the proposal, one eac
     from ijob_ai.errors import TaskOutputError  # noqa: PLC0415
 
     from ijob_app.recipe_errors import (  # noqa: PLC0415
-        NoTrialJobsError,
         RecipeCapReachedError,
         RecipeOutputError,
     )
 
     if outcome.error is not None:
-        if isinstance(outcome.error, TaskOutputError):
+        if isinstance(outcome.error, TaskOutputError) and not isinstance(
+            outcome.error, RecipeOutputError
+        ):
             raise RecipeOutputError(outcome.error.reason) from outcome.error
         raise outcome.error
     learned = outcome.result
     if outcome.status is not ItemStatus.DONE or learned is None:
         raise RecipeCapReachedError(started=False)
-    if isinstance(learned, SourcesError):
+    if isinstance(learned, SourcesError | RecipeCapReachedError):
         raise learned
+    return RecipeProposal(
+        ref=ref,
+        target_url=target_url,
+        company=company,
+        recipe=learned.recipe,
+        recipe_format=learned.recipe_format,
+        recipe_url=learned.recipe_url,
+        jobs=learned.jobs,
+        invalid=learned.invalid,
+        model=learned.model,
+        report=report,
+    )
+
+
+async def learn_recipe(  # noqa: PLR0913 - the learning's inputs, one each
+    runtime: LlmRuntime,
+    client: PoliteClient,
+    page: LoadedPage,
+    budget: "Budget",
+    *,
+    ref: SourceRef,
+    target_url: str,
+    company: str,
+) -> LearnedRecipe | SourcesError:
+    """Learn a recipe for a page and try it on that page, on the caller's budget.
+
+    Makes up to two model calls, charged to `budget`, and one fetch through
+    `client` when the model points at a JSON document. It starts no operation
+    and no trace of its own, and it checks `budget` before every call, the
+    first included. The caller guards `client` so that it only reaches the
+    addresses it may.
+
+    Args:
+        runtime: The runtime holding the settings and the model registry.
+        client: The open client the JSON document is fetched through.
+        page: The page to learn from.
+        budget: The budget every call is charged to.
+        ref: The source the recipe would belong to.
+        target_url: The page the user added; it becomes the `url` of a recipe
+            that reads `page`.
+        company: The company the source belongs to.
+
+    Returns:
+        The recipe and the jobs it read, or the `SourcesError` of fetching the
+        JSON address or of that address serving HTML, which is returned rather
+        than raised so that a worker can hand it back as a value.
+
+    Raises:
+        MissingModelError: No model is set for the `source_recipe` task; nothing
+            is called.
+        RecipeCapReachedError: `budget` had no room before the first call, or
+            before the JSON recipe.
+        RecipeOutputError: The model's answer or recipe is unusable, the JSON
+            address it gave is malformed or not an http or https address, or the
+            recipe fails when tried on the page.
+        NoTrialJobsError: The recipe reads no job from the page.
+        ProviderUnavailableError: The provider cannot be used.
+        ProviderFailedError: The provider failed a call.
+        CostUnknownError: The cost of a call cannot be determined.
+    """
+    from ijob_ai.llm.settings import Task  # noqa: PLC0415
+
+    from ijob_app.recipe_errors import (  # noqa: PLC0415
+        RecipeCapReachedError,
+        RecipeOutputError,
+    )
+
+    model = runtime.settings.model_for(Task.SOURCE_RECIPE)
+    if not budget.try_start():
+        raise RecipeCapReachedError(started=False)
+    first = await _propose(runtime, model.provider, page, budget)
+    if first.recipe_json is not None:
+        proposed = _Proposed(first.recipe_json, page, target_url)
+    else:
+        try:
+            json_url = urljoin(page.url, _required(first.json_url))
+            parts = urlsplit(json_url)
+        except ValueError as error:
+            reason = f"the JSON address cannot be read: {error}"
+            raise RecipeOutputError(reason) from error
+        if parts.scheme not in _WEB_SCHEMES or not parts.hostname:
+            reason = f"the JSON address is not an http or https address: {json_url}"
+            raise RecipeOutputError(reason)
+        try:
+            document, final_url = await fetch_document(client, json_url)
+        except SourcesError as error:
+            return error
+        if isinstance(document, HtmlDocument):
+            return UnsupportedUrlError(json_url, "expected JSON")
+        if not budget.try_start():
+            raise RecipeCapReachedError
+        json_page = LoadedPage(document, final_url)
+        second = await _propose(runtime, model.provider, json_page, budget)
+        proposed = _Proposed(_required(second.recipe_json), json_page, json_url)
+    return _try_recipe(proposed, ref=ref, company=company, model=str(model))
+
+
+def _try_recipe(
+    proposed: _Proposed, *, ref: SourceRef, company: str, model: str
+) -> LearnedRecipe:
+    """Read the page the recipe was learned from with the recipe.
+
+    Raises:
+        RecipeOutputError: The recipe is invalid or fails on the page.
+        NoTrialJobsError: The recipe reads no job from the page.
+    """
+    from ijob_app.recipe_errors import (  # noqa: PLC0415
+        NoTrialJobsError,
+        RecipeOutputError,
+    )
+
     try:
-        recipe = parse_recipe(_with_url(learned.recipe_json, learned.recipe_url))
+        recipe = parse_recipe(_with_url(proposed.recipe_json, proposed.recipe_url))
         read = read_page(
             recipe,
-            learned.page.document,
-            page_url=learned.page.url,
+            proposed.page.document,
+            page_url=proposed.page.url,
             ref=ref,
             company=company,
         )
@@ -260,17 +406,13 @@ def _proposal(  # noqa: PLR0913 - the run and the facts of the proposal, one eac
         raise RecipeOutputError(reason) from error
     if not read.drafts:
         raise NoTrialJobsError
-    return RecipeProposal(
-        ref=ref,
-        target_url=target_url,
-        company=company,
+    return LearnedRecipe(
         recipe=recipe_text(recipe),
         recipe_format=recipe.format,
         recipe_url=recipe.url,
         jobs=tuple(read.drafts),
         invalid=read.rejected,
         model=model,
-        report=report,
     )
 
 
@@ -301,80 +443,71 @@ def accept_recipe(store: Store, proposal: RecipeProposal, *, at: datetime) -> No
 
 
 class _Learner:
-    """The worker of one analysis: up to two model calls and one extra fetch."""
+    """The worker of one analysis: `learn_recipe` on the operation's budget."""
 
     def __init__(
         self,
         runtime: LlmRuntime,
         client: PoliteClient,
         *,
-        provider: "Provider",
+        ref: SourceRef,
         target_url: str,
+        company: str,
     ) -> None:
         self._runtime = runtime
         self._client = client
-        self._provider = provider
+        self._ref = ref
         self._target_url = target_url
+        self._company = company
 
-    async def __call__(self, page: _Page, budget: "Budget") -> _Learned | SourcesError:
-        """Ask for a recipe, and for a second one when the model points at JSON.
+    async def __call__(
+        self, page: LoadedPage, budget: "Budget"
+    ) -> "LearnedRecipe | SourcesError | RecipeCapReachedError":
+        """Learn a recipe for the page.
 
         Returns:
-            The recipe and the page to try it on, or the `SourcesError` of
-            fetching the JSON address, which a worker must return rather than
-            raise.
+            What `learn_recipe` returns, or the cap error it raised: `run_items`
+            records a worker's cap error as a stop and drops it, and with it the
+            line saying which call the cap kept from being made.
 
         Raises:
-            RecipeCapReachedError: The cap was reached after the first call and
-                the model asked for a second.
-            RecipeOutputError: The JSON address the model gave is malformed or
-                not an http or https address.
+            RecipeOutputError: The model's answer or recipe is unusable.
+            NoTrialJobsError: The recipe reads no job from the page.
             LlmError: A call fails or its answer is unusable.
         """
-        from ijob_app.recipe_errors import (  # noqa: PLC0415
-            RecipeCapReachedError,
-            RecipeOutputError,
-        )
+        from ijob_app.recipe_errors import RecipeCapReachedError  # noqa: PLC0415
 
-        first = await self._propose(page, budget)
-        if first.recipe_json is not None:
-            return _Learned(first.recipe_json, page, self._target_url)
         try:
-            json_url = urljoin(page.url, _required(first.json_url))
-            parts = urlsplit(json_url)
-        except ValueError as error:
-            reason = f"the JSON address cannot be read: {error}"
-            raise RecipeOutputError(reason) from error
-        if parts.scheme not in _WEB_SCHEMES or not parts.hostname:
-            reason = f"the JSON address is not an http or https address: {json_url}"
-            raise RecipeOutputError(reason)
-        try:
-            document, final_url = await fetch_document(self._client, json_url)
-        except SourcesError as error:
+            return await learn_recipe(
+                self._runtime,
+                self._client,
+                page,
+                budget,
+                ref=self._ref,
+                target_url=self._target_url,
+                company=self._company,
+            )
+        except RecipeCapReachedError as error:
             return error
-        if isinstance(document, HtmlDocument):
-            return UnsupportedUrlError(json_url, "expected JSON")
-        if not budget.try_start():
-            raise RecipeCapReachedError
-        json_page = _Page(document, final_url)
-        second = await self._propose(json_page, budget)
-        return _Learned(_required(second.recipe_json), json_page, json_url)
 
-    async def _propose(self, page: _Page, budget: "Budget") -> "ProposedRecipe":
-        """Make one call on a page."""
-        from ijob_ai.llm.settings import Task  # noqa: PLC0415
-        from ijob_ai.tasks.source_recipe import propose_recipe  # noqa: PLC0415
 
-        registry = await self._runtime.registry_for(Task.SOURCE_RECIPE)
-        return await propose_recipe(
-            page.url,
-            _format_of(page.document),
-            sample_text(page.document),
-            lm=registry.lm_for(Task.SOURCE_RECIPE),
-            provider=self._provider,
-            budget=budget,
-            timeout_s=self._runtime.settings.timeout_s,
-        )
+async def _propose(
+    runtime: LlmRuntime, provider: "Provider", page: LoadedPage, budget: "Budget"
+) -> "ProposedRecipe":
+    """Make one call on a page."""
+    from ijob_ai.llm.settings import Task  # noqa: PLC0415
+    from ijob_ai.tasks.source_recipe import propose_recipe  # noqa: PLC0415
+
+    registry = await runtime.registry_for(Task.SOURCE_RECIPE)
+    return await propose_recipe(
+        page.url,
+        _format_of(page.document),
+        sample_text(page.document),
+        lm=registry.lm_for(Task.SOURCE_RECIPE),
+        provider=provider,
+        budget=budget,
+        timeout_s=runtime.settings.timeout_s,
+    )
 
 
 def _format_of(document: Document) -> Literal["html", "json"]:

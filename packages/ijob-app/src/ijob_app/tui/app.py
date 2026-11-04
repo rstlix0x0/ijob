@@ -175,8 +175,12 @@ class IjobApp(App[None]):
         self._dirty = True
 
     def _draw(self) -> None:
-        """Draw whatever changed since the last tick."""
-        if not self._dirty:
+        """Draw whatever changed since the last tick.
+
+        On a busy machine the timer can tick before the screen is composed; the
+        change stays pending for the next tick.
+        """
+        if not self._dirty or not (self.query("#activity") and self.query("#panes")):
             return
         self._dirty = False
         self.query_one("#activity", Static).update(self._activity())

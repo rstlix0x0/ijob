@@ -14,6 +14,7 @@ import dspy
 from dspy.utils.exceptions import AdapterParseError, LMError
 from ijob_core.model import PostingId
 from opentelemetry.trace import Span
+from pydantic import BaseModel
 
 from ijob_ai.errors import (
     CostUnknownError,
@@ -36,23 +37,55 @@ _MAX_TEXT_BYTES: Final = 16 * 1024
 _TRUNCATED: Final = "[truncated]"
 
 
-class _ForgivingJSONAdapter(dspy.JSONAdapter):  # type: ignore[misc]  # dspy exports it untyped
-    """The JSON adapter, also reading an answer written in `[[ ## field ## ]]` sections.
+def _under_field_name(signature: Any, completion: str) -> str | None:  # noqa: ANN401  # dspy exports it untyped
+    """Put an object written without its field name under that name.
 
-    A model asked for JSON sometimes answers correctly in DSPy's section form.
+    Args:
+        signature: The signature the completion answers.
+        completion: The model's text.
+
+    Returns:
+        The object as the value of the signature's field, or `None` unless the
+        signature has one output field, of a model type, and the text holds an
+        object. The object is not checked here; the field's type checks it.
+    """
+    if len(signature.output_fields) != 1:
+        return None
+    name, field = next(iter(signature.output_fields.items()))
+    is_model = isinstance(field.annotation, type) and issubclass(
+        field.annotation, BaseModel
+    )
+    start = completion.find("{")
+    end = completion.rfind("}")
+    if not is_model or start < 0 or end < start:
+        return None
+    return f'{{"{name}": {completion[start : end + 1]}}}'
+
+
+class _ForgivingJSONAdapter(dspy.JSONAdapter):  # type: ignore[misc]  # dspy exports it untyped
+    """The JSON adapter, also reading two other forms of a correct answer.
+
+    A model asked for JSON sometimes answers correctly in DSPy's section form, or
+    writes the object of a task's one output field without naming that field.
     """
 
     @override
     def parse(self, signature: Any, completion: str) -> dict[str, Any]:
-        """Read a completion as JSON, or else as sections.
+        """Read a completion as JSON, as sections, or as an unnamed object.
 
         Raises:
-            AdapterParseError: The completion is neither.
+            AdapterParseError: The completion is none of them.
         """
         try:
             parsed: dict[str, Any] = super().parse(signature, completion)
         except AdapterParseError:
-            parsed = dspy.ChatAdapter().parse(signature, completion)
+            try:
+                parsed = dspy.ChatAdapter().parse(signature, completion)
+            except AdapterParseError:
+                named = _under_field_name(signature, completion)
+                if named is None:
+                    raise
+                parsed = super().parse(signature, named)
         return parsed
 
 

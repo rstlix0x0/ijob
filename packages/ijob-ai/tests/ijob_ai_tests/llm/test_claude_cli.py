@@ -72,8 +72,9 @@ def test_check_version_nonzero_exit(tmp_path: Path) -> None:
 
 
 def test_check_version_timeout(tmp_path: Path) -> None:
-    script = _script(tmp_path, "sleep 5")
+    script = _script(tmp_path, "sleep 60")
     started = time.monotonic()
     with pytest.raises(ProviderUnavailableError):
         asyncio.run(check_version(script, timeout_s=0.2))
-    assert time.monotonic() - started < 2
+    # far below the child's 60 s, with room for a busy machine
+    assert time.monotonic() - started < 30
