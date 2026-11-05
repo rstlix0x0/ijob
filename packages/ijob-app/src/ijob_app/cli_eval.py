@@ -141,7 +141,7 @@ from ijob_app.view import (
 
 _EXIT_REFUSED: Final = 1
 _EXIT_BAD_ARGUMENT: Final = 2
-_AFFIRMATIVE: Final = frozenset({"y", "yes"})
+AFFIRMATIVE: Final = frozenset({"y", "yes"})
 _KEY_WIDTH: Final = 17
 _REFRESH_PER_SECOND: Final = 8
 _SPINS_PER_SECOND: Final = 10
@@ -178,7 +178,7 @@ class _Reply:
 
 
 @contextmanager
-def _eval_failures() -> Iterator[None]:
+def eval_failures() -> Iterator[None]:
     """Turn what an eval operation raises into a message and an exit status.
 
     A value the run refuses exits `2`; everything the LLM layer raises exits `1`,
@@ -264,7 +264,7 @@ def _show_plan(offer: LabelOffer, notice: str | None) -> None:
         say_note(f"note: {notice}")
 
 
-def _ask(question: str) -> str:
+def ask_question(question: str) -> str:
     """Ask the question where the user sees it, and keep it out of a piped result.
 
     A terminal gets the drawn prompt on standard output; with standard output
@@ -317,8 +317,8 @@ def _confirm(
     if not is_interactive():
         say_error("confirmation needed; pass --yes")
         raise typer.Exit(code=_EXIT_REFUSED)
-    answer = _ask("Start a new label set?" if changes else "Start the jury?")
-    if answer.strip().lower() not in _AFFIRMATIVE:
+    answer = ask_question("Start a new label set?" if changes else "Start the jury?")
+    if answer.strip().lower() not in AFFIRMATIVE:
         say_note("note: the jury was not started")
         raise typer.Exit(code=_EXIT_REFUSED)
 
@@ -614,7 +614,7 @@ def _add_report(group: typer.Typer, open_session: SessionOpener) -> None:
             raise typer.Exit(code=_EXIT_BAD_ARGUMENT)
         with open_session(db, config, models=True) as session:
             service = session.service
-            with _eval_failures():
+            with eval_failures():
                 if run is None:
                     _show_report(service.eval_report())
                 else:
@@ -695,7 +695,7 @@ def _confirm_run(
     if not is_interactive():
         say_error("confirmation needed; pass --yes")
         raise typer.Exit(code=_EXIT_REFUSED)
-    if _ask("Start the run?").strip().lower() not in _AFFIRMATIVE:
+    if ask_question("Start the run?").strip().lower() not in AFFIRMATIVE:
         say_note("note: the run was not started")
         raise typer.Exit(code=_EXIT_REFUSED)
 
@@ -861,7 +861,7 @@ def _add_run(
         chosen = _suite(suite)
         with open_session(db, config, models=True) as session:
             service = session.service
-            with _eval_failures():
+            with eval_failures():
                 offer = asyncio.run(
                     service.eval_prepare_run(
                         chosen,
@@ -878,7 +878,7 @@ def _add_run(
             )
             _show_run_plan(offer, notice)
             _confirm_run(offer, yes=yes, is_interactive=is_interactive)
-            with _eval_failures():
+            with eval_failures():
                 report = (
                     _run_suite_on_terminal(service, offer)
                     if is_terminal()
@@ -946,7 +946,7 @@ def eval_app(
         """Have the jury vote on a sample of postings and label what they agree on."""
         with open_session(db, config, models=True) as session:
             service = session.service
-            with _eval_failures():
+            with eval_failures():
                 offer = asyncio.run(service.eval_prepare(limit=limit, add=add))
             callers = list(dict.fromkeys(item.juror for item in offer.plan.items))
             notice = data_notice(callers)
@@ -955,7 +955,7 @@ def eval_app(
             else:
                 say_note("note: every vote is already stored")
             _confirm(offer, notice, yes=yes, is_interactive=is_interactive)
-            with _eval_failures():
+            with eval_failures():
                 report = (
                     _run_on_terminal(service, offer)
                     if is_terminal()
@@ -979,7 +979,7 @@ def eval_app(
             raise typer.Exit(code=_EXIT_REFUSED)
         with open_session(db, config, models=True) as session:
             service = session.service
-            with _eval_failures():
+            with eval_failures():
                 plan = service.eval_review_items()
             _show_skipped(plan)
             if plan.items:

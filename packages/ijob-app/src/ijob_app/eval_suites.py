@@ -358,12 +358,16 @@ class _Context:
     profile: ResumeProfile
 
 
-def _context(store: Store, eval_settings: EvalSettings, model: ModelRef) -> _Context:
-    """Find the label set for the stored inputs and refuse a juror as the model.
+def _inputs(
+    store: Store, eval_settings: EvalSettings, model: ModelRef
+) -> tuple[Instructions, ResumeProfile, tuple[str, ...]]:
+    """Read the stored inputs and the jury, and refuse a juror as `model`.
+
+    Returns:
+        The stored instructions, the stored profile and the sorted jury.
 
     Raises:
-        EvalNeedsError: No jury is set, no rules or profile are stored, or no set
-            exists for them.
+        EvalNeedsError: No jury is set, or no rules or profile are stored.
         InvalidValueError: `model` is, or was, a juror of a set for these rules and
             profile.
     """
@@ -385,7 +389,36 @@ def _context(store: Store, eval_settings: EvalSettings, model: ModelRef) -> _Con
             f"{model} is on the jury of the label set and would be graded on its "
             "own answers; pick another model",
         )
-    eval_set = find_set(store.evals, rules_sha256, profile_sha256, jury)
+    return instructions, profile, jury
+
+
+def refuse_juror(store: Store, eval_settings: EvalSettings, model: ModelRef) -> None:
+    """Refuse a model that is, or was, a juror of the label set for the stored inputs.
+
+    Args:
+        store: The open store.
+        eval_settings: The eval settings, whose jury identifies the set.
+        model: The model that would be graded.
+
+    Raises:
+        EvalNeedsError: No jury is set, or no rules or profile are stored.
+        InvalidValueError: `model` is, or was, a juror of a set for these rules and
+            profile.
+    """
+    _inputs(store, eval_settings, model)
+
+
+def _context(store: Store, eval_settings: EvalSettings, model: ModelRef) -> _Context:
+    """Find the label set for the stored inputs and refuse a juror as the model.
+
+    Raises:
+        EvalNeedsError: No jury is set, no rules or profile are stored, or no set
+            exists for them.
+        InvalidValueError: `model` is, or was, a juror of a set for these rules and
+            profile.
+    """
+    instructions, profile, jury = _inputs(store, eval_settings, model)
+    eval_set = find_set(store.evals, instructions.rules_sha256, profile.sha256(), jury)
     if eval_set is None:
         raise _no_set()
     return _Context(eval_set, instructions, profile)
@@ -443,7 +476,7 @@ def _limited[Row](
     return [row for row in rows if any(row is chosen for chosen in taken)]
 
 
-def _unchanged(store: Store, case: EvalCase) -> Posting | None:
+def unchanged_posting(store: Store, case: EvalCase) -> Posting | None:
     """Return the case's posting, or `None` if its text changed or it is gone."""
     from ijob_ai.tasks.text import input_sha256, posting_block  # noqa: PLC0415
 
@@ -503,7 +536,7 @@ def prepare_suite(  # noqa: PLR0913  # the plan's inputs, one each
     cases: list[SuiteCase] = []
     skipped = 0
     for case, label in pairs:
-        posting = _unchanged(store, case)
+        posting = unchanged_posting(store, case)
         if posting is None:
             skipped += 1
         else:
@@ -633,7 +666,7 @@ def prepare_reasons(
             reason = None if result is None else _reason_text(task, result.answer)
             if reason is None:
                 continue
-            posting = _unchanged(store, case)
+            posting = unchanged_posting(store, case)
             if posting is None:
                 skipped += 1
                 continue
@@ -660,15 +693,23 @@ def prepare_reasons(
 
 
 def _reason_input(task: EvalTask, context: _Context, posting: Posting) -> str:
-    """Write the grader's input: the rules or profile, then the posting block."""
-    from ijob_ai.tasks.text import numbered_rules, posting_block  # noqa: PLC0415
+    """Write the grader's input: the rules or profile, then the posting block.
+
+    The posting block has any field marker broken, so a posting cannot pose as
+    a section of the grader's prompt.
+    """
+    from ijob_ai.tasks.text import (  # noqa: PLC0415
+        neutralize_markers,
+        numbered_rules,
+        posting_block,
+    )
 
     head = (
         numbered_rules(context.instructions.rules)
         if task is EvalTask.JUDGE
         else context.profile.to_json()
     )
-    return f"{head}\n\n{posting_block(posting)}"
+    return f"{head}\n\n{neutralize_markers(posting_block(posting))}"
 
 
 def _percentile(sorted_values: Sequence[int], fraction: float) -> int:
@@ -1330,6 +1371,7 @@ async def run_reasons_suite(  # noqa: PLR0913  # the run's inputs, one each
             "graded": len(scores),
             "ungraded": len(finished) - len(scores),
             "passed": sum(1 for case in finished if case.passed),
+            "cases": len(plan.items),
             **_latency(finished),
         }
 

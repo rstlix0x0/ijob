@@ -1296,9 +1296,11 @@ def test_add_without_a_set_is_refused(store: Store) -> None:
 def test_add_with_nothing_to_draw_raises(store: Store) -> None:
     eval_set, _ = _voted_pair(store, 100)
 
-    with pytest.raises(TooFewCasesError):
+    with pytest.raises(TooFewCasesError) as raised:
         _add(store, 5)
 
+    assert "no posting is left to add" in str(raised.value)
+    assert "needs at least 10" not in str(raised.value)
     assert len(store.evals.cases(eval_set.id)) == 100
 
 
@@ -1322,3 +1324,40 @@ def test_spot_check_grows_with_the_set(store: Store) -> None:
 
     assert len(items) == 12
     assert sum(i.task is EvalTask.JUDGE for i in items) == 6
+
+
+def test_jury_passes_no_program(store: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ijob_ai.llm.budget import Budget  # noqa: PLC0415
+    from ijob_app.eval_ops import VoteItem, _ask  # noqa: PLC0415
+    from ijob_core.model import Score, Verdict  # noqa: PLC0415
+
+    _ready(store)
+    plan = prepare_label_run(store, _settings(*_JURY), now=_now)
+    posting = plan.items[0].posting
+    seen: dict[str, dict[str, object]] = {}
+
+    async def judge(*_args: object, **kwargs: object) -> Verdict:
+        seen["judge"] = kwargs
+        return Verdict(keep=True, reason="fine", rule=None)
+
+    async def score(*_args: object, **kwargs: object) -> Score:
+        seen["scorer"] = kwargs
+        return Score(score=50, reasons=("fine",))
+
+    monkeypatch.setattr("ijob_ai.tasks.judge.judge_posting", judge)
+    monkeypatch.setattr("ijob_ai.tasks.scorer.score_posting", score)
+
+    for task in (EvalTask.JUDGE, EvalTask.SCORER):
+        asyncio.run(
+            _ask(
+                VoteItem(posting, task, _A),
+                plan,
+                object(),  # the patched calls never use it
+                Budget(1.0),
+                timeout_s=5,
+                now=_now,
+            )
+        )
+
+    assert set(seen) == {"judge", "scorer"}
+    assert all(kwargs.get("program") is None for kwargs in seen.values())

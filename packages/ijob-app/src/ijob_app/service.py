@@ -133,6 +133,7 @@ if TYPE_CHECKING:
     from ijob_app.eval_report import EvalReport, RunDetail
     from ijob_app.eval_run import RunOffer, RunProgress
     from ijob_app.eval_suites import Suite, SuiteReport
+    from ijob_app.tune_ops import PairOutcome, ScreenOffer, ScreenPair, ScreenReport
 
 type ClientFactory = Callable[[ConditionalCache | None], PoliteClient]
 
@@ -2025,6 +2026,97 @@ class Service:
         from ijob_app.eval_report import run_detail  # noqa: PLC0415
 
         return run_detail(self._store.evals, run_id)
+
+    async def tune_prepare_screen(self) -> "ScreenOffer":
+        """Plan a screen and estimate what its runs cost.
+
+        Each pair the screen still needs is priced as an `eval run` of its suite
+        would be. Nothing is frozen and no model is called.
+
+        Returns:
+            The offer, whose plan lists the pairs and the skipped models.
+
+        Raises:
+            InvalidValueError: The config file is unusable, `[tune].baseline` is
+                absent, a candidate or the baseline is a juror of the label set,
+                or the price list lacks a model the screen calls.
+            MissingModelError: A pair's model cannot be resolved.
+            EvalNeedsError: A jury, rules, profile, label set or labels are
+                missing or wait for review.
+            TooFewKeepsError: Too few keeps and rejects are labelled to tune on.
+            EvalBudgetSpentError: The recorded eval spending has used up
+                `eval.total_cost_usd`.
+            ProviderUnavailableError: A variable that redirects model calls is set.
+            sqlite3.Error: The store cannot be read.
+        """
+        from ijob_app.llm_config import (  # noqa: PLC0415
+            read_eval_settings,
+            read_tune_settings,
+        )
+        from ijob_app.tune_ops import prepare_screen, screen_offer  # noqa: PLC0415
+
+        settings = read_eval_settings(self._llm.config_path)
+        tune = read_tune_settings(self._llm.config_path)
+        plan = prepare_screen(
+            self._store, self._runtime().settings, settings, tune, now=self._now
+        )
+        offers = [
+            await self.eval_prepare_run(pair.suite, model=pair.model, limit=None)
+            for pair in plan.pairs
+        ]
+        return screen_offer(
+            plan,
+            offers,
+            settings,
+            left=settings.total_cost_usd - self._store.evals.total_spend(),
+            frozen=self._store.tunes.has_split(plan.eval_set.id),
+        )
+
+    async def tune_screen(
+        self,
+        offer: "ScreenOffer",
+        *,
+        on_progress: Callable[["ScreenPair", "RunProgress"], None] | None = None,
+        on_outcome: Callable[["PairOutcome"], None] | None = None,
+    ) -> "ScreenReport":
+        """Freeze the split, then run each pair of an offer as an eval run.
+
+        Every pair is an ordinary `eval run` with its own spend and run row.
+
+        Args:
+            offer: What `tune_prepare_screen` returned.
+            on_progress: Called after each case of a pair ends, with the pair.
+            on_outcome: Called as each pair ends.
+
+        Returns:
+            What the screen did.
+
+        Raises:
+            EvalNeedsError: Labels wait for review; nothing ran.
+            TooFewKeepsError: Too few keeps and rejects to tune on; nothing ran.
+            asyncio.CancelledError: The call was cancelled; the runs already
+                written stand.
+            sqlite3.Error: The store cannot be read or written.
+        """
+        from ijob_app.tune_ops import run_screen  # noqa: PLC0415
+
+        offers = dict(zip(offer.plan.pairs, offer.offers, strict=True))
+
+        async def run(pair: "ScreenPair") -> "SuiteReport":
+            def progress(update: "RunProgress") -> None:
+                if on_progress is not None:
+                    on_progress(pair, update)
+
+            return await self.eval_run(offers[pair], on_progress=progress)
+
+        return await run_screen(
+            self._store,
+            offer.plan,
+            offer.settings,
+            run,
+            now=self._now,
+            on_outcome=on_outcome,
+        )
 
     def posting_sources(self, posting_id: PostingId) -> list[SourceRef]:
         """List the sources that have shown a posting.

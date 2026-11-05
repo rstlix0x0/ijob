@@ -568,6 +568,13 @@ def test_eval_label_with_too_few_postings_says_how_many(bench: _Bench) -> None:
     assert "only 2 postings" in result.stderr
 
 
+def test_tune_screen_without_a_baseline_gives_the_setting(bench: _Bench) -> None:
+    result = bench.run("tune", "screen", "--yes")
+
+    assert result.exit_code == 2
+    assert "tune.baseline" in result.stderr
+
+
 def test_eval_review_without_a_jury_gives_the_setting(bench: _Bench) -> None:
     result = bench.run("eval", "review")
 

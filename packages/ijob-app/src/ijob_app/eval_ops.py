@@ -372,12 +372,14 @@ class ReviewPlan:
         items: The cases to show, in order: the ones waiting for the user, then
             the spot check.
         skipped: Postings left out because their text changed or they are gone.
+        set_id: The label set the plan covers, or `None` when there is none.
     """
 
     has_set: bool
     rules: tuple[str, ...]
     items: tuple[ReviewItem, ...]
     skipped: int
+    set_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1042,6 +1044,7 @@ def review_items(
         rules=instructions.rules,
         items=(*waiting, *checks),
         skipped=len(postings.unusable),
+        set_id=eval_set.id,
     )
 
 

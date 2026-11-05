@@ -490,6 +490,21 @@ def test_cli_accepted_add_stores_the_cases_and_asks_for_the_new_votes(
     assert re.search(r"^added +5 postings to the set$", result.stderr, re.MULTILINE)
 
 
+@pytest.mark.usefixtures("on_a_terminal")
+def test_cli_add_on_a_terminal_notes_the_added_count(
+    tmp_path: Path,
+    client_factory_for: ClientFactoryBuilder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _labelled_world(tmp_path, client_factory_for, monkeypatch)
+    _routed(monkeypatch, 5)
+
+    result = world.run("--add", "5", "--yes")
+
+    assert result.exit_code == 0, result.output
+    assert "! added 5 postings to the label set" in result.stderr
+
+
 def test_cli_add_without_a_set_points_at_plain_label(world: _World) -> None:
     result = world.run("--add", "5", "--yes")
 

@@ -213,6 +213,7 @@ from ijob_app.cli_search import (
     live_judge_command,
     live_search_command,
 )
+from ijob_app.cli_tune import tune_app
 from ijob_app.config import (
     FilterFlags,
     FilterLayers,
@@ -1091,7 +1092,7 @@ def _llm_groups(  # noqa: PLR0913, PLR0917 - the application and what its groups
     is_interactive: Callable[[], bool],
     resolver: HostResolver,
 ) -> None:
-    """Add the `cv`, `instructions`, `traces` and `eval` groups and `score`.
+    """Add the `cv`, `instructions`, `traces`, `eval` and `tune` groups and `score`.
 
     Args:
         app: The application to add the groups to.
@@ -1108,6 +1109,7 @@ def _llm_groups(  # noqa: PLR0913, PLR0917 - the application and what its groups
     app.add_typer(instructions_app(opener, is_interactive), name="instructions")
     app.add_typer(traces_app(opener), name="traces")
     app.add_typer(eval_app(opener, is_interactive, now), name="eval")
+    app.add_typer(tune_app(opener, is_interactive), name="tune")
     score_command(app, opener)
     explore_command(app, opener, is_interactive)
 
@@ -1146,8 +1148,8 @@ def make_app(  # noqa: PLR0915  # one registration per command
 
     Returns:
         The application, with its `setup`, `search`, `show`, `label`, `score` and
-        `tui` commands and its `sources`, `cv`, `instructions`, `traces` and
-        `eval` groups.
+        `tui` commands and its `sources`, `cv`, `instructions`, `traces`, `eval`
+        and `tune` groups.
     """
     theme_help()
     app = typer.Typer(

@@ -196,6 +196,34 @@ def test_runs_of_different_case_counts_are_not_compared(records: EvalRecords) ->
     assert found.other_ids == (older.id,)
 
 
+def test_reasons_runs_of_different_case_counts_are_not_compared(
+    records: EvalRecords,
+) -> None:
+    set_id = _set_id(records)
+    older = _run(records, "reasons", set_id=set_id, metrics={"cases": 4})
+    newest = _run(records, "reasons", set_id=set_id, metrics={"cases": 20})
+
+    found = comparable_runs(records.runs(), suite="reasons", set_id=set_id)
+
+    assert [run.id for run in found.runs] == [newest.id]
+    assert found.other_ids == (older.id,)
+
+
+def test_reasons_runs_stored_without_cases_still_compare(
+    records: EvalRecords,
+) -> None:
+    set_id = _set_id(records)
+    runs = [
+        _run(records, "reasons", set_id=set_id, metrics={"mean_score": 0.7})
+        for _ in range(2)
+    ]
+
+    found = comparable_runs(records.runs(), suite="reasons", set_id=set_id)
+
+    assert len(found.runs) == len(runs)
+    assert found.others == 0
+
+
 def test_unlabelled_suites_still_compare(records: EvalRecords) -> None:
     hostile = [
         _run(records, "hostile", version="hostile-1", metrics={"cases": cases})
