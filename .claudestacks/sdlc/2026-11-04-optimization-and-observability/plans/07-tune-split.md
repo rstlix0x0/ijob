@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-04
 depends-on: [04]
 built-on: 671aa742d4fc
@@ -98,3 +98,42 @@ packages/ijob-app/tests/ijob_app_tests/test_tune_ops.py      — create: freezin
 
 - `uv run --locked pytest packages/ijob-core packages/ijob-app/tests/ijob_app_tests/test_tune_ops.py` passes.
 - The five commands in `CLAUDE.md` exit 0.
+
+## Review findings
+
+One review of a frozen snapshot; the coder's scoped gate was green (583 passed), and the full gate runs once at the end of the run.
+
+Blocking, fixed:
+
+- `tune_ops.py` `_divide`: `review_items` picks its own set, so a non-current set with a split vote pending froze 100 rows in a probe. It now refuses unless `ReviewPlan.set_id` is the set given. `test_review_of_another_set_freezes_nothing` failed first. `uv run --locked pytest packages/ijob-app/tests/ijob_app_tests/test_cli_tune.py packages/ijob-app/tests/ijob_app_tests/test_tune_ops.py packages/ijob-app/tests/ijob_app_tests/test_tune_view.py -q`: `60 passed in 14.55s`.
+- `test_tune_records.py:100`: `_MIGRATIONS[:-1]` stops proving this migration once a later one lands. Pinned to `[:8]`.
+
+Left open:
+
+- `tune_records.py:74` risk: `with conn` holds no lock across the check and the insert. Two writers with disjoint rows merged in a probe. With overlapping rows, which is what `freeze_split` produces, the second gets a raw `IntegrityError` and the first writer's rows stay. Fix: `BEGIN IMMEDIATE`, as `Store.record` does.
+- `tune_split` risk: nothing catches removing `sorted`; every test passes ascending ids.
+- `tune_ops.py:131` risk: nothing catches moving the frozen-split return below the review check.
+- `tune_ops.py:155` question: a frozen posting whose text changes after the freeze is counted nowhere.
+- `tune_ops.py:174` nit: text that reverts to its drawn form counts as `added_later`.
+- `tune_records.py:62` nit: an empty `put_split` writes nothing and leaves the set unfrozen.
+- Nits: rollback untested; the `part` CHECK untested; a missing judge label untested in `_both_labelled`; "1 labels" at `tune_ops.py:82`; incomplete `Raises` at `tune_ops.py:126`.
+
+## Deviations
+
+- 2026-11-05: `freeze_split` is `freeze_split(store, eval_set, settings, *, now)`, not `(store, eval_set)`, because `review_items` needs the jury settings and a clock.
+- 2026-11-05: `test_store.py` was not in the file list, but the version pin and the table list had to move with the migration.
+- 2026-11-05: the too-few-keeps test runs both 21/79 and 39/161; the review test is `test_labels_awaiting_review_freezes_nothing`.
+
+## Gate
+
+Five commands in `CLAUDE.md` on the tree holding plans 06 to 10, 2026-11-05: format, check and mypy (300 files) clean; `4870 passed in 323.45s`. `test_cli_terminal.py` was not in plan 10's file list, but `test_every_command_is_checked_here` needs a check for each command, so it gained `test_tune_screen_without_a_baseline_gives_the_setting`.
+
+## Risk fixes
+
+2026-11-05, on the user's word to fix all open risks:
+
+- `tune_records.py:74` `put_split` takes `BEGIN IMMEDIATE`: `test_a_second_writer_cannot_merge_rows_into_a_split_being_frozen`.
+- `tune_split`: `test_tune_split_does_not_depend_on_the_order_given`, caught a mutant.
+- `tune_ops.py:131`: `test_a_frozen_split_is_returned_while_a_vote_awaits_review`, caught a mutant.
+- `tune_ops.py:155` decided: `changed` counts a frozen posting whose text changed or that is gone, and part counts stay: `test_a_frozen_posting_changed_since_the_freeze_is_counted_as_changed`.
+- Still open, a nit: `tune_ops.py:174`, text that reverts to its drawn form counts as `added_later`, because split rows store no freeze time.

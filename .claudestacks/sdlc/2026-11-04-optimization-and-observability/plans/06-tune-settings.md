@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-04
 depends-on: [05]
 built-on: 671aa742d4fc
@@ -64,3 +64,35 @@ packages/ijob-app/tests/ijob_app_tests/test_llm_config.py  — modify: the table
 
 - `uv run --locked pytest packages/ijob-ai packages/ijob-app/tests/ijob_app_tests/test_llm_config.py` passes.
 - The five commands in `CLAUDE.md` exit 0.
+
+## Review findings
+
+One review, scoped gate green (`pytest` on `test_settings.py` and `test_llm_config.py`: 91 passed). No blocking finding. Left open:
+
+- `llm_config.py:181` risk: no test catches removal of the `baseline` type guard; without it `baseline = 1` raises `AttributeError`.
+- `test_llm_config.py:318` risk: no test reads the `[tune]` template block, so deleting it or mistyping a candidate stays green.
+- `settings.py:1`, `llm_config.py:1` nit: module docstrings omit tuning.
+- `config_template.toml:64` nit: "written on one line each" reads as a reader rule, though a multi-line list parses.
+- `test_llm_config.py:516` nit: `match=r"tune\."` does not prove each case names its own key.
+- `test_llm_config.py:521` nit: the wrong-type test covers `candidates` only, not `models`.
+
+## Deviations
+
+- 2026-11-05: `test_tune_cost_bounds` is two tests, `test_tune_cost_out_of_bounds_is_refused` and `test_tune_cost_bounds_are_read`, with all five values covered. `test_bad_model_reference_is_refused` is parametrized over `baseline`, `candidates` and `models`.
+- 2026-11-05: the template writes `candidates` on one line, because `test_template_new_settings_are_valid_once_uncommented` keeps only lines holding `=`.
+
+## Gate
+
+Five commands in `CLAUDE.md` on the tree holding plans 06 to 10, 2026-11-05: format, check and mypy (300 files) clean; `4870 passed in 323.45s`. `test_cli_terminal.py` was not in plan 10's file list, but `test_every_command_is_checked_here` needs a check for each command, so it gained `test_tune_screen_without_a_baseline_gives_the_setting`.
+
+## Risk fixes
+
+2026-11-05, on the user's word to fix all open risks, for plans 05 and 06:
+
+- `README.md:91` now says `.env.example` lists the provider key, and names `IJOB_HOME` and `OTEL_SDK_DISABLED` in prose.
+- `settings.py:81` `PhoenixSettings` validates at construction, through `check_local_endpoint`, which `llm_config.py` now shares: `test_phoenix_refuses_non_local_endpoints_at_construction`.
+- `test_setup.py:161`: `test_export_failures_print_nothing_on_stderr` covers all three loggers, each caught by a mutant.
+- `test_llm_config.py:327`: `test_template_tracing_and_phoenix_lines_parse_through_the_reader`.
+- `test_repo_files.py:35`: `test_localhost_check_catches_a_widened_compose_file` catches a second `0.0.0.0` port and `network_mode: host`.
+- `llm_config.py:181`: `test_tune_baseline_must_be_a_string`.
+- `test_llm_config.py:318`: `test_template_tune_block_parses_once_uncommented`.

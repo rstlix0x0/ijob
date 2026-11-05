@@ -97,3 +97,10 @@ packages/ijob-core/tests/ijob_core_tests/test_eval_records.py    — modify: poo
 - 2026-11-05 — Task 1 said `_numbered` calls `numbered_rules`. `_numbered` was deleted and `_reason_input` calls `numbered_rules` directly, which keeps one home for the format.
 - 2026-11-05 — Tests and code were written in one pass, so new tests were not seen failing first. Review ran them against the old code: 11 fail, and the 3 that pass by design each fail on a targeted mutant.
 - 2026-11-05 — `JudgeSig` left the "inputs untrusted" parametrization, since its text now says "posting field"; `test_judge_instructions_name_rules_and_posting` holds the sentence.
+
+## Risk fixes
+
+2026-11-05, on the user's word to fix all open risks:
+
+- `judge.py:73` `neutralize_markers` (`tasks/text.py`) breaks the `[[ ##` form in third-party text before it is sent: `judge_posting`, `score_posting`, the reasons grader, `job_extract` item text, the `source_recipe` sample and ReAct tool results. Tests: `test_a_posting_cannot_forge_the_rules_section`, `test_a_posting_cannot_forge_the_profile_section`, `test_a_marker_in_a_posting_does_not_reach_the_grader_whole`, `test_a_marker_in_the_item_text_is_broken`, `test_a_marker_in_the_sample_is_broken`, `test_a_marker_in_a_tool_result_is_broken_in_the_next_prompt`. Text with no marker is byte-identical, so no version changed. Effect on a real model is not measured.
+- `test_judge.py:104`: `test_judge_states_the_posting_is_untrusted`, `test_scorer_states_the_inputs_are_untrusted`, each failing on a mutant dropping the sentence.

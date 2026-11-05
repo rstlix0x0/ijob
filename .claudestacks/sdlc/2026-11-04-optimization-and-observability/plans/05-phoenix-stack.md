@@ -113,3 +113,15 @@ packages/ijob-app/tests/ijob_app_tests/test_repo_files.py         — create: co
 - 2026-11-05 — `_endpoint` is `_endpoint(value, key, default)`, not `_endpoint(value, key)`, to carry the default.
 - 2026-11-05 — One test beyond the plan: `test_phoenix_endpoint_must_be_a_string`, the only test of that branch.
 - 2026-11-05 — `requests` stays in `packages/ijob-ai/pyproject.toml`, for plan 14.
+
+## Risk fixes
+
+2026-11-05, on the user's word to fix all open risks, for plans 05 and 06:
+
+- `README.md:91` now says `.env.example` lists the provider key, and names `IJOB_HOME` and `OTEL_SDK_DISABLED` in prose.
+- `settings.py:81` `PhoenixSettings` validates at construction, through `check_local_endpoint`, which `llm_config.py` now shares: `test_phoenix_refuses_non_local_endpoints_at_construction`.
+- `test_setup.py:161`: `test_export_failures_print_nothing_on_stderr` covers all three loggers, each caught by a mutant.
+- `test_llm_config.py:327`: `test_template_tracing_and_phoenix_lines_parse_through_the_reader`.
+- `test_repo_files.py:35`: `test_localhost_check_catches_a_widened_compose_file` catches a second `0.0.0.0` port and `network_mode: host`.
+- `llm_config.py:181`: `test_tune_baseline_must_be_a_string`.
+- `test_llm_config.py:318`: `test_template_tune_block_parses_once_uncommented`.

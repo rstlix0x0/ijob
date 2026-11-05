@@ -123,3 +123,11 @@ packages/ijob-app/tests/ijob_app_tests/test_cli_eval.py    — modify: the optio
 - 2026-11-05 — Task 3 applies the case-count rule to all of `LABELLED_SUITES`, but only judge and scorer runs store `cases`, so `reasons` runs compare as before. Left as built; see the open `eval_report.py:232` finding.
 - 2026-11-05 — A terminal `note: added N` line was added beyond the plan, to carry "says how many" on a terminal.
 - 2026-11-05 — Tests beyond the plan: `test_add_out_of_range_is_refused`, `test_spot_check_grows_with_the_set`, `test_cli_add_with_limit_exits_2`, `test_cli_add_without_a_set_points_at_plain_label`, and three CLI tests for the declined, refused and accepted paths.
+
+## Risk fixes
+
+2026-11-05, on the user's word to fix all open risks:
+
+- `cli_eval.py:250`: `test_cli_add_on_a_terminal_notes_the_added_count`.
+- `eval_ops.py:173`: `test_add_with_nothing_to_draw_raises` now asserts the message.
+- `eval_report.py:232`: `reasons` is a labelled suite, so its runs now store `cases`. `test_reasons_runs_of_different_case_counts_are_not_compared`, `test_reasons_runs_stored_without_cases_still_compare`. Once a new `reasons` run is newest, older rows stand apart; `eval_view.py:619` still explains that as a `--limit` run (open nit).

@@ -160,3 +160,14 @@ packages/ijob-app/tests/ijob_app_tests/test_tune_view.py — modify: the table
 
 - `uv run --locked pytest packages/ijob-app` passes.
 - The five commands in `CLAUDE.md` exit 0.
+
+## Carry-over from plans 03 to 10
+
+Written 2026-11-05 from reviews of the code those plans built. The engine and task names are the code's.
+
+- Examples: call `neutralize_markers` (`ijob_ai/tasks/text.py`) on posting text when building train and val examples, because tuned demos hold that text and reach prompts through `tuned_predict`. Nothing enforces this, so add a test: a posting holding `[[ ## rules ## ]]` gives an example, and a demo, with no real marker. Every example needs a `label`; `TuneRequest` refuses one without.
+- Rails: build one fresh `RailGuard` per run, since a stopped guard raises `ValueError`. `task_lm` and `tuner_lm` must be `RailedLM`s on that guard; `TuneRequest` refuses anything else.
+- Stops: `tune_program` absorbs a cancel and returns an outcome, so stop the grid on `outcome.interrupted` and on `outcome.fatal`. Read `interrupted` before anything else. Catch `KeyboardInterrupt` around `asyncio.run` and treat it as a stop: a second Ctrl-C leaves the loop and the outcome is lost, and a provider may bill an in-flight call whose cost cannot be known.
+- Errors: `compile_error` keeps only the type for `AdapterParseError` and caps other messages at 200 characters, but another error can still wrap reply text, so clean it before showing or storing it.
+- MIPROv2: a val over 50 is refused before any call and reads `incomplete`, because DSPy turns minibatching on above that. It first applies at about 128 keeps and 128 rejects.
+- Versions: `program_version` hashes demos as text; the engine dumps them with `sort_keys=True`, so compute the version from the outcome's text as given.

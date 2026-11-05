@@ -83,3 +83,12 @@ packages/ijob-ai/tests/ijob_ai_tests/llm/test_claude_engine.py   — modify: tur
 
 - 2026-11-05 — P7's six-role shape counts the system role, which is `Request.system`, so the test uses system `S` plus 5 turns.
 - 2026-11-05 — The flattened JSON uses `ensure_ascii=False`, so non-ASCII posting text stays readable. ASCII output is byte-identical to the stated shape.
+
+## Risk fixes
+
+2026-11-05, on the user's word to fix all open risks:
+
+- `claude_engine.py:36` the refusal now reads "claude-sdk engine takes text turns that alternate user and assistant and end with a user turn". This replaces the plan's "keep today's error", which had become false.
+- `claude_engine.py:141`: `test_non_ascii_text_reaches_the_prompt_as_is`.
+- `test_claude_engine.py:507`: `test_predict_demos_reach_the_prompt_in_order`.
+- Still open: the question at `claude_engine.py:166` about cached tokens. It needs one real paid call to settle, so it waits for the real-data run.

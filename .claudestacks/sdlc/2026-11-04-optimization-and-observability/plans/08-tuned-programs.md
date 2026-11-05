@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-04
 depends-on: [03, 07]
 built-on: 671aa742d4fc
@@ -118,3 +118,46 @@ packages/ijob-app/tests/ijob_app_tests/test_eval_ops.py       — modify: jury p
 - `uv run --locked pytest packages/ijob-core packages/ijob-ai packages/ijob-app/tests/ijob_app_tests/test_tune_ops.py` passes.
 - `git check-ignore ijob.db` prints the file, so a program cannot be committed.
 - The five commands in `CLAUDE.md` exit 0.
+
+## Review findings
+
+Task 3, read by the orchestrator: scoped gate green (`pytest` on `test_tune_ops.py`, `test_eval_ops.py`, `test_cli_tune.py`: 115 passed). No blocking finding. Left open:
+
+- `tune_ops.py:304` nit: `_current_version` still imports from `signatures`, loading DSPy on the `tune screen` path, while `program_status` reads `versions`. A test patching one source does not reach the other.
+- `tune_ops.py:427` nit: `tested` does not match the set id, so a held-out run on an earlier set still reads `tested`.
+
+Tasks 1 and 2, one review: scoped gate green (ruff, mypy on 13 files, `pytest` 230 passed). No blocking finding. Left open:
+
+- `tune_records.py:48` risk: `TunedProgram` documents its content rules but has no `__post_init__`, so `TunedProgram(instructions="")` builds. `eval_records.py` validates at construction.
+- `tune_records.py:251` risk: a reused row keeps its old `bound_sha256`, `set_id` and `tune_run_id`. A re-tune after a rules change giving the same instructions and no demos returns the old row (probed), which then reads "not in use" by bound, and re-tuning cannot fix it.
+- `programs.py:62` risk: nothing at run time checks that a stored program holds the untrusted-data sentence; only the saver restores it.
+- `test_tune_records.py:215` risk: no test catches removing `task = ?` from `clear_program`, or splitting `accept_program` into two transactions; a naive `created_at`, a naive `accepted_at` and an unknown set have no raise test.
+- `programs.py:29` nit: demos are hashed as text, so another key order gives another version, and `save_program` does not check the version against the content. The saver must dump deterministically and compute the version after restoring the sentence.
+- `judge.py:75`, `scorer.py` nit: neither checks `program.task`, so a scorer program passed to the judge runs silently.
+- `tune_records.py:253` nit: `INSERT OR IGNORE` also swallows NOT NULL and CHECK failures; `ON CONFLICT (task, model, version) DO NOTHING` says what is meant.
+- Nits: `_stamp` and `_from_text` are a third copy; `save_program` `Raises` is incomplete; `store.py:19` still says `tunes` holds only the split; `signatures.py:10` claims a restore no production path makes yet; `.rstrip()` in `with_untrusted_statement` is untested; `versions.py` has no test file and names no exemption; tests import helpers from other test modules; a redundant assertion at `test_programs.py:109`; `len(_MIGRATIONS) == 10` fails on every later migration.
+
+## Deviations
+
+- 2026-11-05: `test_store.py` was not in the file list, but the version pin and the table list had to move with the migration.
+- 2026-11-05: `test_no_program_keeps_the_base_version` and `test_program_version_reaches_the_span` cover the judge; the scorer has its own tests under other names. Coverage is met.
+- 2026-11-05: the coder saw the Task 1 tests fail at import, but did not watch the Task 2 tests fail before implementing.
+- 2026-11-05: Task 3 was built after plan 10, not with Tasks 1 and 2, because both change `tune_ops.py` and `test_tune_ops.py`.
+
+## Gate
+
+Five commands in `CLAUDE.md` on the tree holding plans 06 to 10, 2026-11-05: format, check and mypy (300 files) clean; `4870 passed in 323.45s`. `test_cli_terminal.py` was not in plan 10's file list, but `test_every_command_is_checked_here` needs a check for each command, so it gained `test_tune_screen_without_a_baseline_gives_the_setting`.
+
+## Risk fixes
+
+2026-11-05, on the user's word to fix all open risks. Every open risk above now has a fix, listed below.
+
+- 2026-11-05 deviation: lines 47 and 50 state the unique key `task, model, version`. It is now `task, model, version, bound_sha256`, edited in place in migration 10, which was not committed and is not on the user's database (`~/.ijob/ijob.db` reads version 8). A re-tune after a rules change with the same text gets a new row, and the same bound still reuses its row and leaves an accepted program alone.
+
+Fixes:
+
+- `tune_records.py:48` `TunedProgram` validates at construction: `test_a_malformed_program_cannot_be_built`.
+- `tune_records.py:251` the bound joins the identity (see the deviation above): `test_the_same_text_under_another_bound_is_a_new_row`.
+- `programs.py:62` both `tuned_predict` and `program_in_force` fail closed on a missing untrusted sentence, naming the id, through one rule, `lacks_untrusted_sentence` in `tasks/versions.py`, so a batch stops before its workers start: `test_a_program_without_the_untrusted_sentence_is_refused`, `test_a_program_without_the_sentence_stops_the_task`. `program_status` does not raise, so it still shows such a row as accepted (open nit).
+- `test_tune_records.py:215`: `test_clear_leaves_the_other_tasks_program_accepted`, `test_a_failed_accept_leaves_the_old_program_accepted`, and raise tests for naive times and an unknown set.
+- `tune_ops.py:427` `tested` matches the set id too: `test_a_new_row_on_a_new_set_is_not_tested_by_a_run_on_the_old_set`.

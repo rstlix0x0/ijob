@@ -123,3 +123,15 @@ packages/ijob-ai/tests/ijob_ai_tests/llm/test_railed.py  — create: the rails, 
 - 2026-11-05 — Task 2 said nothing of forwarding the LM's capabilities. Review showed the wire bodies differ without it, so the rail now forwards four properties, with one test beyond the plan's list.
 - 2026-11-05 — Task 2's "There are no retries" holds only for LMs built with `num_retries=0`, as the registry builds them. Left as built; see the open `railed.py:132` finding.
 - 2026-11-05 — The parity test captures wire bodies with the `serve_openrouter` fake transport, since this DSPy build routes through vendored lm15, not litellm.
+
+## Risk fixes
+
+2026-11-05, on the user's word to fix all open risks. Each open risk above is closed:
+
+- `railed.py:90` deep copy works and shares the guard and context: `test_a_deep_copy_counts_against_the_same_rails`.
+- `railed.py:132` `self._lm.copy(num_retries=0)`: `test_a_rate_limited_call_is_sent_once_whatever_the_lm_retries`.
+- `railed.py:176` raises at once on the loop's own thread: `test_a_call_on_the_loops_own_thread_raises_at_once`.
+- `railed.py:222` a raising `on_call` is logged and changes no result (fixed under plan 09).
+- `railed.py:280` an engine `CostUnknownError` with no meter is fatal: `test_an_engine_cost_unknown_with_no_meter_is_fatal`.
+- `railed.py:255` (a nit, needed here) a call cancelled after its meter completed is charged: `test_a_call_cancelled_after_its_meter_completed_is_settled`.
+- Test gaps: `test_call_span_prefers_the_given_trace_to_the_current_one`, `test_a_call_that_completed_and_then_failed_is_charged`, `test_a_timeout_is_recorded_as_a_timeout`, `failed == 0` on fatal calls, `test_on_call_runs_after_each_call_that_failed`.

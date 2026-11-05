@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-04
 depends-on: [04, 06, 07]
 built-on: 671aa742d4fc
@@ -106,3 +106,48 @@ packages/ijob-app/tests/ijob_app_tests/test_tune_view.py — create: the plan pa
 
 - `uv run --locked pytest packages/ijob-app` passes.
 - The five commands in `CLAUDE.md` exit 0.
+
+## Review findings
+
+One review of a frozen snapshot; the coder's scoped gate was green (534 passed), and the full gate runs once at the end of the run.
+
+Blocking, fixed:
+
+- `cli_tune.py:80`: `if yes or not paid: return` froze the split with no yes. claude-sdk models only, closed stdin, no `--yes`: exit 0, 100 split rows, 2 runs. Nothing missing, no split: exit 0, 100 rows, 0 calls. Now `_confirm` asks, or refuses on closed stdin, whenever the set has no split. `test_claude_only_screen_closed_stdin_freezes_nothing`, `test_nothing_missing_closed_stdin_freezes_nothing` and `test_claude_only_screen_no_freezes_nothing` failed first. `uv run --locked pytest packages/ijob-app/tests/ijob_app_tests/test_cli_tune.py packages/ijob-app/tests/ijob_app_tests/test_tune_ops.py packages/ijob-app/tests/ijob_app_tests/test_tune_view.py -q`: `60 passed in 14.55s`.
+
+Fixed before this review:
+
+- `_divide` checked review on the current set, not the set given. `test_review_of_another_set_freezes_nothing` failed first, then passed; the reviewer confirmed no path round the check.
+
+Left open:
+
+- `cli_tune.py:126` risk (security): a provider's error text can show up as a suggested command, because `say_note` reads a trailing `; run: <command>` in `report.stopped`. `_say_stopped` in `cli_eval.py` exists to prevent this. Fix: `literal=True`.
+- `tune_view.py:46`, `tune_view.py:57` risk: the consent prompt shows one cap beside several runs, but each run has its own cap, so it understates the most the user agrees to spend. Fix: label it per run and show what the ledger has left.
+- `cli_tune.py:115` risk: the pair running at Ctrl-C prints `not run`, though its row and results exist and it may have spent money.
+- `cli_tune.py:107` risk: nothing catches a reversion of the Ctrl-C path.
+- `tune_ops.py:569-582` risk: the `CostUnknownError` and `ProviderUnavailableError` arms and the `cost_unknown` stop have no test; `test_screen_stops_on_provider_unavailable` raises `ProviderFailedError`.
+- `tune_ops.py:170` nit: `check_split` says "write nothing", but `review_items` writes derived labels.
+- `cli_tune.py:118` nit: the result drops why a run is incomplete, skipped changed postings and tracing warnings, which `eval run` shows.
+- `cli_tune.py:166` nit: an error `run_screen` does not catch loses the lines of the pairs that ended.
+- `service.py` nit: pricing per pair fetches the public OpenRouter model list twice per model.
+- Nits: `tune_ops.py:359` overclaims what is refused there; `tune_view.py:61` repeats "skipped"; `tune_view.py:82` branches on a display sentinel; `cli_tune.py:20` is inaccurate about its imports; `_confirm` repeats `_confirm_run`; `AFFIRMATIVE` and `ask_question` live in `cli_eval.py`; `ReviewPlan.has_set` and `set_id` hold one fact; `test_cli_tune.py:385` accepts exit 0 or 1; `test_cli_tune.py:162` checks only the word `Estimate`; `test_tune_view.py:99` is a filler assertion.
+
+## Deviations
+
+- 2026-11-05: `tune_app(open_session, is_interactive)` has no `now`, since the service owns the clock.
+- 2026-11-05: `cli_eval.py`, `eval_estimate.py` and `eval_ops.py` changed though unlisted: public `eval_failures`, `ask_question`, `AFFIRMATIVE` and `sum_costs` so the tune commands reuse them, and `ReviewPlan.set_id` for the review check.
+- 2026-11-05: no `[tune]` table and no `baseline` are one case, because `read_tune_settings` makes them the same state. The error names both, with exit 2.
+- 2026-11-05: `test_full_run_needs_every_current_case` uses 30 of 60 cases, not 100 of 200; it tests the same rule.
+
+## Gate
+
+Five commands in `CLAUDE.md` on the tree holding plans 06 to 10, 2026-11-05: format, check and mypy (300 files) clean; `4870 passed in 323.45s`. `test_cli_terminal.py` was not in plan 10's file list, but `test_every_command_is_checked_here` needs a check for each command, so it gained `test_tune_screen_without_a_baseline_gives_the_setting`.
+
+## Risk fixes
+
+2026-11-05, on the user's word to fix all open risks:
+
+- `cli_tune.py:126` `literal=True`: `test_screen_stop_text_is_literal_with_a_piped_stdout_and_a_terminal_stderr`.
+- `tune_view.py:46`, `:57` the consent prompt says the cap is per run and shows what the ledger has left: `test_plan_labels_the_cap_per_run_and_shows_what_spending_has_left`, `test_screen_plan_lines_show_the_cap_per_run_and_the_recorded_spending_left`. `tune_view.py` now builds its own panel, copying `plan_panel` to change one line (open nit).
+- `cli_tune.py:107`, `:115` the pair running at Ctrl-C reads `interrupted, kept incomplete`: `test_ctrl_c_keeps_the_running_pair_incomplete_and_runs_no_later_pair`, with a real `SIGINT`. `test_a_cancelled_screen_does_not_name_an_earlier_incomplete_run` guards which row it names.
+- `tune_ops.py:569-582` the `CostUnknownError` arm was dead and is removed, since `run_items` absorbs it. `test_screen_stops_when_a_cost_is_unknown`, `test_screen_stops_on_provider_unavailable`, `test_screen_stops_on_provider_failure`, `test_screen_stops_when_a_run_cannot_start_for_an_unavailable_provider`.
