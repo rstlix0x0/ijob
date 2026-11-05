@@ -17,7 +17,7 @@ from ijob_ai.llm.reference import Provider
 from ijob_ai.llm.settings import Task
 from ijob_ai.tasks.outputs import SourceRecipeOut
 from ijob_ai.tasks.signatures import SOURCE_RECIPE_VERSION, SourceRecipeSig
-from ijob_ai.tasks.text import sanitize
+from ijob_ai.tasks.text import neutralize_markers, sanitize
 
 RECIPE_FIELDS_TEXT: Final = """\
 version: always 1.
@@ -89,8 +89,9 @@ async def propose_recipe(  # noqa: PLR0913  # the call's whole contract, one arg
 ) -> ProposedRecipe:
     """Ask the model for a recipe, or a JSON address, from a page sample.
 
-    The sample is cleaned of control characters and is the only text of the
-    page in the call. The caller checks `Budget.try_start` first.
+    The sample is cleaned of control characters, has any field marker broken,
+    and is the only text of the page in the call. The caller checks
+    `Budget.try_start` first.
 
     Args:
         page_url: The address the sample was fetched from.
@@ -117,7 +118,7 @@ async def propose_recipe(  # noqa: PLR0913  # the call's whole contract, one arg
         inputs={
             "page_url": page_url,
             "page_format": page_format,
-            "sample": sanitize(sample),
+            "sample": neutralize_markers(sanitize(sample)),
             "fields_text": RECIPE_FIELDS_TEXT,
         },
         provider=provider,

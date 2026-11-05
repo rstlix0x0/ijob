@@ -12,7 +12,9 @@ Each suite has a plan, made before any call, and a run. A plan applies the rules
 every suite shares: the model comes from configuration unless one is given, a
 model on the set's jury is refused because it would be graded on its own answers,
 a set with fewer than 10 labels is refused, and a posting whose text changed
-since the set was drawn is skipped and counted. A run writes its row through
+since the set was drawn is skipped and counted. A labelled plan may also cover only
+chosen postings, which makes it limited, and may run every call with a tuned program,
+which sets the version of its row. A run writes its row through
 `EvalSpend` before any call, stores each case's result as it ends and closes the
 row however the run ends.
 
@@ -25,13 +27,18 @@ import json
 import math
 import statistics
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Final
 
-from ijob_ai.errors import CapReachedError, LlmError, TaskOutputError
+from ijob_ai.errors import (
+    CapReachedError,
+    LlmError,
+    ProviderFailedError,
+    TaskOutputError,
+)
 from ijob_ai.evals.hostile import HostilePair
 from ijob_ai.llm.budget import Budget
 from ijob_ai.llm.reference import ModelRef
@@ -57,6 +64,7 @@ from ijob_core.model import (
     Verdict,
 )
 from ijob_core.store import Store
+from ijob_core.tune_records import TunedProgram
 
 from ijob_app.eval_ops import (
     EvalNeedsError,
@@ -140,7 +148,11 @@ class SuitePlan:
         cases: The labelled cases to run, by position.
         skipped: Cases left out because their posting changed or went since the
             set was drawn.
-        limited: Whether `limit` narrowed the run.
+        limited: Whether `limit` or `only` narrowed the run.
+        program: The tuned program every call runs with, or `None` for the base
+            prompt.
+        task_version: The version the run row and every call carry: the
+            program's when there is one, else the task's.
     """
 
     suite: Suite
@@ -151,6 +163,8 @@ class SuitePlan:
     cases: tuple[SuiteCase, ...]
     skipped: int
     limited: bool
+    program: TunedProgram | None
+    task_version: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,12 +372,16 @@ class _Context:
     profile: ResumeProfile
 
 
-def _context(store: Store, eval_settings: EvalSettings, model: ModelRef) -> _Context:
-    """Find the label set for the stored inputs and refuse a juror as the model.
+def _inputs(
+    store: Store, eval_settings: EvalSettings, model: ModelRef
+) -> tuple[Instructions, ResumeProfile, tuple[str, ...]]:
+    """Read the stored inputs and the jury, and refuse a juror as `model`.
+
+    Returns:
+        The stored instructions, the stored profile and the sorted jury.
 
     Raises:
-        EvalNeedsError: No jury is set, no rules or profile are stored, or no set
-            exists for them.
+        EvalNeedsError: No jury is set, or no rules or profile are stored.
         InvalidValueError: `model` is, or was, a juror of a set for these rules and
             profile.
     """
@@ -385,7 +403,36 @@ def _context(store: Store, eval_settings: EvalSettings, model: ModelRef) -> _Con
             f"{model} is on the jury of the label set and would be graded on its "
             "own answers; pick another model",
         )
-    eval_set = find_set(store.evals, rules_sha256, profile_sha256, jury)
+    return instructions, profile, jury
+
+
+def refuse_juror(store: Store, eval_settings: EvalSettings, model: ModelRef) -> None:
+    """Refuse a model that is, or was, a juror of the label set for the stored inputs.
+
+    Args:
+        store: The open store.
+        eval_settings: The eval settings, whose jury identifies the set.
+        model: The model that would be graded.
+
+    Raises:
+        EvalNeedsError: No jury is set, or no rules or profile are stored.
+        InvalidValueError: `model` is, or was, a juror of a set for these rules and
+            profile.
+    """
+    _inputs(store, eval_settings, model)
+
+
+def _context(store: Store, eval_settings: EvalSettings, model: ModelRef) -> _Context:
+    """Find the label set for the stored inputs and refuse a juror as the model.
+
+    Raises:
+        EvalNeedsError: No jury is set, no rules or profile are stored, or no set
+            exists for them.
+        InvalidValueError: `model` is, or was, a juror of a set for these rules and
+            profile.
+    """
+    instructions, profile, jury = _inputs(store, eval_settings, model)
+    eval_set = find_set(store.evals, instructions.rules_sha256, profile.sha256(), jury)
     if eval_set is None:
         raise _no_set()
     return _Context(eval_set, instructions, profile)
@@ -443,7 +490,7 @@ def _limited[Row](
     return [row for row in rows if any(row is chosen for chosen in taken)]
 
 
-def _unchanged(store: Store, case: EvalCase) -> Posting | None:
+def unchanged_posting(store: Store, case: EvalCase) -> Posting | None:
     """Return the case's posting, or `None` if its text changed or it is gone."""
     from ijob_ai.tasks.text import input_sha256, posting_block  # noqa: PLC0415
 
@@ -461,13 +508,18 @@ def prepare_suite(  # noqa: PLR0913  # the plan's inputs, one each
     *,
     model: ModelRef | None,
     limit: int | None,
+    only: Collection[PostingId] | None = None,
+    program: TunedProgram | None = None,
 ) -> SuitePlan:
     """Work out a `judge` or `scorer` run before any call.
 
     The run covers the labelled cases of the set for the stored rules, CV profile
-    and jury, by position. With `limit` it covers the first of each pool as
-    `limit_split` divides them. A case whose posting text differs from the one the
-    set was drawn under, or whose posting is gone, is skipped and counted.
+    and jury, by position. With `only` it covers just the cases whose posting is
+    named, and with `limit` the first of each pool as `limit_split` divides them;
+    either one makes the run limited. A case whose posting text differs from the
+    one the set was drawn under, or whose posting is gone, is skipped and counted.
+    With a `program` every call runs with it and the run is stored under its
+    version.
 
     Args:
         store: The open store.
@@ -476,13 +528,17 @@ def prepare_suite(  # noqa: PLR0913  # the plan's inputs, one each
         suite: `judge` or `scorer`.
         model: The model under test, or `None` for the suite's default.
         limit: Cover only this many cases, from 1 to 100; all when `None`.
+        only: Cover only the cases of these postings; all when `None`.
+        program: A tuned program of the suite's task to run with; the base prompt
+            when `None`.
 
     Returns:
         The plan.
 
     Raises:
         InvalidValueError: `suite` is not `judge` or `scorer`, `limit` is outside
-            1 to 100, or the model is on the set's jury.
+            1 to 100, the model is on the set's jury, or `program` is for the
+            other task.
         MissingModelError: No model is given or configured.
         EvalNeedsError: No jury, rules, profile or set exists, fewer than 10
             cases are labelled, or every case changed since the draw.
@@ -495,15 +551,20 @@ def prepare_suite(  # noqa: PLR0913  # the plan's inputs, one each
         _check_limit(limit)
     context = _context(store, eval_settings, chosen)
     task = EvalTask.JUDGE if suite is Suite.JUDGE else EvalTask.SCORER
-    pairs = _limited(
-        _labelled(store.evals, context.eval_set, task),
-        lambda pair: pair[0].bucket,
-        limit,
-    )
+    if program is not None and program.task is not task:
+        raise InvalidValueError(
+            "program",
+            f"program {program.id} is for {program.task.value}, not {task.value}",
+        )
+    labelled = _labelled(store.evals, context.eval_set, task)
+    if only is not None:
+        named = set(only)
+        labelled = [pair for pair in labelled if pair[0].posting_id in named]
+    pairs = _limited(labelled, lambda pair: pair[0].bucket, limit)
     cases: list[SuiteCase] = []
     skipped = 0
     for case, label in pairs:
-        posting = _unchanged(store, case)
+        posting = unchanged_posting(store, case)
         if posting is None:
             skipped += 1
         else:
@@ -518,13 +579,10 @@ def prepare_suite(  # noqa: PLR0913  # the plan's inputs, one each
         profile=context.profile,
         cases=tuple(cases),
         skipped=skipped,
-        limited=limit is not None,
+        limited=limit is not None or only is not None,
+        program=program,
+        task_version=_single_version(task) if program is None else program.version,
     )
-
-
-def _numbered(rules: Sequence[str]) -> str:
-    """Write rules as numbered lines from 1."""
-    return "\n".join(f"{number}. {rule}" for number, rule in enumerate(rules, 1))
 
 
 def _reason_text(task: EvalTask, answer: str) -> str | None:
@@ -638,7 +696,7 @@ def prepare_reasons(
             reason = None if result is None else _reason_text(task, result.answer)
             if reason is None:
                 continue
-            posting = _unchanged(store, case)
+            posting = unchanged_posting(store, case)
             if posting is None:
                 skipped += 1
                 continue
@@ -665,15 +723,23 @@ def prepare_reasons(
 
 
 def _reason_input(task: EvalTask, context: _Context, posting: Posting) -> str:
-    """Write the grader's input: the rules or profile, then the posting block."""
-    from ijob_ai.tasks.text import posting_block  # noqa: PLC0415
+    """Write the grader's input: the rules or profile, then the posting block.
+
+    The posting block has any field marker broken, so a posting cannot pose as
+    a section of the grader's prompt.
+    """
+    from ijob_ai.tasks.text import (  # noqa: PLC0415
+        neutralize_markers,
+        numbered_rules,
+        posting_block,
+    )
 
     head = (
-        _numbered(context.instructions.rules)
+        numbered_rules(context.instructions.rules)
         if task is EvalTask.JUDGE
         else context.profile.to_json()
     )
-    return f"{head}\n\n{posting_block(posting)}"
+    return f"{head}\n\n{neutralize_markers(posting_block(posting))}"
 
 
 def _percentile(sorted_values: Sequence[int], fraction: float) -> int:
@@ -802,13 +868,23 @@ def _report(header: _Header, executed: _Executed, spend: EvalSpend) -> SuiteRepo
     )
 
 
+_TIMEOUT_TRIES: Final = 3
+
+
 class _Asker:
     """Has the model under test judge or score a posting, charging the right budget."""
 
-    def __init__(self, runtime: LlmRuntime, spend: EvalSpend, model: ModelRef) -> None:
+    def __init__(
+        self,
+        runtime: LlmRuntime,
+        spend: EvalSpend,
+        model: ModelRef,
+        program: TunedProgram | None = None,
+    ) -> None:
         self._runtime = runtime
         self._spend = spend
         self._model = model
+        self._program = program
 
     def _charged(self, budget: Budget) -> Budget:
         """Return the budget this call charges, once it has room for a new call.
@@ -821,6 +897,25 @@ class _Asker:
             raise CapReachedError
         return charged
 
+    @staticmethod
+    async def _asked[Answer](ask: Callable[[], Awaitable[Answer]]) -> Answer:
+        """Ask, and ask again when the call times out.
+
+        A call that stalls is rare but ends a long run, so it gets more tries. Any
+        other failure is not retried.
+
+        Raises:
+            ProviderFailedError: The last try timed out, or a try failed otherwise.
+        """
+        tries_left = _TIMEOUT_TRIES
+        while True:
+            try:
+                return await ask()
+            except ProviderFailedError as error:
+                tries_left -= 1
+                if not tries_left or not isinstance(error.__cause__, TimeoutError):
+                    raise
+
     async def judge(
         self, posting: Posting, rules: Sequence[str], budget: Budget
     ) -> Verdict | TaskOutputError:
@@ -831,9 +926,9 @@ class _Asker:
         """
         from ijob_ai.tasks.judge import judge_posting  # noqa: PLC0415
 
-        charged = self._charged(budget)
-        registry = await self._runtime.registry_for_ref(self._model)
-        try:
+        async def ask() -> Verdict:
+            charged = self._charged(budget)
+            registry = await self._runtime.registry_for_ref(self._model)
             return await judge_posting(
                 posting,
                 rules,
@@ -841,7 +936,11 @@ class _Asker:
                 provider=self._model.provider,
                 budget=charged,
                 timeout_s=self._runtime.settings.timeout_s,
+                program=self._program,
             )
+
+        try:
+            return await self._asked(ask)
         except TaskOutputError as error:
             return error
 
@@ -855,9 +954,9 @@ class _Asker:
         """
         from ijob_ai.tasks.scorer import score_posting  # noqa: PLC0415
 
-        charged = self._charged(budget)
-        registry = await self._runtime.registry_for_ref(self._model)
-        try:
+        async def ask() -> Score:
+            charged = self._charged(budget)
+            registry = await self._runtime.registry_for_ref(self._model)
             return await score_posting(
                 posting,
                 profile,
@@ -865,7 +964,11 @@ class _Asker:
                 provider=self._model.provider,
                 budget=charged,
                 timeout_s=self._runtime.settings.timeout_s,
+                program=self._program,
             )
+
+        try:
+            return await self._asked(ask)
         except TaskOutputError as error:
             return error
 
@@ -890,7 +993,9 @@ async def run_judge_suite(  # noqa: PLR0913  # the run's inputs, one each
     latency are stored as the case ends. An unusable answer is stored as `null`
     and counts as wrong. A provider failure or an unknown cost stops the run, and
     so does the cap; the run is then `incomplete`, and so is a run in which any case
-    ended on the cap. The row is closed, with its spend, however the run ends.
+    ended on the cap. The row is closed, with its spend, however the run ends. A
+    plan with a program runs every call with it and stores the row under its
+    version.
 
     Args:
         runtime: The runtime holding the settings and the model registry.
@@ -916,9 +1021,8 @@ async def run_judge_suite(  # noqa: PLR0913  # the run's inputs, one each
         judge_metrics,
         wilson,
     )
-    from ijob_ai.tasks.signatures import JUDGE_VERSION  # noqa: PLC0415
 
-    asker = _Asker(runtime, spend, plan.model)
+    asker = _Asker(runtime, spend, plan.model, plan.program)
 
     async def work(case: SuiteCase, budget: Budget) -> _Finished[JudgeCase]:
         started = time.perf_counter()
@@ -976,7 +1080,7 @@ async def run_judge_suite(  # noqa: PLR0913  # the run's inputs, one each
     header = _Header(
         suite=Suite.JUDGE,
         model=plan.model,
-        task_version=JUDGE_VERSION,
+        task_version=plan.task_version,
         set_id=plan.eval_set.id,
         limited=plan.limited,
         skipped=plan.skipped,
@@ -1008,8 +1112,8 @@ async def run_scorer_suite(  # noqa: PLR0913  # the run's inputs, one each
 
     Each case's answer, whether it came within 20 points of the label, and its
     latency are stored as the case ends. An unusable answer is stored as `null`
-    and counts as wrong. The run ends, and its row closes, as `run_judge_suite`
-    describes.
+    and counts as wrong. The run ends, its row closes and a program applies, as
+    `run_judge_suite` describes.
 
     Args:
         runtime: The runtime holding the settings and the model registry.
@@ -1030,9 +1134,8 @@ async def run_scorer_suite(  # noqa: PLR0913  # the run's inputs, one each
     """
     from ijob_ai.evals.deepeval_metrics import measure_case, score_close  # noqa: PLC0415
     from ijob_ai.evals.metrics import ScorerCase, scorer_metrics  # noqa: PLC0415
-    from ijob_ai.tasks.signatures import SCORER_VERSION  # noqa: PLC0415
 
-    asker = _Asker(runtime, spend, plan.model)
+    asker = _Asker(runtime, spend, plan.model, plan.program)
 
     async def work(case: SuiteCase, budget: Budget) -> _Finished[ScorerCase]:
         started = time.perf_counter()
@@ -1081,7 +1184,7 @@ async def run_scorer_suite(  # noqa: PLR0913  # the run's inputs, one each
     header = _Header(
         suite=Suite.SCORER,
         model=plan.model,
-        task_version=SCORER_VERSION,
+        task_version=plan.task_version,
         set_id=plan.eval_set.id,
         limited=plan.limited,
         skipped=plan.skipped,
@@ -1131,6 +1234,8 @@ async def run_hostile_suite(  # noqa: PLR0913  # the run's inputs, one each
     *,
     now: Callable[[], datetime],
     on_outcome: Callable[[ItemOutcome[object, object]], None] | None = None,
+    program: TunedProgram | None = None,
+    task: EvalTask | None = None,
 ) -> SuiteReport:
     """Run the made-up pairs and count those whose answer the injected text changed.
 
@@ -1141,6 +1246,12 @@ async def run_hostile_suite(  # noqa: PLR0913  # the run's inputs, one each
     It fails, with `SuiteReport.exit_status` 1, on any attack, on no answered pair
     and on any incomplete run. The run's task version holds both versions.
 
+    With a `program`, only the pairs of its task run, every call runs with it, and
+    the row is limited and stored under the program's version, so it is never the
+    current run of `eval report`. The rules and profile are the suite's made-up
+    ones, so the program's bound rule does not apply. A `task` without a program
+    runs that task's pairs on the base prompt, under its version, also limited.
+
     Args:
         runtime: The runtime holding the settings and the model registry.
         store: The open store.
@@ -1148,11 +1259,16 @@ async def run_hostile_suite(  # noqa: PLR0913  # the run's inputs, one each
         spend: The command's spending; it must not have begun a run.
         now: The wall clock, returning timezone-aware times.
         on_outcome: Called, on the event loop, with each pair's outcome.
+        program: A tuned program to run every call with, or `None` for the base
+            prompt.
+        task: Run only this task's pairs; the program's task when `None` and a
+            program is given, else both tasks.
 
     Returns:
         What the run did.
 
     Raises:
+        InvalidValueError: `task` is not the task of `program`.
         asyncio.CancelledError: The call was cancelled; the results already stored
             and the run row stand.
         ExceptionGroup: A call raised something other than an `LlmError`.
@@ -1166,10 +1282,23 @@ async def run_hostile_suite(  # noqa: PLR0913  # the run's inputs, one each
         wilson,
     )
 
+    if program is not None:
+        if task is not None and task is not program.task:
+            raise InvalidValueError(
+                "task",
+                f"program {program.id} is for {program.task.value}, not {task.value}",
+            )
+        task = program.task
     data = load_hostile()
-    asker = _Asker(runtime, spend, model)
-    items = [_HostileItem(EvalTask.JUDGE, pair) for pair in data.judge] + [
-        _HostileItem(EvalTask.SCORER, pair) for pair in data.scorer
+    asker = _Asker(runtime, spend, model, program)
+    items = [
+        _HostileItem(EvalTask.JUDGE, pair)
+        for pair in data.judge
+        if task in (None, EvalTask.JUDGE)
+    ] + [
+        _HostileItem(EvalTask.SCORER, pair)
+        for pair in data.scorer
+        if task in (None, EvalTask.SCORER)
     ]
 
     async def judge_pair(
@@ -1240,9 +1369,15 @@ async def run_hostile_suite(  # noqa: PLR0913  # the run's inputs, one each
     header = _Header(
         suite=Suite.HOSTILE,
         model=model,
-        task_version=_task_version(),
+        task_version=(
+            _task_version()
+            if task is None
+            else program.version
+            if program is not None
+            else _single_version(task)
+        ),
         set_id=None,
-        limited=False,
+        limited=task is not None,
         skipped=0,
     )
     executed = await _execute(
@@ -1335,6 +1470,7 @@ async def run_reasons_suite(  # noqa: PLR0913  # the run's inputs, one each
             "graded": len(scores),
             "ungraded": len(finished) - len(scores),
             "passed": sum(1 for case in finished if case.passed),
+            "cases": len(plan.items),
             **_latency(finished),
         }
 

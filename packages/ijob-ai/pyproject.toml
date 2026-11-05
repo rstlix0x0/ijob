@@ -18,6 +18,7 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-http>=1.45.2,<2",
     "requests>=2.34.2,<3",
     "deepeval>=4.3.2,<5",
+    "optuna>=5,<6",
 ]
 
 [build-system]

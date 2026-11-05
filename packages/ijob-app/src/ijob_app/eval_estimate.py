@@ -8,7 +8,7 @@ model costs `unknown`; a model missing from a list that was read is an error. Th
 calls of an agent suite have no fixed token shape, so an OpenRouter model's cost
 reads "up to the cap" and needs no price. `planned_calls` turns the votes a jury
 run still needs into the calls to price, and `total_cost` and `cost_by_model` sum
-the estimates.
+the estimates; `sum_costs` adds costs already summed.
 """
 
 import math
@@ -91,8 +91,9 @@ class PlannedCall:
         ref: The model called.
         kind: The kind of call.
         count: How many calls; for an agent run, how many cases it covers.
-        characters: Characters in the posting block of one call, on average; 0
-            for an agent run.
+        characters: Characters in the posting block of one call, on average, plus
+            the text and demos of a tuned program the call runs; 0 for an agent
+            run.
     """
 
     ref: ModelRef
@@ -248,7 +249,7 @@ def total_cost(estimates: Sequence[CallEstimate]) -> Cost:
         The dollars of the priced calls; `UNKNOWN` if any call is unknown, and
         `SUBSCRIPTION` if none has a dollar figure.
     """
-    return _sum_costs([estimate_.cost for estimate_ in estimates])
+    return sum_costs([estimate_.cost for estimate_ in estimates])
 
 
 def cost_by_model(estimates: Sequence[CallEstimate]) -> list[tuple[ModelRef, Cost]]:
@@ -263,14 +264,19 @@ def cost_by_model(estimates: Sequence[CallEstimate]) -> list[tuple[ModelRef, Cos
     costs: dict[ModelRef, list[Cost]] = {}
     for estimate_ in estimates:
         costs.setdefault(estimate_.call.ref, []).append(estimate_.cost)
-    return [(ref, _sum_costs(each)) for ref, each in costs.items()]
+    return [(ref, sum_costs(each)) for ref, each in costs.items()]
 
 
-def _sum_costs(costs: Sequence[Cost]) -> Cost:
-    """Add dollar costs.
+def sum_costs(costs: Sequence[Cost]) -> Cost:
+    """Add costs.
 
-    Unknown wins, then up to the cap, which holds whatever dollars are priced beside
-    it; no dollars at all is a subscription.
+    Args:
+        costs: The costs to add.
+
+    Returns:
+        `UNKNOWN` if any is unknown, then `UP_TO_CAP` if any is, which holds
+        whatever dollars are priced beside it; the dollars otherwise, and
+        `SUBSCRIPTION` when there are none.
     """
     if UNKNOWN in costs:
         return UNKNOWN

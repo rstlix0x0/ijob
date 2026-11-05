@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 # Modules that must import without loading DSPy, the Claude SDK, pypdf or LiteLLM. Later
 # changes extend this list as light modules are added.
 LIGHT_MODULES = [
@@ -16,9 +18,11 @@ LIGHT_MODULES = [
     "ijob_ai.llm.settings",
     "ijob_ai.llm.meter",
     "ijob_ai.llm.budget",
+    "ijob_ai.tasks.versions",
+    "ijob_ai.tuning.names",
 ]
 
-HEAVY_TOP_PACKAGES = ("dspy", "claude_agent_sdk", "pypdf", "litellm")
+HEAVY_TOP_PACKAGES = ("dspy", "claude_agent_sdk", "pypdf", "litellm", "optuna")
 
 HEAVY_IMPORTS = (
     "import dspy, claude_agent_sdk, pypdf, opentelemetry.sdk.trace, "
@@ -35,10 +39,6 @@ def test_package_imports() -> None:
 
 def test_package_ships_typing_marker() -> None:
     assert (importlib.resources.files("ijob_ai") / "py.typed").is_file()
-
-
-def test_reference_programs_location_exists() -> None:
-    assert (importlib.resources.files("ijob_ai") / "programs").is_dir()
 
 
 def test_package_requires_python_floor() -> None:
@@ -79,3 +79,37 @@ def test_heavy_imports_emit_no_warnings() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "module",
+    ["ijob_ai.tuning.metrics", "ijob_ai.tuning.optimizers", "ijob_ai.tuning.engine"],
+)
+def test_tuning_import_does_not_load_optuna(module: str) -> None:
+    code = (
+        "import sys\n"
+        f"import {module}\n"
+        "print(sorted(m for m in sys.modules if m.split('.')[0] == 'optuna'))\n"
+    )
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "[]"
+
+
+def test_llm_layer_imports_no_tuning_code() -> None:
+    code = (
+        "import sys\n"
+        "import ijob_ai.llm.railed\n"
+        "print(sorted(m for m in sys.modules if m.startswith('ijob_ai.tuning')))\n"
+    )
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "[]"

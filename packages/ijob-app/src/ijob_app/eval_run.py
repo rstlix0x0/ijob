@@ -6,11 +6,16 @@ estimated. A `RunOffer` adds the cap and the estimate. `run_plan` runs the plan 
 the suite's runner, and a `RunProgress` says how far it has got. The agent suites
 need web clients the others do not, so `run_agent_plan` runs their plans.
 
-`hostile` and the agent suites send no personal data; `RunPlan.sends_personal_data`
-says which plans do.
+A `judge` or `scorer` plan can cover only chosen postings and run with a tuned
+program, as the held-out test of a tuned program does. A `hostile` plan can run with
+a tuned program too, and then covers the pairs of its task only.
+
+`hostile` without a program and the agent suites send no personal data; a tuned
+program can carry the user's rules and postings in its demos.
+`RunPlan.sends_personal_data` says which plans do.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import datetime
 from typing import assert_never
@@ -18,7 +23,10 @@ from typing import assert_never
 from ijob_ai.llm.reference import ModelRef
 from ijob_ai.llm.settings import EvalSettings, LlmSettings
 from ijob_core.errors import InvalidValueError
+from ijob_core.eval_records import EvalTask
+from ijob_core.model import PostingId
 from ijob_core.store import Store
+from ijob_core.tune_records import TunedProgram
 from ijob_sources.polite_http import PoliteClient
 
 from ijob_app.agent_ops import PageClientFor
@@ -63,6 +71,8 @@ class RunPlan:
             and the hostile pages.
         calls: The model calls the run makes, to be priced; an agent suite has
             one `AGENT` call per model it may call.
+        program: The tuned program a `hostile` run uses, else `None`; the other
+            suites carry theirs in `work`.
     """
 
     suite: Suite
@@ -70,6 +80,7 @@ class RunPlan:
     work: SuitePlan | ReasonsPlan | SourcePlan | ExplorePlan | None
     cases: int
     calls: tuple[PlannedCall, ...]
+    program: TunedProgram | None = None
 
     @property
     def callers(self) -> tuple[ModelRef, ...]:
@@ -78,8 +89,13 @@ class RunPlan:
 
     @property
     def sends_personal_data(self) -> bool:
-        """Whether the calls carry the user's rules, CV profile and postings."""
-        return self.suite is not Suite.HOSTILE and self.suite not in AGENT_SUITES
+        """Whether the calls carry the user's rules, CV profile and postings.
+
+        A `hostile` run does only with a tuned program, whose demos can hold them.
+        """
+        if self.suite is Suite.HOSTILE:
+            return self.program is not None
+        return self.suite not in AGENT_SUITES
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +139,11 @@ def _mean_characters(sizes: list[int]) -> float:
     return sum(sizes) / len(sizes)
 
 
+def _program_characters(program: TunedProgram | None) -> int:
+    """Count the characters a tuned program adds to each call: its text and demos."""
+    return 0 if program is None else len(program.instructions) + len(program.demos_json)
+
+
 def _labelled_calls(plan: SuitePlan) -> tuple[PlannedCall, ...]:
     """List the calls of a `judge` or `scorer` run: one per case."""
     from ijob_ai.tasks.text import posting_block  # noqa: PLC0415
@@ -131,7 +152,8 @@ def _labelled_calls(plan: SuitePlan) -> tuple[PlannedCall, ...]:
         return ()
     kind = CallKind.JUDGE if plan.suite is Suite.JUDGE else CallKind.SCORER
     sizes = [len(posting_block(case.posting)) for case in plan.cases]
-    return (PlannedCall(plan.model, kind, len(sizes), _mean_characters(sizes)),)
+    mean = _mean_characters(sizes) + _program_characters(plan.program)
+    return (PlannedCall(plan.model, kind, len(sizes), mean),)
 
 
 def _reasons_calls(plan: ReasonsPlan) -> tuple[PlannedCall, ...]:
@@ -144,8 +166,16 @@ def _reasons_calls(plan: ReasonsPlan) -> tuple[PlannedCall, ...]:
     )
 
 
-def _hostile_calls(model: ModelRef) -> tuple[tuple[PlannedCall, ...], int]:
-    """List the calls of a `hostile` run, and its pairs: a clean and a hostile each."""
+def _hostile_calls(
+    model: ModelRef, task: EvalTask | None = None, program_characters: int = 0
+) -> tuple[tuple[PlannedCall, ...], int]:
+    """List the calls of a `hostile` run, and its pairs: a clean and a hostile each.
+
+    Args:
+        model: The model under test.
+        task: Cover only this task's pairs; both tasks when `None`.
+        program_characters: What a tuned program adds to each call.
+    """
     from ijob_ai.evals.hostile import load_hostile  # noqa: PLC0415
 
     data = load_hostile()
@@ -154,14 +184,16 @@ def _hostile_calls(model: ModelRef) -> tuple[tuple[PlannedCall, ...], int]:
             model,
             kind,
             2 * len(pairs),
-            _mean_characters([len(pair.hostile_description) for pair in pairs]),
+            _mean_characters([len(pair.hostile_description) for pair in pairs])
+            + program_characters,
         )
         for kind, pairs in (
             (CallKind.JUDGE, data.judge),
             (CallKind.SCORER, data.scorer),
         )
+        if task is None or kind.value == task.value
     )
-    return calls, len(data.judge) + len(data.scorer)
+    return calls, sum(call.count for call in calls) // 2
 
 
 def _agent_calls(plan: SourcePlan | ExplorePlan) -> tuple[PlannedCall, ...]:
@@ -179,6 +211,8 @@ def plan_run(  # noqa: PLR0913  # the plan's inputs, one each
     *,
     model: ModelRef | None,
     limit: int | None,
+    only: Collection[PostingId] | None = None,
+    program: TunedProgram | None = None,
 ) -> RunPlan:
     """Work out a run of one suite before any call.
 
@@ -189,25 +223,42 @@ def plan_run(  # noqa: PLR0913  # the plan's inputs, one each
         suite: The suite to run.
         model: The model under test, or `None` for the suite's default.
         limit: Cover only this many cases; the suite's default when `None`.
+        only: Cover only the cases of these postings, for `judge` and `scorer`.
+        program: A tuned program to run with, for `judge`, `scorer` and `hostile`;
+            `hostile` then covers the pairs of the program's task only.
 
     Returns:
         The plan, with the calls to price.
 
     Raises:
         InvalidValueError: `limit` is out of range for the suite, or given to
-            `hostile`, or the model is on the set's jury or is the grader.
+            `hostile`, `only` is given to another suite than `judge` or `scorer`,
+            `program` is given to another suite than `judge`, `scorer` or
+            `hostile`, `program` is for the other task, or the model is on the
+            set's jury or is the grader.
         MissingModelError: No model or grader is given or configured.
         EvalNeedsError: A label set, labels or a run to grade is missing.
         sqlite3.Error: The store cannot be read.
     """
+    takes_program = suite in (Suite.JUDGE, Suite.SCORER, Suite.HOSTILE)
+    if (only is not None and suite not in (Suite.JUDGE, Suite.SCORER)) or (
+        program is not None and not takes_program
+    ):
+        raise InvalidValueError(
+            "suite", f"{suite.value} takes no chosen postings or program"
+        )
     if suite is Suite.HOSTILE:
         if limit is not None:
             raise InvalidValueError(
                 "limit", "hostile runs every pair and takes no limit"
             )
         chosen = resolve_model(llm, suite, model)
-        calls, pairs = _hostile_calls(chosen)
-        return RunPlan(suite, chosen, None, pairs, calls)
+        calls, pairs = _hostile_calls(
+            chosen,
+            None if program is None else program.task,
+            _program_characters(program),
+        )
+        return RunPlan(suite, chosen, None, pairs, calls, program)
     if suite is Suite.SOURCE_AGENT:
         source = prepare_source_agent(llm, model=model, limit=limit)
         return RunPlan(suite, source.model, source, source.items, _agent_calls(source))
@@ -221,7 +272,16 @@ def plan_run(  # noqa: PLR0913  # the plan's inputs, one each
         return RunPlan(
             suite, reasons.model, reasons, len(reasons.items), _reasons_calls(reasons)
         )
-    labelled = prepare_suite(store, llm, eval_settings, suite, model=model, limit=limit)
+    labelled = prepare_suite(
+        store,
+        llm,
+        eval_settings,
+        suite,
+        model=model,
+        limit=limit,
+        only=only,
+        program=program,
+    )
     return RunPlan(
         suite, labelled.model, labelled, len(labelled.cases), _labelled_calls(labelled)
     )
@@ -270,7 +330,13 @@ async def run_plan(  # noqa: PLR0913  # the run's inputs, one each
             )
         case None:
             return await run_hostile_suite(
-                runtime, store, plan.model, spend, now=now, on_outcome=on_outcome
+                runtime,
+                store,
+                plan.model,
+                spend,
+                now=now,
+                on_outcome=on_outcome,
+                program=plan.program,
             )
         case SourcePlan() | ExplorePlan():
             raise InvalidValueError(

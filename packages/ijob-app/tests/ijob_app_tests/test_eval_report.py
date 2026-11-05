@@ -184,6 +184,64 @@ def test_comparable_excludes_incomplete_limited_and_other_versions(
     assert untouched.id not in {run.id for run in found.runs}
 
 
+def test_runs_of_different_case_counts_are_not_compared(records: EvalRecords) -> None:
+    set_id = _set_id(records)
+    older = _run(records, set_id=set_id, metrics={"cases": 100})
+    newest = _run(records, set_id=set_id, metrics={"cases": 200})
+
+    found = comparable_runs(records.runs(), suite="judge", set_id=set_id)
+
+    assert [run.id for run in found.runs] == [newest.id]
+    assert found.others == 1
+    assert found.other_ids == (older.id,)
+
+
+def test_reasons_runs_of_different_case_counts_are_not_compared(
+    records: EvalRecords,
+) -> None:
+    set_id = _set_id(records)
+    older = _run(records, "reasons", set_id=set_id, metrics={"cases": 4})
+    newest = _run(records, "reasons", set_id=set_id, metrics={"cases": 20})
+
+    found = comparable_runs(records.runs(), suite="reasons", set_id=set_id)
+
+    assert [run.id for run in found.runs] == [newest.id]
+    assert found.other_ids == (older.id,)
+
+
+def test_reasons_runs_stored_without_cases_still_compare(
+    records: EvalRecords,
+) -> None:
+    set_id = _set_id(records)
+    runs = [
+        _run(records, "reasons", set_id=set_id, metrics={"mean_score": 0.7})
+        for _ in range(2)
+    ]
+
+    found = comparable_runs(records.runs(), suite="reasons", set_id=set_id)
+
+    assert len(found.runs) == len(runs)
+    assert found.others == 0
+
+
+def test_unlabelled_suites_still_compare(records: EvalRecords) -> None:
+    hostile = [
+        _run(records, "hostile", version="hostile-1", metrics={"cases": cases})
+        for cases in (10, 20)
+    ]
+    agent = [
+        _run(records, "source-agent", version="agent-1", metrics={"cases": cases})
+        for cases in (3, 6)
+    ]
+
+    found_hostile = comparable_runs(records.runs(), suite="hostile", set_id=None)
+    found_agent = comparable_runs(records.runs(), suite="source-agent", set_id=None)
+
+    assert [run.id for run in found_hostile.runs] == [run.id for run in hostile]
+    assert [run.id for run in found_agent.runs] == [run.id for run in agent]
+    assert found_hostile.others == found_agent.others == 0
+
+
 def test_suite_without_labels_compares_without_a_set(records: EvalRecords) -> None:
     first = _run(records, "hostile", version="hostile-1")
     second = _run(records, "hostile", version="hostile-1", model="claude-sdk/opus")

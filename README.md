@@ -28,6 +28,25 @@ uv run ijob eval report                      # the stored runs, side by side
 
 [`docs/evals.md`](docs/evals.md) explains what each suite measures and how to read its numbers.
 
+To tune the `judge` and `scorer` prompts on those labels, and to see the runs in Phoenix:
+
+```bash
+uv run ijob tune screen                      # freeze the split; measure the models on every label
+uv run ijob tune report                      # read the numbers and pick the models to tune
+uv run ijob tune run                         # tune each model x optimizer x task, test on held-out
+uv run ijob tune list                        # the tuned programs: id, task, model, status
+uv run ijob tune accept <id>                 # test a program on hostile postings, then use it
+uv run ijob tune clear judge                 # back to the base prompt; the programs stay
+docker compose up -d                         # start Phoenix
+uv run ijob traces export                    # send traces, labels, runs and scores to Phoenix
+docker compose down                          # stop Phoenix; its data stays in the volume
+```
+
+Commands that can spend ask first. [`docs/tuning.md`](docs/tuning.md) walks through each step and
+how to read what it prints. `ijob traces export` can run again: it adds only what Phoenix lacks.
+Run it after `tune screen`, not before: a rerun does not update examples already in Phoenix, so
+those keep no split part.
+
 ## What it explores
 
 - **Collecting at scale.** Job postings from hiring-system APIs, job boards and feeds, read politely
@@ -45,7 +64,8 @@ uv run ijob eval report                      # the stored runs, side by side
   measure the judge, the scorer, the reasons they give, their resistance to injected text and the
   two agents. Committed cases hold no personal data; your labels stay in `~/.ijob`.
 - **Tracing.** Every model call emits OpenTelemetry spans with model, tokens and cost, kept in a local
-  store that `ijob traces` reads, with optional export to a local Langfuse.
+  store that `ijob traces` reads. A local Phoenix can show them in a browser. See
+  [`docs/observability.md`](docs/observability.md).
 - **Polite sourcing.** ijob sends its own User-Agent, follows robots.txt with longest-match
   semantics, and never bypasses anti-bot protection.
 
@@ -58,8 +78,10 @@ uv run ijob eval report                      # the stored runs, side by side
    judge, the scorer and their reasons, and a source agent (`ijob sources find`) and an explore
    agent (`ijob explore`) find sources and follow custom instructions, each with a suite of its
    own.
-4. Optimization and observability: GEPA and other DSPy optimizers tuning cheap models against a
-   frontier baseline, with the runs recorded in Langfuse.
+4. Optimization and observability: DSPy optimizers, GEPA among them, tune the `judge` and `scorer`
+   prompts of cheaper models against a frontier baseline, with `ijob tune` and a local Phoenix that
+   `ijob traces export` fills with the traces, labels, eval runs and scores. See
+   [`docs/tuning.md`](docs/tuning.md) and [`docs/observability.md`](docs/observability.md).
 
 ## Workspace layout
 
@@ -87,8 +109,17 @@ uv run --locked pytest
 
 CI runs the same commands. Tests never call an LLM or the network.
 
-Tracing is optional. To run a local Langfuse stack, copy `.env.example` to `.env`, then run
-`docker compose up -d`. The web UI is at <http://localhost:3000>. ijob runs without it.
+Tracing is local and Phoenix is optional. To run a local Phoenix, run `docker compose up -d`; the
+UI is at <http://127.0.0.1:6006>. Run `docker compose down` when you are done. `.env.example` lists
+the provider key ijob reads; nothing loads that file, so export it in your shell. `IJOB_HOME`
+moves ijob's data folder, and `OTEL_SDK_DISABLED` is ignored with a warning, because ijob tracing
+cannot be turned off.
+
+Phoenix runs with auth off, because its port is bound to localhost only. While it runs, anything
+on the same Mac can read, change or delete its data, which holds your CV and rules, so stop it after
+use. An export sends your CV and rules, prompts, posting titles, labels, model answers and tuned
+instructions, and `docker compose down -v` deletes the volume that holds them. Cost totals come from
+ijob, not Phoenix, whose own cost figure does not match ijob's.
 
 ## Sources policy
 

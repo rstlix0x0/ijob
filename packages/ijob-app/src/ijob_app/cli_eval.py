@@ -1,9 +1,10 @@
 """The command-line side of the evals.
 
 `eval_app` builds the `eval` group, with `label`, `review`, `run` and `report`.
-`eval label [--limit N] [--yes]` has a jury of models vote on a sample of postings,
-with their rules and your CV profile, and labels the cases the jurors agree on.
-`eval review` has you settle the rest.
+`eval label [--limit N | --add N] [--yes]` has a jury of models vote on a sample of
+postings, with their rules and your CV profile, and labels the cases the jurors
+agree on. `--add N` draws N more postings into the current set, and is refused
+while that set still lacks votes. `eval review` has you settle the rest.
 
 On a terminal it draws the plan (the jurors, the estimated cost, the cap and, for
 OpenRouter jurors, who receives your data), asks before it starts, shows the
@@ -20,7 +21,7 @@ cases that `*_agree` and are left for `*_review` per task, and `cost_usd`. The
 exit status is `0` when the run ended or reached the cost cap, `1` when a juror's
 provider failed, a cost could not be known, the question was declined, something
 the run needs is missing or the recorded spending is used up, and `2` for a
-`--limit` or a config setting that cannot be used, such as an absent
+`--limit` or `--add` or a config setting that cannot be used, such as an absent
 `[eval].jury`. Ctrl-C on a terminal ends the run with `Stopped` and exits `0`; the
 votes already cast stand and the next run asks for the rest.
 
@@ -57,14 +58,14 @@ profile that identify the label set are missing.
 
 `eval report [RUN] [--failures]` reads the stored runs and calls no model. With
 no argument it shows a table per suite of the runs that compare (same suite, label
-set and task version, complete, not limited), the jury metrics, the total
-OpenRouter spend and how many runs were left out; a store with no run says so.
-Without a jury, rules and CV profile to identify a label set it lists only the
-suites that need no labels and says labels need setup. `RUN` shows that run
-whatever its status, and `--failures` its failed cases. All exit `0`, except an
-unknown `RUN` or `--failures` without one, which exit `2`. In a pipe it prints
-`name  value` lines: a `run` line per run with its `key=value` metrics, the
-`jury_*` numbers, `spent_usd`, `cap_usd` and `not_compared`.
+set, task version and, for a labelled suite, case count, complete, not limited), the
+jury metrics, the total OpenRouter spend and how many runs were left out; a store
+with no run says so. Without a jury, rules and CV profile to identify a label set
+it lists only the suites that need no labels and says labels need setup. `RUN`
+shows that run whatever its status, and `--failures` its failed cases. All exit
+`0`, except an unknown `RUN` or `--failures` without one, which exit `2`. In a pipe
+it prints `name  value` lines: a `run` line per run with its `key=value` metrics,
+the `jury_*` numbers, `spent_usd`, `cap_usd` and `not_compared`.
 
 Of the LLM layer this module imports its error classes and the model reference
 only, so loading it pulls in neither DSPy nor the Claude SDK.
@@ -140,7 +141,7 @@ from ijob_app.view import (
 
 _EXIT_REFUSED: Final = 1
 _EXIT_BAD_ARGUMENT: Final = 2
-_AFFIRMATIVE: Final = frozenset({"y", "yes"})
+AFFIRMATIVE: Final = frozenset({"y", "yes"})
 _KEY_WIDTH: Final = 17
 _REFRESH_PER_SECOND: Final = 8
 _SPINS_PER_SECOND: Final = 10
@@ -177,7 +178,7 @@ class _Reply:
 
 
 @contextmanager
-def _eval_failures() -> Iterator[None]:
+def eval_failures() -> Iterator[None]:
     """Turn what an eval operation raises into a message and an exit status.
 
     A value the run refuses exits `2`; everything the LLM layer raises exits `1`,
@@ -210,6 +211,8 @@ def _line(name: str, value: object) -> str:
 def _plan_lines(offer: LabelOffer) -> list[str]:
     """Write the plan of a run as plain lines."""
     lines = [_line("jury", f"{offer.plan.cases} postings, judge + scorer")]
+    if offer.plan.added:
+        lines.append(_line("added", f"{offer.plan.added} postings to the set"))
     lines.extend(
         _line("juror", f"{ref}  {cost_text(cost)}") for ref, cost in offer.costs
     )
@@ -243,6 +246,8 @@ def _changes_note(changes: tuple[LabelChange, ...]) -> str:
 def _show_plan(offer: LabelOffer, notice: str | None) -> None:
     """Show the jurors, the estimate, the cap and who receives the data."""
     if is_terminal():
+        if offer.plan.added:
+            say_note(f"note: added {offer.plan.added} postings to the label set")
         make_console().print(
             jury_panel(
                 postings=offer.plan.cases,
@@ -259,7 +264,7 @@ def _show_plan(offer: LabelOffer, notice: str | None) -> None:
         say_note(f"note: {notice}")
 
 
-def _ask(question: str) -> str:
+def ask_question(question: str) -> str:
     """Ask the question where the user sees it, and keep it out of a piped result.
 
     A terminal gets the drawn prompt on standard output; with standard output
@@ -312,8 +317,8 @@ def _confirm(
     if not is_interactive():
         say_error("confirmation needed; pass --yes")
         raise typer.Exit(code=_EXIT_REFUSED)
-    answer = _ask("Start a new label set?" if changes else "Start the jury?")
-    if answer.strip().lower() not in _AFFIRMATIVE:
+    answer = ask_question("Start a new label set?" if changes else "Start the jury?")
+    if answer.strip().lower() not in AFFIRMATIVE:
         say_note("note: the jury was not started")
         raise typer.Exit(code=_EXIT_REFUSED)
 
@@ -609,7 +614,7 @@ def _add_report(group: typer.Typer, open_session: SessionOpener) -> None:
             raise typer.Exit(code=_EXIT_BAD_ARGUMENT)
         with open_session(db, config, models=True) as session:
             service = session.service
-            with _eval_failures():
+            with eval_failures():
                 if run is None:
                     _show_report(service.eval_report())
                 else:
@@ -690,7 +695,7 @@ def _confirm_run(
     if not is_interactive():
         say_error("confirmation needed; pass --yes")
         raise typer.Exit(code=_EXIT_REFUSED)
-    if _ask("Start the run?").strip().lower() not in _AFFIRMATIVE:
+    if ask_question("Start the run?").strip().lower() not in AFFIRMATIVE:
         say_note("note: the run was not started")
         raise typer.Exit(code=_EXIT_REFUSED)
 
@@ -856,7 +861,7 @@ def _add_run(
         chosen = _suite(suite)
         with open_session(db, config, models=True) as session:
             service = session.service
-            with _eval_failures():
+            with eval_failures():
                 offer = asyncio.run(
                     service.eval_prepare_run(
                         chosen,
@@ -873,7 +878,7 @@ def _add_run(
             )
             _show_run_plan(offer, notice)
             _confirm_run(offer, yes=yes, is_interactive=is_interactive)
-            with _eval_failures():
+            with eval_failures():
                 report = (
                     _run_suite_on_terminal(service, offer)
                     if is_terminal()
@@ -924,6 +929,14 @@ def eval_app(
                 min=1, max=100, help="Cover only this many postings, from 1 to 100."
             ),
         ] = None,
+        add: Annotated[
+            int | None,
+            typer.Option(
+                min=1,
+                max=100,
+                help="Add this many postings to the current set, from 1 to 100.",
+            ),
+        ] = None,
         yes: Annotated[
             bool, typer.Option("--yes", help="Start without asking.")
         ] = False,
@@ -933,8 +946,8 @@ def eval_app(
         """Have the jury vote on a sample of postings and label what they agree on."""
         with open_session(db, config, models=True) as session:
             service = session.service
-            with _eval_failures():
-                offer = asyncio.run(service.eval_prepare(limit=limit))
+            with eval_failures():
+                offer = asyncio.run(service.eval_prepare(limit=limit, add=add))
             callers = list(dict.fromkeys(item.juror for item in offer.plan.items))
             notice = data_notice(callers)
             if offer.plan.items:
@@ -942,7 +955,7 @@ def eval_app(
             else:
                 say_note("note: every vote is already stored")
             _confirm(offer, notice, yes=yes, is_interactive=is_interactive)
-            with _eval_failures():
+            with eval_failures():
                 report = (
                     _run_on_terminal(service, offer)
                     if is_terminal()
@@ -966,7 +979,7 @@ def eval_app(
             raise typer.Exit(code=_EXIT_REFUSED)
         with open_session(db, config, models=True) as session:
             service = session.service
-            with _eval_failures():
+            with eval_failures():
                 plan = service.eval_review_items()
             _show_skipped(plan)
             if plan.items:

@@ -3,19 +3,27 @@ import re
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import override
 
 import httpx
 import pytest
+import requests
 import typer
+from ijob_ai.tracing.phoenix import PhoenixClient
 from ijob_app.cli import make_app
+from ijob_app.cli_llm import _export_lines
 from ijob_app.llm_ops import LlmOptions
+from ijob_app.trace_export import ExportReport
 from ijob_core.model import ExternalId, Instructions, SightingDraft, parse_source_ref
 from ijob_core.store import Store
 from ijob_core.traces import SpanRow, TraceStore
 from ijob_sources.polite_http import ConditionalCache, PoliteClient
 from ijob_sources.seeds import load_seeds
+from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from typer.testing import CliRunner, Result
 
 from .llm_fakes import (
@@ -641,3 +649,287 @@ def test_traces_prune_reports(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.stderr
     assert re.fullmatch(r"pruned \d+ traces, size [\d.]+ MB\n", result.stdout)
+
+
+_PHOENIX = "http://127.0.0.1:6006"
+
+
+class _Reply:
+    def __init__(self, status: int = 200, text: str = "") -> None:
+        self.status_code = status
+        self.text = text
+
+    def json(self) -> object:
+        return {}
+
+
+class _Session:
+    """Answers every REST call with one reply, or raises one error."""
+
+    def __init__(self, reply: _Reply | Exception) -> None:
+        self.reply = reply
+
+    def request(self, method: str, url: str, **kwargs: object) -> _Reply:
+        del method, url, kwargs
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return self.reply
+
+
+class _Exporter(SpanExporter):
+    def __init__(self, result: SpanExportResult) -> None:
+        self.sent = 0
+        self.result = result
+
+    @override
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        self.sent += len(spans)
+        return self.result
+
+
+def _phoenix_is(
+    monkeypatch: pytest.MonkeyPatch,
+    reply: _Reply | Exception,
+    result: SpanExportResult = SpanExportResult.SUCCESS,
+) -> _Exporter:
+    """Replace the Phoenix client with one over a fake session and exporter."""
+    exporter = _Exporter(result)
+
+    def build(endpoint: str) -> PhoenixClient:
+        return PhoenixClient(endpoint, _Session(reply), exporter)
+
+    monkeypatch.setattr("ijob_ai.tracing.phoenix.phoenix_client", build)
+    return exporter
+
+
+def test_export_prints_its_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_ = _searched(tmp_path)
+    exporter = _phoenix_is(monkeypatch, _Reply())
+
+    result = _invoke(app_, tmp_path, "traces", "export")
+
+    assert result.exit_code == 0, result.stderr
+    assert exporter.sent > 0
+    assert result.stdout.splitlines()[0] == f"sent {exporter.sent} spans"
+    assert "runs: 0 added, 0 present" in result.stdout
+    assert "skipped" not in result.stdout
+
+
+def test_export_not_running_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_ = _searched(tmp_path)
+    _phoenix_is(monkeypatch, requests.ConnectionError("refused"))
+
+    result = _invoke(app_, tmp_path, "traces", "export")
+
+    assert result.exit_code == 1
+    assert (
+        result.stderr
+        == f"error: Phoenix is not running at {_PHOENIX}; run docker compose up -d\n"
+    )
+
+
+def test_export_http_error_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_ = _searched(tmp_path)
+    _phoenix_is(monkeypatch, _Reply(500, "y" * 500))
+
+    result = _invoke(app_, tmp_path, "traces", "export")
+
+    assert result.exit_code == 1
+    assert result.stderr == f"error: Phoenix answered 500: {'y' * 200}\n"
+
+
+def test_export_span_failure_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_ = _searched(tmp_path)
+    _phoenix_is(monkeypatch, _Reply(), SpanExportResult.FAILURE)
+
+    result = _invoke(app_, tmp_path, "traces", "export")
+
+    assert result.exit_code == 1
+    assert result.stderr == (
+        f"error: sending spans to {_PHOENIX} failed; run docker compose logs phoenix\n"
+    )
+
+
+def test_export_non_local_endpoint_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_ = _searched(tmp_path)
+    exporter = _phoenix_is(monkeypatch, _Reply())
+    with (_home(tmp_path) / "config.toml").open("a", encoding="utf-8") as handle:
+        handle.write('\n[phoenix]\nendpoint = "http://example.com:6006"\n')
+
+    result = _invoke(app_, tmp_path, "traces", "export")
+
+    assert result.exit_code == 2
+    assert "phoenix.endpoint" in result.stderr
+    assert exporter.sent == 0
+
+
+def test_export_honours_config_with_a_non_local_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_ = _searched(tmp_path)
+    exporter = _phoenix_is(monkeypatch, _Reply())
+    other = tmp_path / "other.toml"
+    other.write_text('[phoenix]\nendpoint = "http://example.com:6006"\n', "utf-8")
+
+    result = _invoke(app_, tmp_path, "traces", "export", "--config", str(other))
+
+    assert result.exit_code == 2
+    assert "phoenix.endpoint" in result.stderr
+    assert exporter.sent == 0
+
+
+def test_export_honours_config_with_broken_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_ = _searched(tmp_path)
+    exporter = _phoenix_is(monkeypatch, _Reply())
+    other = tmp_path / "other.toml"
+    other.write_text("not toml [", "utf-8")
+
+    result = _invoke(app_, tmp_path, "traces", "export", "--config", str(other))
+
+    assert result.exit_code == 2
+    assert result.stderr.startswith("error: ")
+    assert exporter.sent == 0
+
+
+def test_export_reads_the_endpoint_from_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_ = _searched(tmp_path)
+    endpoints: list[str] = []
+
+    def build(endpoint: str) -> PhoenixClient:
+        endpoints.append(endpoint)
+        return PhoenixClient(
+            endpoint, _Session(_Reply()), _Exporter(SpanExportResult.SUCCESS)
+        )
+
+    monkeypatch.setattr("ijob_ai.tracing.phoenix.phoenix_client", build)
+    other = tmp_path / "other.toml"
+    other.write_text('[phoenix]\nendpoint = "http://127.0.0.1:7007"\n', "utf-8")
+
+    result = _invoke(app_, tmp_path, "traces", "export", "--config", str(other))
+
+    assert result.exit_code == 0, result.stderr
+    assert endpoints == ["http://127.0.0.1:7007"]
+
+
+def test_export_with_a_junk_trace_database_says_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_ = _searched(tmp_path)
+    _phoenix_is(monkeypatch, _Reply())
+    (_home(tmp_path) / "traces.db").write_text("this is not a database" * 50, "utf-8")
+
+    result = _invoke(app_, tmp_path, "traces", "export")
+
+    assert result.exit_code == 1
+    assert result.stderr.startswith("error: cannot read the trace database: ")
+    assert "Traceback" not in result.stderr
+
+
+def test_export_closes_the_client_on_success_and_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_ = _searched(tmp_path)
+    closed: list[str] = []
+
+    class Closing(_Exporter):
+        @override
+        def shutdown(self) -> None:
+            closed.append("shutdown")
+
+    for result in (SpanExportResult.SUCCESS, SpanExportResult.FAILURE):
+        closed.clear()
+        exporter = Closing(result)
+        monkeypatch.setattr(
+            "ijob_ai.tracing.phoenix.phoenix_client",
+            lambda endpoint, made=exporter: PhoenixClient(
+                endpoint, _Session(_Reply()), made
+            ),
+        )
+
+        _invoke(app_, tmp_path, "traces", "export")
+
+        assert closed == ["shutdown"], result
+
+
+def test_export_lines_print_every_count_in_its_own_place() -> None:
+    report = ExportReport(
+        spans_sent=11,
+        datasets_added=12,
+        examples_added=13,
+        examples_present=14,
+        experiments_added=15,
+        runs_added=16,
+        runs_present=17,
+        scores_sent=18,
+        runs_skipped=19,
+        results_skipped=20,
+    )
+
+    assert _export_lines(report) == [
+        "sent 11 spans",
+        "datasets: 12 added",
+        "examples: 13 added, 14 present",
+        "experiments: 15 added",
+        "runs: 16 added, 17 present",
+        "scores: 18 sent",
+        "skipped 19 runs: their set has no dataset",
+        "skipped 20 results: no dataset example carries their posting",
+    ]
+
+
+def test_export_lines_leave_out_skipped_lines_at_zero() -> None:
+    assert not any("skipped" in line for line in _export_lines(ExportReport()))
+    only_runs = _export_lines(ExportReport(runs_skipped=1))
+    assert [line for line in only_runs if "skipped" in line] == [
+        "skipped 1 runs: their set has no dataset"
+    ]
+    only_results = _export_lines(ExportReport(results_skipped=1))
+    assert [line for line in only_results if "skipped" in line] == [
+        "skipped 1 results: no dataset example carries their posting"
+    ]
+
+
+def test_export_loads_no_llm_library(tmp_path: Path) -> None:
+    # The Phoenix call is cut off in the child, so the export builds its real
+    # client and runs its real steps, and no socket opens.
+    code = (
+        "import atexit, sys\n"
+        "import requests\n"
+        "def refuse(*args, **kwargs):\n"
+        "    raise requests.ConnectionError('refused')\n"
+        "requests.Session.request = refuse\n"
+        "from ijob_app.cli import main\n"
+        "atexit.register(lambda: print('LOADED', [m for m in "
+        "('dspy', 'claude_agent_sdk', 'litellm', 'openai', 'anthropic', "
+        "'optuna', 'deepeval', 'gepa') if m in sys.modules]))\n"
+        "main()\n"
+    )
+    home = tmp_path / "fresh-home"
+    home.mkdir()
+    env = {**os.environ, "IJOB_HOME": str(home)}
+
+    run = subprocess.run(  # noqa: S603 - fixed argv built from this interpreter
+        [sys.executable, "-I", "-c", code, "traces", "export"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert run.returncode == 1, run.stderr
+    assert "Phoenix is not running" in run.stderr
+    assert run.stdout.splitlines()[-1] == "LOADED []"

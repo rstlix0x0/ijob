@@ -213,6 +213,7 @@ from ijob_app.cli_search import (
     live_judge_command,
     live_search_command,
 )
+from ijob_app.cli_tune import tune_app
 from ijob_app.config import (
     FilterFlags,
     FilterLayers,
@@ -370,12 +371,19 @@ def _read_company(text: str) -> str:
     return company
 
 
+def _first_leaf(error: BaseException) -> BaseException:
+    """Return the first error inside nested exception groups, or `error` itself."""
+    while isinstance(error, BaseExceptionGroup):
+        error = error.exceptions[0]
+    return error
+
+
 @contextmanager
 def _refusals() -> Iterator[None]:
     """Turn what a service call refuses into a message and an exit status.
 
     A cache that cannot be opened exits `1`, as it does for `search`; any other
-    value error exits `2`.
+    value error exits `2`, also when a task group a command ran it in wrapped it.
 
     Raises:
         typer.Exit: After printing `error: <reason>` to stderr.
@@ -388,6 +396,15 @@ def _refusals() -> Iterator[None]:
     except InvalidValueError as error:
         say_error(f"{error_text(error)}")
         raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
+    except ExceptionGroup as group:
+        refused = group.subgroup(InvalidValueError)
+        if refused is None:
+            raise
+        leaf = _first_leaf(refused)
+        if not isinstance(leaf, InvalidValueError):
+            raise
+        say_error(f"{error_text(leaf)}")
+        raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from group
 
 
 @contextmanager
@@ -1091,7 +1108,7 @@ def _llm_groups(  # noqa: PLR0913, PLR0917 - the application and what its groups
     is_interactive: Callable[[], bool],
     resolver: HostResolver,
 ) -> None:
-    """Add the `cv`, `instructions`, `traces` and `eval` groups and `score`.
+    """Add the `cv`, `instructions`, `traces`, `eval` and `tune` groups and `score`.
 
     Args:
         app: The application to add the groups to.
@@ -1108,6 +1125,7 @@ def _llm_groups(  # noqa: PLR0913, PLR0917 - the application and what its groups
     app.add_typer(instructions_app(opener, is_interactive), name="instructions")
     app.add_typer(traces_app(opener), name="traces")
     app.add_typer(eval_app(opener, is_interactive, now), name="eval")
+    app.add_typer(tune_app(opener, is_interactive), name="tune")
     score_command(app, opener)
     explore_command(app, opener, is_interactive)
 
@@ -1146,8 +1164,8 @@ def make_app(  # noqa: PLR0915  # one registration per command
 
     Returns:
         The application, with its `setup`, `search`, `show`, `label`, `score` and
-        `tui` commands and its `sources`, `cv`, `instructions`, `traces` and
-        `eval` groups.
+        `tui` commands and its `sources`, `cv`, `instructions`, `traces`, `eval`
+        and `tune` groups.
     """
     theme_help()
     app = typer.Typer(
@@ -1272,6 +1290,7 @@ def make_app(  # noqa: PLR0915  # one registration per command
 
         try:
             with (
+                _refusals(),
                 open_service(
                     home,
                     db,

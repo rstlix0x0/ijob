@@ -4,7 +4,15 @@ from pathlib import Path
 import pytest
 from ijob_ai.errors import MissingModelError
 from ijob_ai.llm.reference import ModelRef, Provider
-from ijob_ai.llm.settings import EvalSettings, LlmSettings, Task, TracingSettings
+from ijob_ai.llm.settings import (
+    EvalSettings,
+    LlmSettings,
+    PhoenixSettings,
+    Task,
+    TracingSettings,
+    TuneSettings,
+)
+from ijob_core.errors import InvalidValueError
 
 _CONFIG = Path("/home/user/.ijob/config.toml")
 _JUDGE = ModelRef(Provider.CLAUDE_SDK, "claude-haiku-5-5")
@@ -21,6 +29,7 @@ def test_task_values() -> None:
         "scorer",
         "source_agent",
         "source_recipe",
+        "tuner",
     ]
 
 
@@ -33,7 +42,8 @@ def test_settings_defaults() -> None:
     assert settings.models == {}
     tracing = TracingSettings()
     assert tracing.max_size_mb == 256
-    assert tracing.langfuse_endpoint is None
+    assert [f.name for f in dataclasses.fields(tracing)] == ["max_size_mb"]
+    assert PhoenixSettings().endpoint == "http://127.0.0.1:6006"
 
 
 def test_model_for_returns_configured_model() -> None:
@@ -66,3 +76,45 @@ def test_eval_settings_defaults_and_frozen() -> None:
     assert settings.total_cost_usd == 10
     with pytest.raises(dataclasses.FrozenInstanceError):
         settings.max_cost_usd = 1  # type: ignore[misc]
+
+
+def test_tune_settings_defaults_and_frozen() -> None:
+    settings = TuneSettings()
+    assert settings.candidates == ()
+    assert settings.baseline is None
+    assert settings.models == ()
+    assert settings.max_cost_usd == 2
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        settings.max_cost_usd = 1  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://127.0.0.1:6006",
+        "http://localhost:6006",
+        "https://localhost",
+        "http://[::1]:6006",
+        "http://127.0.0.1:6006/",
+    ],
+)
+def test_phoenix_builds_for_local_endpoints(endpoint: str) -> None:
+    assert PhoenixSettings(endpoint=endpoint).endpoint == endpoint
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://0.0.0.0:6006",
+        "https://app.phoenix.arize.com",
+        "ftp://localhost",
+        "localhost:6006",
+        "http://localhost:notaport",
+        "",
+    ],
+)
+def test_phoenix_refuses_non_local_endpoints_at_construction(endpoint: str) -> None:
+    with pytest.raises(InvalidValueError) as raised:
+        PhoenixSettings(endpoint=endpoint)
+
+    assert raised.value.field == "phoenix.endpoint"

@@ -13,7 +13,7 @@ from ijob_ai.llm.call import run_call
 from ijob_ai.llm.reference import Provider
 from ijob_ai.llm.settings import Task
 from ijob_ai.tasks.signatures import JOB_EXTRACT_VERSION, JobExtractSig
-from ijob_ai.tasks.text import sanitize
+from ijob_ai.tasks.text import neutralize_markers, sanitize
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -72,7 +72,10 @@ async def extract_job(  # noqa: PLR0913  # the call's whole contract, one argume
     prediction = await run_call(
         dspy.Predict(JobExtractSig),
         lm,
-        inputs={"item_text": sanitize(text), "item_url": sanitize(url or "")},
+        inputs={
+            "item_text": neutralize_markers(sanitize(text)),
+            "item_url": sanitize(url or ""),
+        },
         provider=provider,
         budget=budget,
         timeout_s=timeout_s,

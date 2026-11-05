@@ -10,6 +10,10 @@ last step alone, for the commands that read votes a stopped run left behind.
 label, then a spot check of agreed labels. `record_review` stores the user's answer
 to one of them.
 
+`prepare_label_run(add=)` draws more cases from the pools for the current set and
+plans their votes; the cases are stored only when `label_operation` starts the
+run, so a declined or refused add leaves the set as it was.
+
 A run never builds the CV profile: it uses the stored one or refuses.
 
 This module imports no `ijob_ai` task or model module at module level, so a
@@ -45,6 +49,7 @@ from ijob_core.eval_records import (
     EvalTask,
     EvalVote,
     LabelOrigin,
+    Pools,
     RunStatus,
 )
 from ijob_core.eval_rules import (
@@ -53,12 +58,15 @@ from ijob_core.eval_rules import (
     ReviewReason,
     Split,
     SpotCandidate,
+    add_split,
     draw_cases,
+    draw_more,
     judge_label,
     limit_split,
     rejection_rule,
     score_label,
     spot_order,
+    spot_per_task,
 )
 from ijob_core.model import Instructions, Posting, PostingId, ResumeProfile
 from ijob_core.store import Store
@@ -124,6 +132,23 @@ class EvalNeedsError(LlmError):
         )
 
     @classmethod
+    def no_set(cls) -> "EvalNeedsError":
+        """Build the error for `--add` when no label set exists to grow."""
+        return cls(
+            "no label set exists for the stored rules, CV profile and jury",
+            "run `ijob eval label`",
+        )
+
+    @classmethod
+    def votes_missing(cls) -> "EvalNeedsError":
+        """Build the error for `--add` while the set still lacks votes."""
+        return cls(
+            "the label set still lacks votes; adding now would pay for more "
+            "before these are done",
+            "run `ijob eval label`",
+        )
+
+    @classmethod
     def stale_profile(cls) -> "EvalNeedsError":
         """Build the error for a CV profile read from an earlier CV."""
         return cls(
@@ -132,22 +157,30 @@ class EvalNeedsError(LlmError):
 
 
 class TooFewCasesError(LlmError):
-    """The pools hold too few postings to draw a label set from.
+    """The pools hold too few postings to draw a label set, or more cases for one.
 
     Attributes:
         found: How many postings the draw gave.
     """
 
-    def __init__(self, found: int) -> None:
+    def __init__(self, found: int, *, adding: bool = False) -> None:
         """Build the error from the size of the draw.
 
         Args:
             found: How many postings the draw gave.
+            adding: Whether the draw was to grow a set that exists, which needs
+                only one posting not yet in it.
         """
-        super().__init__(
-            f"only {found} postings to draw from; a label set needs at least "
-            f"{_MIN_CASES}; fetch and judge more postings first"
-        )
+        if adding:
+            super().__init__(
+                "no posting is left to add to the label set; "
+                "fetch and judge more postings first"
+            )
+        else:
+            super().__init__(
+                f"only {found} postings to draw from; a label set needs at least "
+                f"{_MIN_CASES}; fetch and judge more postings first"
+            )
         self.found = found
 
 
@@ -179,18 +212,23 @@ class LabelPlan:
     """What a jury run will do, worked out before any call.
 
     Attributes:
-        eval_set: The label set, drawn and stored.
+        eval_set: The label set. A new set is drawn and stored by the plan; the
+            cases of an add wait in `pending` until the run starts.
         instructions: The stored instructions whose rules the judge votes apply.
         profile: The stored CV profile the scorer votes read.
         jurors: The jurors, in the order their votes are requested.
         changed: What differs from the last set that has votes; empty when the
             set is the one in use or there is no earlier set.
-        cases: How many cases the run covers, after `limit`.
+        cases: How many cases the run covers, after `limit`; the whole set,
+            added cases included.
         skipped: Cases among them whose posting changed or went since the draw;
             they get no new vote.
         items: The votes still missing, case by case, judge then scorer, jurors
             in order.
         limited: Whether `limit` narrowed the run.
+        added: How many cases `add` will append to the set; zero without it.
+        pending: The cases of an add, not yet stored; `label_operation` stores
+            them when the run starts. Empty without `add`.
     """
 
     eval_set: EvalSet
@@ -202,6 +240,8 @@ class LabelPlan:
     skipped: int
     items: tuple[VoteItem, ...]
     limited: bool
+    added: int = 0
+    pending: tuple[EvalCase, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,12 +372,14 @@ class ReviewPlan:
         items: The cases to show, in order: the ones waiting for the user, then
             the spot check.
         skipped: Postings left out because their text changed or they are gone.
+        set_id: The label set the plan covers, or `None` when there is none.
     """
 
     has_set: bool
     rules: tuple[str, ...]
     items: tuple[ReviewItem, ...]
     skipped: int
+    set_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,6 +396,7 @@ def prepare_label_run(
     settings: EvalSettings,
     *,
     limit: int | None = None,
+    add: int | None = None,
     now: Callable[[], datetime],
 ) -> LabelPlan:
     """Find or draw the label set and list the votes it still needs.
@@ -361,27 +404,35 @@ def prepare_label_run(
     The set is the one for the stored rules, the stored CV profile and the jury.
     A set that has cases keeps them: the draw is made once. With `limit`, the run
     covers the first cases of each pool by position, as `limit_split` divides
-    them. A case whose posting text differs from the one the set was drawn under,
-    or whose posting is gone, is skipped and counted.
+    them. With `add`, the set must exist and hold every vote its cases can take:
+    more cases are drawn from the pools less the set's own (see `draw_more`) and
+    placed after the last position, and the plan asks for their votes. Nothing
+    is stored for them here: they go in `LabelPlan.pending` and `label_operation`
+    stores them when the run starts. A case whose posting text differs from the
+    one the set was drawn under, or whose posting is gone, is skipped and
+    counted; it does not hold back `add`.
 
     Args:
         store: The open store.
         settings: The eval settings, whose jury votes.
         limit: Cover only this many cases, from 1 to 100; all when `None`.
+        add: Draw this many more cases into the set, from 1 to 100; none when
+            `None`. It cannot be combined with `limit`.
         now: The wall clock, returning timezone-aware times.
 
     Returns:
         The plan, with the votes still missing.
 
     Raises:
-        InvalidValueError: No jury is set, or `limit` is outside 1 to 100.
+        InvalidValueError: No jury is set, `limit` or `add` is outside 1 to 100,
+            or both are given.
         EvalNeedsError: No rules are stored, or no CV profile read from the
-            stored CV.
-        TooFewCasesError: A new set would hold fewer than 10 cases.
+            stored CV; or, with `add`, no set exists for them or the set still
+            lacks votes.
+        TooFewCasesError: A new set would hold fewer than 10 cases, or `add` has
+            no posting left to draw.
         sqlite3.Error: The store cannot be read or written.
     """
-    from ijob_ai.tasks.text import input_sha256, posting_block  # noqa: PLC0415
-
     if settings.jury is None:
         raise InvalidValueError(
             "eval.jury",
@@ -389,34 +440,28 @@ def prepare_label_run(
         )
     if limit is not None:
         limit_split(limit, Split(0, 0, 0))  # raises for a limit outside 1 to 100
+    if add is not None:
+        add_split(add, Split(0, 0, 0))  # raises for a count outside 1 to 100
+        if limit is not None:
+            raise InvalidValueError("add", "cannot be combined with --limit")
     instructions = stored_rules(store)
     profile = stored_profile(store)
     jurors = tuple(sorted(settings.jury, key=str))
-    eval_set, rows = _set_and_rows(
-        store,
-        instructions.rules_sha256,
-        profile.sha256(),
-        tuple(str(juror) for juror in jurors),
-        now=now,
-    )
-    have = {
-        (vote.posting_id, vote.task, vote.juror)
-        for vote in store.evals.votes(eval_set.id)
-    }
-    covered = _limited(rows, limit)
-    items: list[VoteItem] = []
-    skipped = 0
-    for row in covered:
-        posting = store.posting(row.posting_id)
-        if posting is None or input_sha256(posting_block(posting)) != row.digest:
-            skipped += 1
-            continue
-        items.extend(
-            VoteItem(posting, task, juror)
-            for task in _TASKS
-            for juror in jurors
-            if (row.posting_id, task, str(juror)) not in have
+    pending: list[EvalCase] = []
+    if add is None:
+        eval_set, rows = _set_and_rows(
+            store,
+            instructions.rules_sha256,
+            profile.sha256(),
+            tuple(str(juror) for juror in jurors),
+            now=now,
         )
+    else:
+        eval_set, rows, pending = _grown_set(
+            store, instructions.rules_sha256, profile.sha256(), jurors, add
+        )
+    covered = _limited(rows, limit)
+    items, skipped = _missing_votes(store, eval_set, covered, jurors)
     return LabelPlan(
         eval_set=eval_set,
         instructions=instructions,
@@ -427,7 +472,93 @@ def prepare_label_run(
         skipped=skipped,
         items=tuple(items),
         limited=limit is not None,
+        added=len(pending),
+        pending=tuple(pending),
     )
+
+
+def _missing_votes(
+    store: Store, eval_set: EvalSet, rows: Sequence[_Row], jurors: tuple[ModelRef, ...]
+) -> tuple[list[VoteItem], int]:
+    """List the votes the rows still lack, and count the rows no vote can be cast on.
+
+    A row whose posting text differs from the one it was drawn under, or whose
+    posting is gone, gets no item and counts as skipped.
+    """
+    from ijob_ai.tasks.text import input_sha256, posting_block  # noqa: PLC0415
+
+    have = {
+        (vote.posting_id, vote.task, vote.juror)
+        for vote in store.evals.votes(eval_set.id)
+    }
+    items: list[VoteItem] = []
+    skipped = 0
+    for row in rows:
+        posting = store.posting(row.posting_id)
+        if posting is None or input_sha256(posting_block(posting)) != row.digest:
+            skipped += 1
+            continue
+        items.extend(
+            VoteItem(posting, task, juror)
+            for task in _TASKS
+            for juror in jurors
+            if (row.posting_id, task, str(juror)) not in have
+        )
+    return items, skipped
+
+
+def _grown_set(
+    store: Store,
+    rules_sha256: str,
+    profile_sha256: str,
+    jurors: tuple[ModelRef, ...],
+    add: int,
+) -> tuple[EvalSet, list[_Row], list[EvalCase]]:
+    """Draw `add` more cases for the current set; return it, its rows and the new cases.
+
+    Nothing is written: the new cases are returned for the run to store.
+
+    Raises:
+        EvalNeedsError: No set with cases exists, or its cases lack votes.
+        TooFewCasesError: No posting outside the set can be drawn.
+    """
+    from ijob_ai.tasks.text import input_sha256, posting_block  # noqa: PLC0415
+
+    records = store.evals
+    jury = tuple(str(juror) for juror in jurors)
+    eval_set = find_set(records, rules_sha256, profile_sha256, jury)
+    stored = records.cases(eval_set.id) if eval_set is not None else []
+    if eval_set is None or not stored:
+        raise EvalNeedsError.no_set()
+    rows = [_Row(case.posting_id, case.bucket, case.input_sha256) for case in stored]
+    if _missing_votes(store, eval_set, rows, jurors)[0]:
+        raise EvalNeedsError.votes_missing()
+    held = {case.posting_id for case in stored}
+    pools = records.pools(rules_sha256)
+    drawn = draw_more(
+        rules_sha256,
+        profile_sha256,
+        len(stored),
+        Pools(
+            tuple(i for i in pools.kept if i not in held),
+            tuple(i for i in pools.rejected if i not in held),
+            tuple(i for i in pools.unjudged if i not in held),
+        ),
+        add,
+    )
+    new: list[_Row] = []
+    for posting_id, bucket in drawn:
+        posting = store.posting(posting_id)
+        if posting is not None:
+            new.append(_Row(posting_id, bucket, input_sha256(posting_block(posting))))
+    if not new:
+        raise TooFewCasesError(0, adding=True)
+    first = stored[-1].position + 1
+    cases = [
+        EvalCase(eval_set.id, row.posting_id, first + n, row.bucket, row.digest)
+        for n, row in enumerate(new)
+    ]
+    return eval_set, [*rows, *new], cases
 
 
 def _set_and_rows(
@@ -570,7 +701,8 @@ async def label_operation(  # noqa: PLR0913  # the operation's inputs, one each
     stops that juror alone: its later items make no call and the other jurors go
     on. An unusable answer leaves no vote, to be asked for again. An unknown cost
     stops the run, and so does the cap. Labels are derived, and the run row closed,
-    however the run ends.
+    however the run ends. The cases an add drew (`plan.pending`) are stored first,
+    as the run starts, and stay if it is cancelled.
 
     Args:
         runtime: The runtime holding the settings and the model registry.
@@ -593,6 +725,8 @@ async def label_operation(  # noqa: PLR0913  # the operation's inputs, one each
 
     stopped: dict[ModelRef, LlmError] = {}
     cap = spend.cap
+    if plan.pending:
+        store.evals.put_cases(plan.eval_set.id, plan.pending)
     run = spend.begin(
         _SUITE,
         "+".join(plan.eval_set.jury),
@@ -889,7 +1023,8 @@ def review_items(
     checked = [label.task for label in labels.values() if label.spot_checked]
     seed = eval_set.rules_sha256 + eval_set.profile_sha256
     checks: list[ReviewItem] = []
-    for candidate in spot_order(seed, candidates, checked=checked):
+    per_task = spot_per_task(len(postings.drawn))
+    for candidate in spot_order(seed, candidates, per_task, checked=checked):
         posting = postings.get(candidate.posting_id)
         key = (candidate.posting_id, candidate.task)
         if posting is not None:
@@ -909,6 +1044,7 @@ def review_items(
         rules=instructions.rules,
         items=(*waiting, *checks),
         skipped=len(postings.unusable),
+        set_id=eval_set.id,
     )
 
 

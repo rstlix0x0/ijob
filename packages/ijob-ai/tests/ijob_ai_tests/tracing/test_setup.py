@@ -1,13 +1,10 @@
-import base64
 import logging
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import override
 
 import pytest
-import requests
 from ijob_ai.llm.settings import TracingSettings
 from ijob_ai.tracing.setup import (
     Tracing,
@@ -19,47 +16,9 @@ from ijob_core.traces import SpanRow, TraceStore, TraceSummary
 from opentelemetry import trace
 from opentelemetry.trace import ProxyTracerProvider
 
-_ENDPOINT = "http://localhost:3000"
 _DISABLED_WARNING = (
     "warning: OTEL_SDK_DISABLED ignored; ijob tracing cannot be turned off"
 )
-_KEY_WARNING = (
-    "warning: Langfuse export skipped; set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY"
-)
-
-
-class RecordingAdapter(requests.adapters.BaseAdapter):
-    """A transport that records requests, or fails them, without any network."""
-
-    def __init__(self, error: Exception | None = None) -> None:
-        super().__init__()
-        self.requests: list[requests.PreparedRequest] = []
-        self._error = error
-
-    @override
-    def send(
-        self,
-        request: requests.PreparedRequest,
-        *_args: object,
-        **_kwargs: object,
-    ) -> requests.Response:
-        self.requests.append(request)
-        if self._error is not None:
-            raise self._error
-        response = requests.Response()
-        response.status_code = 200
-        response.request = request
-        return response
-
-    @override
-    def close(self) -> None:
-        return None
-
-
-def _session(adapter: RecordingAdapter) -> requests.Session:
-    session = requests.Session()
-    session.mount("http://", adapter)
-    return session
 
 
 def _one_call(tracing: Tracing, name: str = "search") -> None:
@@ -90,12 +49,7 @@ def _no_root_handlers() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _clean_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in (
-        "OTEL_SDK_DISABLED",
-        "OTEL_TRACES_SAMPLER",
-        "LANGFUSE_PUBLIC_KEY",
-        "LANGFUSE_SECRET_KEY",
-    ):
+    for name in ("OTEL_SDK_DISABLED", "OTEL_TRACES_SAMPLER"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -167,64 +121,14 @@ def test_operation_without_calls_writes_no_trace(tmp_path: Path) -> None:
     assert _summaries(path) == []
 
 
-def test_langfuse_export_headers_and_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
-    adapter = RecordingAdapter()
-    tracing = start_tracing(
-        tmp_path / "traces.db",
-        TracingSettings(langfuse_endpoint=_ENDPOINT + "/"),
-        session=_session(adapter),
-    )
-    _one_call(tracing)
-    tracing.finish()
-    assert tracing.warnings == []
-    [request] = adapter.requests
-    token = base64.b64encode(b"pk-test:sk-test").decode()
-    assert request.method == "POST"
-    assert request.url == "http://localhost:3000/api/public/otel/v1/traces"
-    assert request.headers["Authorization"] == f"Basic {token}"
-    assert request.headers["x-langfuse-ingestion-version"] == "4"
-    assert request.headers["Content-Type"] == "application/x-protobuf"
-
-
-@pytest.mark.parametrize("missing", ["LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"])
-def test_langfuse_missing_key_warns_and_skips(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
-) -> None:
-    keys = {"LANGFUSE_PUBLIC_KEY": "pk-test", "LANGFUSE_SECRET_KEY": "sk-test"}
-    del keys[missing]
-    for name, value in keys.items():
-        monkeypatch.setenv(name, value)
-    adapter = RecordingAdapter()
+def test_spans_go_only_to_the_local_store(tmp_path: Path) -> None:
     path = tmp_path / "traces.db"
-    tracing = start_tracing(
-        path,
-        TracingSettings(langfuse_endpoint=_ENDPOINT),
-        session=_session(adapter),
-    )
+    tracing = start_tracing(path, TracingSettings())
+    processors = tracing._provider._active_span_processor._span_processors
+    assert len(processors) == 1
     _one_call(tracing)
     tracing.finish()
-    assert adapter.requests == []
-    assert tracing.warnings == [_KEY_WARNING]
-    assert len(_summaries(path)) == 1
-
-
-def test_no_endpoint_means_no_export(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
-    adapter = RecordingAdapter()
-    tracing = start_tracing(
-        tmp_path / "traces.db", TracingSettings(), session=_session(adapter)
-    )
-    _one_call(tracing)
-    tracing.finish()
-    assert adapter.requests == []
-    assert tracing.warnings == []
+    assert [summary.operation for summary in _summaries(path)] == ["ijob search"]
 
 
 def test_finish_prunes_and_reports(tmp_path: Path) -> None:
@@ -254,60 +158,40 @@ def test_finish_prunes_and_reports(tmp_path: Path) -> None:
     assert "ijob search" in operations
 
 
-@pytest.fixture
-def _fast_retry(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Shrink the OTLP exporter's retry backoff so a failing export ends at once."""
-    monkeypatch.setattr(
-        "opentelemetry.exporter.otlp.common.http._OTLPHTTPClient._compute_backoff",
-        lambda *_args: 0.001,
-    )
-
-
-@pytest.mark.usefixtures("_fast_retry")
-def test_export_failure_does_not_raise(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
-    adapter = RecordingAdapter(error=requests.ConnectionError())
-    path = tmp_path / "traces.db"
-    tracing = start_tracing(
-        path,
-        TracingSettings(langfuse_endpoint=_ENDPOINT),
-        session=_session(adapter),
-    )
-    _one_call(tracing)
-    report = tracing.finish()
-    assert report.dropped == 0
-    assert adapter.requests
-    assert len(_summaries(path)) == 1
-
-
-@pytest.mark.usefixtures("_fast_retry")
-def test_export_failure_prints_nothing_to_stderr(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
-    adapter = RecordingAdapter(error=requests.ConnectionError())
-    with _no_root_handlers():
-        tracing = start_tracing(
-            tmp_path / "traces.db",
-            TracingSettings(langfuse_endpoint=_ENDPOINT),
-            session=_session(adapter),
-        )
-        _one_call(tracing)
-        tracing.finish()
-    assert len(adapter.requests) > 2
-    assert capfd.readouterr().err == ""
-
-
 def test_repeated_start_adds_no_log_handlers(tmp_path: Path) -> None:
     for _ in range(2):
         start_tracing(tmp_path / "traces.db", TracingSettings()).finish()
     handlers = logging.getLogger("opentelemetry.exporter.otlp").handlers
     null_handlers = [h for h in handlers if isinstance(h, logging.NullHandler)]
     assert len(null_handlers) == 1
+
+
+@pytest.mark.parametrize(
+    "logger_name",
+    [
+        "opentelemetry.exporter.otlp.proto.http.trace_exporter",
+        "opentelemetry.sdk._shared_internal",
+        "opentelemetry.sdk.trace.export",
+    ],
+)
+def test_export_failures_print_nothing_on_stderr(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], logger_name: str
+) -> None:
+    start_tracing(tmp_path / "traces.db", TracingSettings()).finish()
+    with _no_root_handlers():
+        logging.getLogger(logger_name).error("Failed to export batch")
+        logging.getLogger(logger_name).warning("Exception while exporting Span")
+
+    assert capsys.readouterr().err == ""
+
+
+def test_the_stderr_check_sees_an_unsilenced_logger(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with _no_root_handlers():
+        logging.getLogger("ijob.test.unsilenced").error("Failed to export batch")
+
+    assert "Failed to export batch" in capsys.readouterr().err
 
 
 def test_global_tracer_provider_is_untouched(tmp_path: Path) -> None:

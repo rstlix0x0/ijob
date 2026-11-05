@@ -17,6 +17,12 @@ import httpx
 import pytest
 from ijob_ai.errors import MissingModelError, NoCvError
 from ijob_ai.llm.reference import parse_model_ref
+from ijob_ai.tasks.versions import (
+    JUDGE_UNTRUSTED,
+    JUDGE_VERSION,
+    SCORER_UNTRUSTED,
+    SCORER_VERSION,
+)
 from ijob_app.agent_ops import FoundSource, found_of
 from ijob_app.config import FilterFlags, FilterLayers, read_filter_layers
 from ijob_app.eval_estimate import SUBSCRIPTION, UP_TO_CAP
@@ -46,14 +52,17 @@ from ijob_app.service import (
     open_service,
 )
 from ijob_core.countries import CountryCode
-from ijob_core.eval_records import RunStatus
+from ijob_core.errors import InvalidValueError
+from ijob_core.eval_records import EvalTask, RunStatus
 from ijob_core.filters import FilterSpec
 from ijob_core.model import (
     ExternalId,
     Instructions,
     PostingId,
     RemoteScope,
+    ResumeProfile,
     Score,
+    Seniority,
     SightingDraft,
     SourceKind,
     SourceRef,
@@ -94,6 +103,7 @@ from .llm_fakes import (
     write_llm_config,
 )
 from .test_eval_agent_suites import _reading_scripts, _ScriptedEngine
+from .test_llm_ops import _prompt_text
 
 _FIXTURES = (
     Path(__file__).parents[3]
@@ -2641,3 +2651,381 @@ def test_add_found_recipe_of_another_company_is_refused_even_when_removed(
     assert row is not None
     assert (row.company, row.removed) == ("Other Co", True)
     assert _stored_recipe(db) == _OLD_RECIPE
+
+
+# --- the program in force ----------------------------------------------------
+
+_PROGRAM_TEXT = "Tuned with care."
+_TUNED_VERSION = "scorer-1+0a1b2c3d"
+
+
+def _profile() -> ResumeProfile:
+    return ResumeProfile(
+        summary="Backend engineer",
+        years_experience=7,
+        seniority=Seniority.SENIOR,
+        roles=("Backend Engineer",),
+        spoken_languages=("English",),
+        locations=("Jakarta",),
+        work_authorization=("Indonesia",),
+        skills=("Python",),
+    )
+
+
+def _seed_scores(db: Path, ids: Sequence[PostingId], *, program: bool) -> None:
+    """Store a profile, a base score of 10 per posting and, if asked, an accepted
+    scorer program of the stored model with a score of 90 per posting under it.
+    """
+    with Store.open(db) as store:
+        profile = _profile()
+        store.set_cv_profile(
+            profile,
+            cv_sha256="a" * 64,
+            model=_STORED_MODEL,
+            task_version="cv_profile-1",
+            made_at=_SEEN,
+        )
+        sha = profile.sha256()
+        for posting_id in ids:
+            store.put_score(
+                posting_id,
+                "0" * 64,
+                sha,
+                _STORED_MODEL,
+                "scorer-1",
+                Score(10, ("base",)),
+                made_at=_SEEN,
+            )
+        if not program:
+            return
+        eval_set = store.evals.find_or_create_set(
+            "b" * 64, sha, ["made-up/a", "made-up/b"], created_at=_SEEN
+        )
+        saved = store.tunes.save_program(
+            task=EvalTask.SCORER,
+            model=_STORED_MODEL,
+            optimizer="gepa",
+            base_version="scorer-1",
+            set_id=eval_set.id,
+            bound_sha256=sha,
+            instructions=f"{_PROGRAM_TEXT} {SCORER_UNTRUSTED}",
+            demos_json="[]",
+            version=_TUNED_VERSION,
+            tune_run_id=None,
+            created_at=_SEEN,
+        )
+        store.tunes.accept_program(saved.id, accepted_at=_SEEN)
+        for posting_id in ids:
+            store.put_score(
+                posting_id,
+                "0" * 64,
+                sha,
+                _STORED_MODEL,
+                _TUNED_VERSION,
+                Score(90, ("tuned",)),
+                made_at=_SEEN,
+            )
+
+
+def _points(scores: Mapping[PostingId, Score]) -> set[int]:
+    return {score.score for score in scores.values()}
+
+
+def test_service_saved_scores_follow_the_program_in_force(
+    llm_opener: _LlmOpener, tmp_path: Path
+) -> None:
+    ids = _seed_open(tmp_path / "ijob.db", _jobs("one", "two"))
+    _seed_scores(tmp_path / "ijob.db", ids, program=True)
+
+    with llm_opener(_scoring_engines()) as service:
+        in_force = service.saved_scores()
+        cleared = service.tune_clear(EvalTask.SCORER)
+        after = service.saved_scores()
+
+    assert _points(in_force) == {90}
+    assert len(in_force) == 2
+    assert cleared
+    assert _points(after) == {10}
+
+
+def test_saved_scores_without_a_program_read_no_config(
+    llm_opener: _LlmOpener, tmp_path: Path, home: IjobHome
+) -> None:
+    ids = _seed_open(tmp_path / "ijob.db", _jobs("one", "two"))
+    _seed_scores(tmp_path / "ijob.db", ids, program=False)
+    home.config.write_text("this is [not toml", encoding="utf-8")
+
+    with llm_opener(_scoring_engines()) as service:
+        scores = service.saved_scores()
+
+    assert _points(scores) == {10}
+    assert len(scores) == 2
+
+
+def test_saved_scores_with_a_program_load_no_llm_library(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    db = tmp_path / "ijob.db"
+    ids = _seed_open(db, _jobs("one", "two"))
+    _seed_scores(db, ids, program=True)
+    write_llm_config(home / "config.toml", scorer=_STORED_MODEL, judge=None)
+    code = (
+        "import sys\n"
+        "from datetime import UTC, datetime\n"
+        "from pathlib import Path\n"
+        "from ijob_app.home import IjobHome\n"
+        "from ijob_app.service import open_service\n"
+        "def refuse(cache):\n"
+        "    raise AssertionError('no fetch')\n"
+        "clock = lambda: datetime(2026, 10, 31, 12, 0, tzinfo=UTC)\n"
+        f"with open_service(IjobHome(Path({str(home)!r})), Path({str(db)!r}),\n"
+        "                  refuse, now=clock, use_cache=False) as service:\n"
+        "    scores = service.saved_scores()\n"
+        "print(sorted(score.score for score in scores.values()))\n"
+        "print('dspy' in sys.modules or 'claude_agent_sdk' in sys.modules)\n"
+    )
+
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.split("\n")[:2] == ["[90, 90]", "False"]
+
+
+def _accept_program(
+    db: Path, task: EvalTask, *, bound: str, base_version: str, instructions: str
+) -> None:
+    """Store a program of the stored model for `task` and accept it."""
+    with Store.open(db) as store:
+        eval_set = store.evals.find_or_create_set(
+            "b" * 64, "c" * 64, ["made-up/a", "made-up/b"], created_at=_SEEN
+        )
+        saved = store.tunes.save_program(
+            task=task,
+            model=_STORED_MODEL,
+            optimizer="gepa",
+            base_version=base_version,
+            set_id=eval_set.id,
+            bound_sha256=bound,
+            instructions=instructions,
+            demos_json="[]",
+            version=f"{base_version}+0a1b2c3d",
+            tune_run_id=None,
+            created_at=_SEEN,
+        )
+        store.tunes.accept_program(saved.id, accepted_at=_SEEN)
+
+
+def test_service_search_and_judge_run_the_judge_program_in_force(
+    llm_opener: _LlmOpener, tmp_path: Path
+) -> None:
+    db = tmp_path / "ijob.db"
+    _seed_open(db, _jobs("one"), _stored_instructions())
+    _accept_program(
+        db,
+        EvalTask.JUDGE,
+        bound=_stored_instructions().rules_sha256,
+        base_version="judge-2",
+        instructions=f"{_PROGRAM_TEXT} {JUDGE_UNTRUSTED}",
+    )
+    engines = FakeEngines(FakeAsyncEngine([verdict_answer()]))
+
+    with llm_opener(engines) as service:
+        searched = _search(service)
+        ids = [item.posting.id for item in searched]
+
+        async def collect() -> list[SearchItem]:
+            return [item async for item in service.judge(ids)]
+
+        judged = asyncio.run(collect())
+
+    assert [item.status for item in searched] == [JudgeStatus.JUDGED]
+    assert [item.status for item in judged] == [JudgeStatus.CACHED]
+    assert len(engines.engine.requests) == 1
+    assert _PROGRAM_TEXT in _prompt_text(engines.engine.requests[0])
+    with Store.open(db) as store:
+        versions = {
+            row[0] for row in store._conn.execute("SELECT task_version FROM verdicts")
+        }
+    assert versions == {"judge-2+0a1b2c3d"}
+
+
+def test_service_score_runs_the_scorer_program_in_force(
+    llm_opener: _LlmOpener, tmp_path: Path
+) -> None:
+    db = tmp_path / "ijob.db"
+    ids = _seed_open(db, _jobs("one"))
+    engines = _scoring_engines()
+
+    with llm_opener(engines) as service:
+        service.store_cv(write_cv_pdf(tmp_path / "mine.pdf"))
+        base = _score(service, ids)
+        profile = service.cv_profile()
+        assert profile is not None
+        _accept_program(
+            db,
+            EvalTask.SCORER,
+            bound=profile.sha256(),
+            base_version="scorer-1",
+            instructions=f"{_PROGRAM_TEXT} {SCORER_UNTRUSTED}",
+        )
+        tuned = _score(service, ids)
+        listed = service.saved_scores()
+
+    assert [item.status for item in base] == [ScoreStatus.JUDGED]
+    assert [item.status for item in tuned] == [ScoreStatus.JUDGED]
+    assert _PROGRAM_TEXT not in _prompt_text(engines.engine.requests[1])
+    assert _PROGRAM_TEXT in _prompt_text(engines.engine.requests[2])
+    assert listed == {ids[0]: tuned[0].score}
+
+
+_OUT_OF_FORCE = pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("bound_sha256", "e" * 64),
+        ("base_version", "older-1"),
+        ("model", "claude-sdk/another-model"),
+    ],
+    ids=["changed-bound", "older-base-version", "another-model"],
+)
+
+
+_BREAK: dict[str, str] = {
+    "bound_sha256": "UPDATE programs SET bound_sha256 = ? WHERE task = ?",
+    "base_version": "UPDATE programs SET base_version = ? WHERE task = ?",
+    "model": "UPDATE programs SET model = ? WHERE task = ?",
+}
+
+
+def _break_the_force(db: Path, task: EvalTask, column: str, value: str) -> None:
+    """Change one column of the task's accepted program so it is out of force."""
+    with Store.open(db) as store, store._conn:
+        store._conn.execute(_BREAK[column], (value, task.value))
+
+
+def _stored_versions(db: Path, table: str) -> set[str]:
+    queries = {
+        "verdicts": "SELECT task_version FROM verdicts",
+        "scores": "SELECT task_version FROM scores",
+    }
+    with Store.open(db) as store:
+        return {row[0] for row in store._conn.execute(queries[table])}
+
+
+@_OUT_OF_FORCE
+def test_service_runs_the_base_judge_prompt_when_the_program_is_out_of_force(
+    llm_opener: _LlmOpener, tmp_path: Path, column: str, value: str
+) -> None:
+    db = tmp_path / "ijob.db"
+    _seed_open(db, _jobs("one"), _stored_instructions())
+    _accept_program(
+        db,
+        EvalTask.JUDGE,
+        bound=_stored_instructions().rules_sha256,
+        base_version=JUDGE_VERSION,
+        instructions=f"{_PROGRAM_TEXT} {JUDGE_UNTRUSTED}",
+    )
+    _break_the_force(db, EvalTask.JUDGE, column, value)
+    engines = FakeEngines(FakeAsyncEngine([verdict_answer()]))
+
+    with llm_opener(engines) as service:
+        searched = _search(service)
+        ids = [item.posting.id for item in searched]
+
+        async def collect() -> list[SearchItem]:
+            return [item async for item in service.judge(ids)]
+
+        judged = asyncio.run(collect())
+
+    assert [item.status for item in searched] == [JudgeStatus.JUDGED]
+    assert [item.status for item in judged] == [JudgeStatus.CACHED]
+    [request] = engines.engine.requests
+    assert _PROGRAM_TEXT not in _prompt_text(request)
+    assert _stored_versions(db, "verdicts") == {JUDGE_VERSION}
+
+
+@_OUT_OF_FORCE
+def test_service_runs_the_base_scorer_prompt_when_the_program_is_out_of_force(
+    llm_opener: _LlmOpener, tmp_path: Path, column: str, value: str
+) -> None:
+    db = tmp_path / "ijob.db"
+    ids = _seed_open(db, _jobs("one", "two"))
+    engines = _scoring_engines()
+
+    with llm_opener(engines) as service:
+        service.store_cv(write_cv_pdf(tmp_path / "mine.pdf"))
+        first = _score(service, ids[:1])
+        profile = service.cv_profile()
+        assert profile is not None
+        _accept_program(
+            db,
+            EvalTask.SCORER,
+            bound=profile.sha256(),
+            base_version=SCORER_VERSION,
+            instructions=f"{_PROGRAM_TEXT} {SCORER_UNTRUSTED}",
+        )
+        _break_the_force(db, EvalTask.SCORER, column, value)
+        both = _score(service, ids)
+        listed = service.saved_scores()
+
+    assert [item.status for item in first] == [ScoreStatus.JUDGED]
+    assert sorted(item.status.value for item in both) == ["cached", "judged"]
+    assert len(engines.engine.requests) == 3
+    assert _PROGRAM_TEXT not in _prompt_text(engines.engine.requests[2])
+    assert _stored_versions(db, "scores") == {SCORER_VERSION}
+    assert set(listed) == set(ids)
+
+
+@_OUT_OF_FORCE
+def test_service_saved_scores_are_the_base_ones_when_the_program_is_out_of_force(
+    llm_opener: _LlmOpener, tmp_path: Path, column: str, value: str
+) -> None:
+    db = tmp_path / "ijob.db"
+    ids = _seed_open(db, _jobs("one", "two"))
+    _seed_scores(db, ids, program=True)
+    _break_the_force(db, EvalTask.SCORER, column, value)
+
+    with llm_opener(_scoring_engines()) as service:
+        scores = service.saved_scores()
+
+    assert _points(scores) == {10}
+    assert len(scores) == 2
+
+
+def test_saved_scores_follow_the_settings_the_runtime_runs_with(
+    llm_opener: _LlmOpener, tmp_path: Path, home: IjobHome
+) -> None:
+    db = tmp_path / "ijob.db"
+    ids = _seed_open(db, _jobs("one", "two"), _stored_instructions())
+    _seed_scores(db, ids, program=True)
+    engines = FakeEngines(FakeAsyncEngine([verdict_answer()]))
+
+    with llm_opener(engines) as service:
+        _search(service)  # builds the runtime, which keeps the settings it read
+        write_llm_config(home.config, judge=MADE_UP_CLAUDE, scorer="claude-sdk/other")
+        listed = service.saved_scores()
+
+    assert _points(listed) == {90}
+
+
+def test_service_stops_on_a_malformed_program_and_names_its_id(
+    llm_opener: _LlmOpener, tmp_path: Path
+) -> None:
+    db = tmp_path / "ijob.db"
+    ids = _seed_open(db, _jobs("one"), _stored_instructions())
+    _seed_scores(db, ids, program=True)
+    with Store.open(db) as store, store._conn:
+        store._conn.execute("UPDATE programs SET demos_json = 'not json'")
+    engines = FakeEngines(FakeAsyncEngine([verdict_answer()]))
+
+    with llm_opener(engines) as service:
+        with pytest.raises(InvalidValueError, match=r"program 1\b"):
+            service.saved_scores()
+        with pytest.raises(InvalidValueError, match=r"program 1\b"):
+            _score(service, ids)
+        assert service.tune_clear(EvalTask.SCORER)
+        assert _points(service.saved_scores()) == {10}
+
+    assert engines.engine.requests == []

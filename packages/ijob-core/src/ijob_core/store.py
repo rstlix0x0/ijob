@@ -16,7 +16,7 @@ source's removal.
 It also keeps the items a source's parser could not read, so a model reads each
 once: a pending item becomes a job or not a job and is not read again. The
 records of the evaluation jury and of eval runs are read and written through
-`Store.evals`.
+`Store.evals`, and the frozen tuning split through `Store.tunes`.
 
 The schema version lives in `PRAGMA user_version`; opening a database applies
 every migration newer than that version, each in one transaction.
@@ -58,6 +58,7 @@ from ijob_core.model import (
     parse_source_ref,
 )
 from ijob_core.money import Money, Period
+from ijob_core.tune_records import TuneRecords
 
 _MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
     (
@@ -243,6 +244,37 @@ _MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
             passed INTEGER NOT NULL CHECK (passed IN (0, 1)),
             answer TEXT NOT NULL, detail TEXT NOT NULL, latency_ms INTEGER NOT NULL,
             PRIMARY KEY (run_id, case_key)
+        ) STRICT
+        """,
+    ),
+    (
+        """
+        CREATE TABLE tune_splits (
+            set_id INTEGER NOT NULL REFERENCES eval_sets(id),
+            posting_id INTEGER NOT NULL REFERENCES postings(id),
+            part TEXT NOT NULL
+                CHECK (part IN ('train', 'val', 'held_out', 'unused')),
+            PRIMARY KEY (set_id, posting_id)
+        ) STRICT
+        """,
+    ),
+    (
+        """
+        CREATE TABLE programs (
+            id INTEGER PRIMARY KEY,
+            task TEXT NOT NULL CHECK (task IN ('judge', 'scorer')),
+            model TEXT NOT NULL,
+            optimizer TEXT NOT NULL,
+            base_version TEXT NOT NULL,
+            set_id INTEGER NOT NULL REFERENCES eval_sets(id),
+            bound_sha256 TEXT NOT NULL,
+            instructions TEXT NOT NULL,
+            demos_json TEXT NOT NULL,
+            version TEXT NOT NULL,
+            tune_run_id INTEGER,
+            created_at TEXT NOT NULL,
+            accepted_at TEXT,
+            UNIQUE (task, model, version, bound_sha256)
         ) STRICT
         """,
     ),
@@ -543,6 +575,11 @@ class Store:
         """The jury and eval-run records, on this store's connection."""
         return EvalRecords(self._conn)
 
+    @property
+    def tunes(self) -> TuneRecords:
+        """The frozen tuning split, on this store's connection."""
+        return TuneRecords(self._conn)
+
     def record(
         self,
         drafts: Iterable[SightingDraft],
@@ -841,24 +878,36 @@ class Store:
             shown.setdefault(PostingId(posting_id), []).append(parse_source_ref(source))
         return shown
 
-    def saved_scores(self, profile_sha256: str) -> dict[PostingId, Score]:
+    def saved_scores(
+        self, profile_sha256: str, *, version: str | None = None
+    ) -> dict[PostingId, Score]:
         """Read the newest stored score of each posting against one profile.
 
-        Unlike `score`, this does not check the posting text, the model or the
-        task version, so a list can show what is known without reading any
-        description.
+        Unlike `score`, this does not check the posting text or the model, so a
+        list can show what is known without reading any description.
 
         Args:
             profile_sha256: The SHA-256 of the profile the scores were made from.
+            version: The task version whose scores to read. With `None`, the
+                scores of base versions, which have no `+`, so a tuned program's
+                scores never stand in for them.
 
         Returns:
             The newest score of every posting scored against that profile.
         """
-        rows = self._conn.execute(
-            "SELECT posting_id, score, reasons FROM scores "
-            "WHERE profile_sha256 = ? ORDER BY made_at",
-            (profile_sha256,),
-        ).fetchall()
+        if version is None:
+            rows = self._conn.execute(
+                "SELECT posting_id, score, reasons FROM scores "
+                "WHERE profile_sha256 = ? AND instr(task_version, '+') = 0 "
+                "ORDER BY made_at",
+                (profile_sha256,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT posting_id, score, reasons FROM scores "
+                "WHERE profile_sha256 = ? AND task_version = ? ORDER BY made_at",
+                (profile_sha256, version),
+            ).fetchall()
         return {
             PostingId(row[0]): Score(score=row[1], reasons=tuple(json.loads(row[2])))
             for row in rows

@@ -29,7 +29,7 @@ from ijob_ai.llm.reference import Provider, parse_model_ref
 from ijob_ai.llm.settings import Task
 from ijob_ai.tracing import attributes
 from ijob_ai.tracing.attributes import Outcome
-from ijob_ai.tracing.setup import current_operation_trace
+from ijob_ai.tracing.setup import OperationTrace, current_operation_trace
 
 _PARSE_REASON = "the answer did not match the expected fields"
 _CHAT: Final = "chat"
@@ -62,7 +62,7 @@ def _under_field_name(signature: Any, completion: str) -> str | None:  # noqa: A
     return f'{{"{name}": {completion[start : end + 1]}}}'
 
 
-class _ForgivingJSONAdapter(dspy.JSONAdapter):  # type: ignore[misc]  # dspy exports it untyped
+class ForgivingJSONAdapter(dspy.JSONAdapter):  # type: ignore[misc]  # dspy exports it untyped
     """The JSON adapter, also reading two other forms of a correct answer.
 
     A model asked for JSON sometimes answers correctly in DSPy's section form, or
@@ -124,7 +124,7 @@ def _meter_openrouter(meter: CallMeter, history: list[Mapping[str, Any]]) -> Non
         meter.output_tokens = _count(usage.get("completion_tokens"))
 
 
-def _meter_from_history(
+def meter_from_history(
     provider: Provider, meter: CallMeter, history: list[Mapping[str, Any]]
 ) -> None:
     """Complete the meter from history for a provider that does not meter itself."""
@@ -137,7 +137,7 @@ def _meter_from_history(
             assert_never(provider)
 
 
-def _translate(failure: Exception, timeout_s: float, task: Task) -> LlmError:
+def translate_failure(failure: Exception, timeout_s: float, task: Task) -> LlmError:
     """Map a DSPy or timeout failure onto the project's error family."""
     if isinstance(failure, AdapterParseError):
         return TaskOutputError(task.value, _PARSE_REASON)
@@ -235,7 +235,7 @@ def _record_call(  # noqa: PLR0913  # one fact of the call per argument
 
 
 @contextmanager
-def _call_span(  # noqa: PLR0913  # one fact of the call per argument
+def call_span(  # noqa: PLR0913  # one fact of the call per argument
     *,
     provider: Provider,
     model: str,
@@ -245,13 +245,15 @@ def _call_span(  # noqa: PLR0913  # one fact of the call per argument
     task: Task,
     task_version: str,
     posting_id: PostingId | None,
+    trace: OperationTrace | None = None,
 ) -> Iterator[None]:
-    """Record the enclosed call as a span of the current operation trace.
+    """Record the enclosed call as a span of an operation trace.
 
-    Does nothing outside an operation trace. An error that is not an `LlmError`
-    leaves the outcome unset.
+    The span goes under `trace` when it is given, else under the current
+    operation trace. Does nothing when there is neither. An error that is not
+    an `LlmError` leaves the outcome unset.
     """
-    trace = current_operation_trace()
+    trace = trace if trace is not None else current_operation_trace()
     if trace is None:
         yield
         return
@@ -341,7 +343,7 @@ async def run_call(  # noqa: PLR0913  # the call's whole contract, one argument 
     failure: Exception | None = None
     with (
         open_meter() as meter,
-        _call_span(
+        call_span(
             provider=provider,
             model=model_ref.model,
             meter=meter,
@@ -354,18 +356,18 @@ async def run_call(  # noqa: PLR0913  # the call's whole contract, one argument 
     ):
         try:
             async with asyncio.timeout(timeout_s):
-                with dspy.context(lm=attempt, adapter=_ForgivingJSONAdapter()):
+                with dspy.context(lm=attempt, adapter=ForgivingJSONAdapter()):
                     prediction = await predict.acall(**inputs)
         except (AdapterParseError, LMError, TimeoutError) as error:
             failure = error
         finally:
-            _meter_from_history(provider, meter, attempt.history)
+            meter_from_history(provider, meter, attempt.history)
             if meter.completed:
                 if meter.cost_usd is None:
                     raise CostUnknownError(str(lm.model))
                 budget.charge(meter.cost_usd)
         if failure is not None:
-            translated = _translate(failure, timeout_s, task)
+            translated = translate_failure(failure, timeout_s, task)
             if translated is failure.__cause__:
                 raise translated
             raise translated from failure

@@ -3,6 +3,7 @@
 import dspy
 from ijob_core.errors import InvalidValueError
 from ijob_core.model import Posting, ResumeProfile, Score
+from ijob_core.tune_records import TunedProgram
 
 from ijob_ai.errors import TaskOutputError
 from ijob_ai.llm.budget import Budget
@@ -10,8 +11,9 @@ from ijob_ai.llm.call import run_call
 from ijob_ai.llm.reference import Provider
 from ijob_ai.llm.settings import Task
 from ijob_ai.tasks.outputs import ScoreOut
+from ijob_ai.tasks.programs import tuned_predict
 from ijob_ai.tasks.signatures import SCORER_VERSION, ScoreSig
-from ijob_ai.tasks.text import posting_block, sanitize
+from ijob_ai.tasks.text import neutralize_markers, posting_block, sanitize
 
 
 def _score(answer: ScoreOut) -> Score:
@@ -33,11 +35,13 @@ async def score_posting(  # noqa: PLR0913  # the call's whole contract, one argu
     provider: Provider,
     budget: Budget,
     timeout_s: float,
+    program: TunedProgram | None = None,
 ) -> Score:
     """Score how well a posting fits a profile.
 
-    The posting block and the profile's JSON are the inputs. The caller checks
-    `Budget.try_start` first.
+    The posting block, sent with any field-marker form broken by
+    `neutralize_markers`, and the profile's JSON are the inputs. The caller
+    checks `Budget.try_start` first.
 
     Args:
         posting: The posting to score.
@@ -46,6 +50,9 @@ async def score_posting(  # noqa: PLR0913  # the call's whole contract, one argu
         provider: The provider serving `lm`.
         budget: The operation's budget, charged with the call's cost.
         timeout_s: Seconds the call may take.
+        program: A tuned program to run with, or `None` for the base prompt.
+            With one, the call runs with its instructions and demos, and its
+            span carries the program's version instead of the base version.
 
     Returns:
         The score, with its reasons cleaned of control characters and the empty
@@ -56,15 +63,21 @@ async def score_posting(  # noqa: PLR0913  # the call's whole contract, one argu
             rejects the answer.
         LlmError: Any error `run_call` raises.
     """
+    predict = (
+        dspy.Predict(ScoreSig) if program is None else tuned_predict(ScoreSig, program)
+    )
     prediction = await run_call(
-        dspy.Predict(ScoreSig),
+        predict,
         lm,
-        inputs={"posting": posting_block(posting), "profile": profile.to_json()},
+        inputs={
+            "posting": neutralize_markers(posting_block(posting)),
+            "profile": profile.to_json(),
+        },
         provider=provider,
         budget=budget,
         timeout_s=timeout_s,
         task=Task.SCORER,
-        task_version=SCORER_VERSION,
+        task_version=SCORER_VERSION if program is None else program.version,
         posting_id=posting.id,
     )
     return _score(prediction.score)

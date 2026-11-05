@@ -7,6 +7,7 @@ cache.
 
 import hashlib
 import re
+from collections.abc import Sequence
 from typing import Final
 
 from ijob_core.model import Posting
@@ -17,6 +18,7 @@ POSTING_LIMIT: Final = 12_000
 
 _CONTROLS: Final = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
 _TRUNCATED: Final = "\n[truncated]"
+_MARKER_OPENER: Final = re.compile(r"\[\[(?=\s*#)")
 
 
 def sanitize(text: str) -> str:
@@ -35,6 +37,28 @@ def sanitize(text: str) -> str:
     return _CONTROLS.sub("", text).strip()
 
 
+def neutralize_markers(text: str) -> str:
+    """Break the field-marker form in untrusted text.
+
+    A task prompt names each input field with a `[[ ## name ## ]]` line, and the
+    adapter reads its answer by the same form. Third-party text that holds that
+    form could pose as a field of its own, so every `[[` that is followed by `#`
+    (after any whitespace, which the adapter's own pattern is stricter than) is
+    written `[ [`. Any field name, in any case, is covered.
+
+    Call this on third-party text before it is sent as an input field, and on
+    the same text when building a tuning example. Text without the form comes
+    back unchanged, so a prompt without it is unaffected.
+
+    Args:
+        text: Third-party text bound for an input field.
+
+    Returns:
+        `text` with each marker opener broken; the stored text is untouched.
+    """
+    return _MARKER_OPENER.sub("[ [", text)
+
+
 def truncate(text: str, limit: int) -> str:
     r"""Cut text to its first `limit` characters and mark the cut.
 
@@ -49,6 +73,19 @@ def truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + _TRUNCATED
+
+
+def numbered_rules(rules: Sequence[str]) -> str:
+    """Write rules as numbered lines.
+
+    Args:
+        rules: The seeker's rules, in the order they are numbered.
+
+    Returns:
+        One `N. rule` line each, numbered from 1 and joined by newlines; empty
+        when there are no rules.
+    """
+    return "\n".join(f"{number}. {rule}" for number, rule in enumerate(rules, 1))
 
 
 def posting_block(posting: Posting) -> str:
