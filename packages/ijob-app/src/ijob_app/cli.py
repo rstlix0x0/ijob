@@ -371,12 +371,19 @@ def _read_company(text: str) -> str:
     return company
 
 
+def _first_leaf(error: BaseException) -> BaseException:
+    """Return the first error inside nested exception groups, or `error` itself."""
+    while isinstance(error, BaseExceptionGroup):
+        error = error.exceptions[0]
+    return error
+
+
 @contextmanager
 def _refusals() -> Iterator[None]:
     """Turn what a service call refuses into a message and an exit status.
 
     A cache that cannot be opened exits `1`, as it does for `search`; any other
-    value error exits `2`.
+    value error exits `2`, also when a task group a command ran it in wrapped it.
 
     Raises:
         typer.Exit: After printing `error: <reason>` to stderr.
@@ -389,6 +396,15 @@ def _refusals() -> Iterator[None]:
     except InvalidValueError as error:
         say_error(f"{error_text(error)}")
         raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from error
+    except ExceptionGroup as group:
+        refused = group.subgroup(InvalidValueError)
+        if refused is None:
+            raise
+        leaf = _first_leaf(refused)
+        if not isinstance(leaf, InvalidValueError):
+            raise
+        say_error(f"{error_text(leaf)}")
+        raise typer.Exit(code=_EXIT_BAD_ARGUMENT) from group
 
 
 @contextmanager
@@ -1274,6 +1290,7 @@ def make_app(  # noqa: PLR0915  # one registration per command
 
         try:
             with (
+                _refusals(),
                 open_service(
                     home,
                     db,

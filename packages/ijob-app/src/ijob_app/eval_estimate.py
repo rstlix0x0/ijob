@@ -91,8 +91,9 @@ class PlannedCall:
         ref: The model called.
         kind: The kind of call.
         count: How many calls; for an agent run, how many cases it covers.
-        characters: Characters in the posting block of one call, on average; 0
-            for an agent run.
+        characters: Characters in the posting block of one call, on average, plus
+            the text and demos of a tuned program the call runs; 0 for an agent
+            run.
     """
 
     ref: ModelRef

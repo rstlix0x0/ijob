@@ -14,10 +14,12 @@ from typing import Final
 import httpx
 import pytest
 import typer
+from ijob_ai.tasks.versions import SCORER_UNTRUSTED
 from ijob_app.cli import make_app
 from ijob_app.home import IjobHome, setup_home
 from ijob_app.llm_ops import LlmOptions
 from ijob_app.view import AMBER
+from ijob_core.eval_records import EvalTask
 from ijob_core.model import (
     ExternalId,
     Instructions,
@@ -316,6 +318,50 @@ def test_search_judge_lists_what_breaks_a_rule_when_asked(bench: _Bench) -> None
     assert "Too junior" in result.stdout
 
 
+def _accept_a_broken_scorer_program(bench: _Bench) -> int:
+    """Accept a scorer program on the stored profile, then break its demos."""
+    with Store.open(bench.home.db) as store:
+        stored = store.cv_profile()
+        assert stored is not None
+        sha = stored.profile.sha256()
+        eval_set = store.evals.find_or_create_set(
+            "b" * 64, sha, ["made-up/a", "made-up/b"], created_at=_NOW
+        )
+        saved = store.tunes.save_program(
+            task=EvalTask.SCORER,
+            model=MADE_UP_CLAUDE,
+            optimizer="gepa",
+            base_version="scorer-1",
+            set_id=eval_set.id,
+            bound_sha256=sha,
+            instructions=f"Tuned. {SCORER_UNTRUSTED}",
+            demos_json="[]",
+            version="scorer-1+0a1b2c3d",
+            tune_run_id=None,
+            created_at=_NOW,
+        )
+        store.tunes.accept_program(saved.id, accepted_at=_NOW)
+        with store._conn:
+            store._conn.execute("UPDATE programs SET demos_json = 'not json'")
+        return saved.id
+
+
+@pytest.mark.parametrize("flags", [(), ("--score",), ("--judge",)])
+def test_search_with_a_broken_program_names_it_and_exits_cleanly(
+    bench: _Bench, flags: tuple[str, ...]
+) -> None:
+    bench.store_cv()
+    bench.store_rules()
+    program_id = _accept_a_broken_scorer_program(bench)
+
+    result = bench.run("search", "--no-fetch", *flags)
+
+    assert result.exit_code == 2
+    assert f"program {program_id}" in result.stderr
+    assert "Traceback" not in result.output
+    assert isinstance(result.exception, SystemExit)
+
+
 def test_a_note_about_waiting_jobs_gives_its_fix(bench: _Bench) -> None:
     bench.store_skipped()
 
@@ -573,6 +619,63 @@ def test_tune_screen_without_a_baseline_gives_the_setting(bench: _Bench) -> None
 
     assert result.exit_code == 2
     assert "tune.baseline" in result.stderr
+
+
+def test_tune_run_without_models_says_to_read_the_report(bench: _Bench) -> None:
+    result = bench.run("tune", "run", "--yes")
+
+    assert result.exit_code == 1
+    assert "tune report" in result.stderr
+    assert "tune.models" in result.stderr
+
+
+def test_tune_list_without_programs_says_so(bench: _Bench) -> None:
+    result = bench.run("tune", "list")
+
+    assert result.exit_code == 0
+    assert "no tuned programs yet" in result.stderr
+
+
+def test_tune_report_without_a_baseline_gives_the_setting(bench: _Bench) -> None:
+    result = bench.run("tune", "report")
+
+    assert result.exit_code == 2
+    assert "tune.baseline" in result.stderr
+
+
+def test_tune_report_before_a_screen_draws_its_notice(bench: _Bench) -> None:
+    with bench.home.config.open("a", encoding="utf-8") as handle:
+        handle.write(f'\n[tune]\nbaseline = "{MADE_UP_CLAUDE}"\n')
+
+    result = bench.run("tune", "report")
+
+    assert result.exit_code == 0
+    assert "Tuning report" in result.stdout
+    assert "ijob tune screen" in " ".join(result.stdout.split())
+
+
+def test_tune_accept_an_unknown_program_says_so(bench: _Bench) -> None:
+    result = bench.run("tune", "accept", "9", "--yes")
+
+    assert result.exit_code == 2
+    assert "program 9" in result.stderr
+
+
+def test_tune_clear_with_nothing_accepted_says_so(bench: _Bench) -> None:
+    result = bench.run("tune", "clear", "judge")
+
+    assert result.exit_code == 0
+    assert "no program is accepted for judge" in result.stderr
+
+
+def test_traces_export_refuses_an_endpoint_that_is_not_local(bench: _Bench) -> None:
+    with bench.home.config.open("a", encoding="utf-8") as handle:
+        handle.write('\n[phoenix]\nendpoint = "http://example.com:6006"\n')
+
+    result = bench.run("traces", "export")
+
+    assert result.exit_code == 2
+    assert "phoenix.endpoint" in result.stderr
 
 
 def test_eval_review_without_a_jury_gives_the_setting(bench: _Bench) -> None:

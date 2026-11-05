@@ -5,7 +5,7 @@ message and an exit status, with `stop_exits` and `report_notes` for the other
 parts every model-calling operation shares; the words the commands print come
 from `ijob_app.llm_text`. `score_command` adds `score`, which prints each
 posting's score and reasons, and `traces_app` builds the `traces` group that
-lists, shows and prunes the recorded traces. `instructions_app` builds the
+lists, shows, prunes and exports the recorded traces. `instructions_app` builds the
 `instructions` group: `set` reads the user's words into filters and rules, shows
 them and stores them once confirmed, `show` prints what is stored and `clear`
 removes it. This module imports the LLM layer's error classes and the service's
@@ -16,11 +16,12 @@ service without LLM options and never load either.
 
 import asyncio
 import json
+import sqlite3
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Final, Protocol
+from typing import TYPE_CHECKING, Annotated, Final, Protocol
 
 import typer
 from ijob_ai.errors import LlmError
@@ -49,6 +50,9 @@ from ijob_app.view import (
     trace_tree,
     traces_table,
 )
+
+if TYPE_CHECKING:
+    from ijob_app.trace_export import ExportReport
 
 _EXIT_REFUSED: Final = 1
 _EXIT_BAD_ARGUMENT: Final = 2
@@ -355,6 +359,29 @@ def _span_lines(node: SpanNode, depth: int) -> Iterator[str]:
         yield from _span_lines(child, depth + 1)
 
 
+def _export_lines(report: "ExportReport") -> list[str]:
+    """Write what an export did, and the runs and results it left out.
+
+    The skipped lines appear only when a count is not 0, so a dropped run shows.
+    """
+    lines = [
+        f"sent {report.spans_sent} spans",
+        f"datasets: {report.datasets_added} added",
+        f"examples: {report.examples_added} added, {report.examples_present} present",
+        f"experiments: {report.experiments_added} added",
+        f"runs: {report.runs_added} added, {report.runs_present} present",
+        f"scores: {report.scores_sent} sent",
+    ]
+    if report.runs_skipped:
+        lines.append(f"skipped {report.runs_skipped} runs: their set has no dataset")
+    if report.results_skipped:
+        lines.append(
+            f"skipped {report.results_skipped} results: no dataset example "
+            "carries their posting"
+        )
+    return lines
+
+
 def traces_app(open_session: SessionOpener) -> typer.Typer:
     """Build the `traces` command group.
 
@@ -363,7 +390,8 @@ def traces_app(open_session: SessionOpener) -> typer.Typer:
 
     Returns:
         The group: with no subcommand it lists the recorded traces, `show`
-        prints one as a tree of spans and `prune` trims the trace database.
+        prints one as a tree of spans, `prune` trims the trace database and
+        `export` sends the traces and the eval records to the local Phoenix.
     """
     group = typer.Typer(
         add_completion=False,
@@ -420,5 +448,21 @@ def traces_app(open_session: SessionOpener) -> typer.Typer:
             f"Pruned {report.removed} traces",
             f"{megabytes:.1f} MB now",
         )
+
+    @group.command("export")
+    def export_traces(
+        db: Annotated[Path | None, typer.Option(help=DB_HELP)] = None,
+        config: Annotated[Path | None, typer.Option(help=CONFIG_HELP)] = None,
+    ) -> None:
+        """Send traces, labels, eval runs and scores to the local Phoenix."""
+        # `models=True` so that `--config` reaches the Phoenix settings.
+        with open_session(db, config, models=True) as session, llm_failures():
+            try:
+                report = session.service.traces_export()
+            except sqlite3.Error as error:
+                say_error(f"cannot read the trace database: {error}", literal=True)
+                raise typer.Exit(code=_EXIT_REFUSED) from error
+        for line in _export_lines(report):
+            typer.echo(line)
 
     return group

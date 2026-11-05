@@ -156,6 +156,7 @@ def write_llm_config(  # noqa: PLR0913  # one knob of the config per argument
     scorer: str | None = None,
     source_recipe: str | None = None,
     job_extract: str | None = None,
+    tuner: str | None = None,
 ) -> None:
     """Write a config file that names made-up models.
 
@@ -174,6 +175,7 @@ def write_llm_config(  # noqa: PLR0913  # one knob of the config per argument
             unset.
         job_extract: The `[models].job_extract` reference, or None to leave it
             unset.
+        tuner: The `[models].tuner` reference, or None to leave it unset.
     """
     lines: list[str] = []
     models = {
@@ -183,6 +185,7 @@ def write_llm_config(  # noqa: PLR0913  # one knob of the config per argument
         "scorer": scorer,
         "source_recipe": source_recipe,
         "job_extract": job_extract,
+        "tuner": tuner,
     }
     named = [f'{task} = "{ref}"' for task, ref in models.items() if ref is not None]
     if named:

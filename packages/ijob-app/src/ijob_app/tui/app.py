@@ -266,7 +266,10 @@ class IjobApp(App[None]):
             self.notify(str(error), severity="error", markup=False)
             return
         self.jobs.set_jobs(postings, mark_new=False)
-        self.jobs.set_saved_scores(self.service.saved_scores())
+        try:
+            self.jobs.replace_saved_scores(self.service.saved_scores())
+        except (InvalidValueError, sqlite3.Error) as error:
+            self.notify(str(error), severity="error", markup=False)
         self.changed()
 
     @work(exclusive=True, group="search")

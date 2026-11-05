@@ -127,6 +127,28 @@ class JobList:
                 row.score = score
                 row.state = ScoreState.SCORED
 
+    def replace_saved_scores(self, scores: dict[PostingId, Score]) -> None:
+        """Show exactly the scores now stored for the jobs on the list.
+
+        Unlike `set_saved_scores` this also overwrites a score the row holds and
+        takes back one that is no longer stored, as when the scorer prompt in use
+        changed since it was shown, so one list never mixes prompts. A job waiting
+        for its score keeps waiting.
+
+        Args:
+            scores: The stored scores of the prompt now in use.
+        """
+        for posting_id, row in self.rows.items():
+            if row.state is ScoreState.QUEUED:
+                continue
+            score = scores.get(posting_id)
+            if score is not None:
+                row.score = score
+                row.state = ScoreState.SCORED
+            elif row.state is ScoreState.SCORED:
+                row.score = None
+                row.state = ScoreState.NONE
+
     def ranked(self) -> list[JobRow]:
         """List the jobs best first, then those being scored, then the rest.
 
@@ -398,7 +420,7 @@ async def run_search(  # noqa: PLR0913  # the search's inputs, one each
     view = latest_view or (lambda: fixed)
     search = _Search(service, view, refs, jobs, on_change, score_limit=score_limit)
     await search.list_jobs(mark_new=False)
-    jobs.set_saved_scores(service.saved_scores())
+    jobs.replace_saved_scores(service.saved_scores())
     on_change()
     async with asyncio.TaskGroup() as group:
         fetcher = group.create_task(search.fetch()) if fetch else None

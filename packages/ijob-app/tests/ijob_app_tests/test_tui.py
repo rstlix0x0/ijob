@@ -19,6 +19,7 @@ from ijob_ai.errors import (
     ProviderFailedError,
     TaskOutputError,
 )
+from ijob_ai.tasks.versions import SCORER_UNTRUSTED
 from ijob_app.agent_ops import FoundSource, SourceResult
 from ijob_app.home import IjobHome, setup_home
 from ijob_app.llm_ops import (
@@ -43,12 +44,15 @@ from ijob_app.tui.jobs import JobsPane, chips, matches
 from ijob_app.tui.note import NoteScreen
 from ijob_app.tui.recipe import RecipeProposalScreen
 from ijob_app.tui.sources import SourcesPane
+from ijob_core.eval_records import EvalTask
 from ijob_core.model import (
     ExternalId,
     Instructions,
     Posting,
     PostingId,
+    ResumeProfile,
     Score,
+    Seniority,
     SightingDraft,
     SourceRef,
     parse_source_ref,
@@ -381,6 +385,68 @@ def test_a_filter_it_cannot_use_says_why_and_stays_open(home: IjobHome) -> None:
         assert isinstance(app.screen, FilterScreen)
         error = app.screen.query_one("#filter-error", Static)
         assert "since" in str(error.render())
+
+    _run(home, steps)
+
+
+def _accept_a_broken_scorer_program(home: IjobHome) -> int:
+    """Store a profile and an accepted scorer program whose demos cannot be read."""
+    with Store.open(home.db) as store:
+        profile = ResumeProfile(
+            summary="Backend engineer",
+            years_experience=7,
+            seniority=Seniority.SENIOR,
+            roles=("Backend Engineer",),
+            spoken_languages=("English",),
+            locations=("Jakarta",),
+            work_authorization=("Indonesia",),
+            skills=("Python",),
+        )
+        store.set_cv_profile(
+            profile,
+            cv_sha256="a" * 64,
+            model="claude-sdk/m",
+            task_version="cv_profile-1",
+            made_at=_NOW,
+        )
+        eval_set = store.evals.find_or_create_set(
+            "b" * 64, profile.sha256(), ["made-up/a", "made-up/b"], created_at=_NOW
+        )
+        saved = store.tunes.save_program(
+            task=EvalTask.SCORER,
+            model="claude-sdk/m",
+            optimizer="gepa",
+            base_version="scorer-1",
+            set_id=eval_set.id,
+            bound_sha256=profile.sha256(),
+            instructions=f"Tuned. {SCORER_UNTRUSTED}",
+            demos_json="[]",
+            version="scorer-1+0a1b2c3d",
+            tune_run_id=None,
+            created_at=_NOW,
+        )
+        store.tunes.accept_program(saved.id, accepted_at=_NOW)
+        with store._conn:
+            store._conn.execute("UPDATE programs SET demos_json = 'not json'")
+        return saved.id
+
+
+def test_a_filter_change_with_a_broken_program_says_why_and_stays_open(
+    home: IjobHome,
+) -> None:
+    program_id = _accept_a_broken_scorer_program(home)
+
+    async def steps(app: IjobApp, pilot: Pilot[None], _quiet: _Quiet) -> None:
+        await pilot.press("f")
+        await pilot.pause()
+        app.screen.query_one("#filter-company", Input).value = "Globex"
+        await pilot.press("enter")
+        await _settle(app, pilot)
+
+        assert app.is_running
+        assert any(f"program {program_id}" in note for note in _notes(app))
+        assert _titles(app) == []
+        assert _note_markup(app) == [False] * len(_notes(app))
 
     _run(home, steps)
 

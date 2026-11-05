@@ -2,6 +2,8 @@ import re
 from pathlib import Path
 
 import pytest
+import typer
+from ijob_app.cli import app
 
 _ROOT = Path(__file__).resolve().parents[4]
 _IMAGE = "image: arizephoenix/phoenix:21.0.0"
@@ -112,3 +114,29 @@ def test_localhost_check_catches_a_widened_compose_file(old: str, new: str) -> N
 
     assert widened != compose
     assert not _binds_only_to_localhost(widened)
+
+
+def _tune_commands() -> list[str]:
+    """Return the commands `ijob tune --help` lists."""
+    group = typer.main.get_command(app)
+    assert isinstance(group, typer.core.TyperGroup)
+    tune = group.commands["tune"]
+    assert isinstance(tune, typer.core.TyperGroup)
+    return list(tune.commands)
+
+
+@pytest.mark.parametrize("name", ["screen", "run", "report", "list", "accept", "clear"])
+def test_tuning_doc_names_every_tune_command(name: str) -> None:
+    assert name in _tune_commands()
+    assert f"ijob tune {name}" in _text("docs/tuning.md")
+
+
+def test_evals_doc_names_add() -> None:
+    assert "eval label --add" in _text("docs/evals.md")
+
+
+def test_readme_links_the_tuning_doc() -> None:
+    match = re.search(r"\]\(([^)#]*tuning\.md)(#[^)]*)?\)", _text("README.md"))
+
+    assert match is not None
+    assert (_ROOT / match.group(1)).is_file()

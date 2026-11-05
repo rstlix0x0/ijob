@@ -119,6 +119,7 @@ class _World:
         max_cost: float | None = None,
         total_cost: float | None = None,
         ready: bool = True,
+        tuner: str | None = None,
     ) -> None:
         root.mkdir(parents=True, exist_ok=True)
         self.home = IjobHome(root / "home")
@@ -127,7 +128,13 @@ class _World:
         self.prices_requested = 0
         self._clients = clients
         cli = write_fake_cli(root / "bin")
-        write_llm_config(self.home.config, judge=None, concurrency=1, cli_path=cli.path)
+        write_llm_config(
+            self.home.config,
+            judge=None,
+            concurrency=1,
+            cli_path=cli.path,
+            tuner=tuner,
+        )
         lines = ["", "[eval]"]
         if jury is not None:
             lines.append("jury = [" + ", ".join(f'"{ref}"' for ref in jury) + "]")

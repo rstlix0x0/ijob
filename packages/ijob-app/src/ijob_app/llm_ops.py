@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from ijob_core.filters import FilterSpec
     from ijob_core.model import ResumeProfile
     from ijob_core.store import Store
+    from ijob_core.tune_records import TunedProgram
 
     from ijob_app.config import FilterLayers, ShadowedField
 
@@ -821,6 +822,21 @@ def _fresh_judge_status(status: ItemStatus, posting: Posting) -> JudgeStatus:
     return JudgeStatus.JUDGED
 
 
+def _require_untrusted_sentence(program: "TunedProgram | None") -> None:
+    """Stop before any call when a program lacks its untrusted-data sentence.
+
+    Raises:
+        InvalidValueError: Naming the program's id.
+    """
+    from ijob_ai.tasks.versions import lacks_untrusted_sentence  # noqa: PLC0415
+
+    if program is not None and lacks_untrusted_sentence(
+        program.task, program.instructions
+    ):
+        reason = f"program {program.id} lacks the untrusted-data sentence"
+        raise InvalidValueError("instructions", reason)
+
+
 async def judge_operation(  # noqa: PLR0913  # the operation's inputs, one each
     runtime: LlmRuntime,
     store: "Store",
@@ -829,6 +845,7 @@ async def judge_operation(  # noqa: PLR0913  # the operation's inputs, one each
     *,
     now: Callable[[], datetime],
     on_report: Callable[[OperationReport], None],
+    program: "TunedProgram | None" = None,
 ) -> AsyncGenerator[SearchItem]:
     """Judge postings against the user's rules, yielding each as it is known.
 
@@ -847,12 +864,17 @@ async def judge_operation(  # noqa: PLR0913  # the operation's inputs, one each
         now: The wall clock, returning timezone-aware times.
         on_report: Called once, after the last posting is yielded, with what the
             operation did and spent.
+        program: The task's program in force, or `None` for the base prompt.
+            Calls run it, and verdicts or scores are stored and read under its
+            version, so a result of the base prompt never answers for it.
 
     Yields:
         One item per posting.
 
     Raises:
         MissingModelError: No model is set for the `judge` task; no call is made.
+        InvalidValueError: Naming the program's id, if its instructions lack the
+            task's untrusted-data sentence; no call is made.
         asyncio.CancelledError: The iteration was cancelled.
         ExceptionGroup: A call raised something other than an `LlmError`.
         sqlite3.Error: The store cannot be read or written.
@@ -863,14 +885,14 @@ async def judge_operation(  # noqa: PLR0913  # the operation's inputs, one each
     from ijob_ai.tasks.text import input_sha256, posting_block  # noqa: PLC0415
 
     ref = runtime.settings.model_for(Task.JUDGE)
+    _require_untrusted_sentence(program)
+    version = JUDGE_VERSION if program is None else program.version
     rules_sha256 = instructions.rules_sha256
     pending: list[tuple[Posting, str]] = []
     cached: list[SearchItem] = []
     for posting in postings:
         digest = input_sha256(posting_block(posting))
-        verdict = store.verdict(
-            posting.id, digest, rules_sha256, str(ref), JUDGE_VERSION
-        )
+        verdict = store.verdict(posting.id, digest, rules_sha256, str(ref), version)
         if verdict is None:
             pending.append((posting, digest))
         else:
@@ -894,13 +916,14 @@ async def judge_operation(  # noqa: PLR0913  # the operation's inputs, one each
             provider=ref.provider,
             budget=budget,
             timeout_s=runtime.settings.timeout_s,
+            program=program,
         )
         store.put_verdict(
             posting.id,
             digest,
             rules_sha256,
             str(ref),
-            JUDGE_VERSION,
+            version,
             verdict,
             made_at=now(),
         )
@@ -1017,6 +1040,7 @@ async def score_operation(  # noqa: PLR0913  # the operation's inputs, one each
     *,
     now: Callable[[], datetime],
     on_report: Callable[[OperationReport], None],
+    program: "TunedProgram | None" = None,
 ) -> AsyncGenerator[ScoreItem]:
     """Score postings against the stored CV profile, yielding each as it is known.
 
@@ -1040,12 +1064,19 @@ async def score_operation(  # noqa: PLR0913  # the operation's inputs, one each
         now: The wall clock, returning timezone-aware times.
         on_report: Called once, after the last posting is yielded, with what the
             operation did and spent.
+        program: The task's program in force, or `None` for the base prompt.
+            Calls run it, and verdicts or scores are stored and read under its
+            version, so a result of the base prompt never answers for it. It is
+            ignored, and the base prompt runs, when the profile must be built
+            first, as the program was bound to an earlier one.
 
     Yields:
         One item per posting.
 
     Raises:
         NoCvError: No CV is stored.
+        InvalidValueError: Naming the program's id, if its instructions lack the
+            task's untrusted-data sentence; no call is made.
         MissingModelError: No model is set for the `scorer` task, or for the
             `cv_profile` task when the profile must be built; no call is made.
         CvTextError: The CV text is needed and cannot be read or used; no call
@@ -1068,6 +1099,12 @@ async def score_operation(  # noqa: PLR0913  # the operation's inputs, one each
     stored = store.cv_profile()
     if stored is not None and stored.cv_sha256 != cv.sha256:
         stored = None
+    if stored is None:
+        # A program is bound to the profile it was tuned on; a profile still to
+        # be built cannot be that one, so this operation runs the base prompt.
+        program = None
+    _require_untrusted_sentence(program)
+    version = SCORER_VERSION if program is None else program.version
     cv_text: str | None = None
     if stored is None:
         # Called only to raise MissingModelError before the CV is read or any
@@ -1090,9 +1127,7 @@ async def score_operation(  # noqa: PLR0913  # the operation's inputs, one each
         score = (
             None
             if profile_sha256 is None
-            else store.score(
-                posting.id, digest, profile_sha256, str(ref), SCORER_VERSION
-            )
+            else store.score(posting.id, digest, profile_sha256, str(ref), version)
         )
         if score is None:
             pending.append((posting, digest))
@@ -1112,13 +1147,14 @@ async def score_operation(  # noqa: PLR0913  # the operation's inputs, one each
             provider=ref.provider,
             budget=budget,
             timeout_s=runtime.settings.timeout_s,
+            program=program,
         )
         store.put_score(
             posting.id,
             digest,
             profile.sha256(),
             str(ref),
-            SCORER_VERSION,
+            version,
             result,
             made_at=now(),
         )

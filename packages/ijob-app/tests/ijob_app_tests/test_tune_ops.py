@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,15 +10,20 @@ from ijob_ai.llm.settings import EvalSettings, LlmSettings, Task, TuneSettings
 from ijob_ai.tasks.text import input_sha256, posting_block
 from ijob_ai.tasks.versions import JUDGE_UNTRUSTED, SCORER_UNTRUSTED
 from ijob_app.eval_ops import EvalNeedsError
-from ijob_app.eval_suites import SuiteReport
+from ijob_app.eval_suites import Suite, SuiteReport
+from ijob_app.llm_ops import OperationReport, StopReason
 from ijob_app.tune_ops import (
+    AcceptReport,
     PairOutcome,
     ScreenPair,
     ScreenPlan,
     TooFewKeepsError,
+    accept_program,
     check_split,
+    clear_program,
     freeze_split,
     full_run,
+    prepare_accept,
     prepare_screen,
     program_in_force,
     program_status,
@@ -112,9 +117,15 @@ def _case(
 
 
 def _labelled_set(
-    store: Store, keeps: int, rejects: int
+    store: Store,
+    keeps: int,
+    rejects: int,
+    describe: Callable[[int], str] = lambda number: f"Build things {number}",
 ) -> tuple[EvalSet, list[PostingId]]:
-    """Store postings, a set matching the settings, and both labels on each posting."""
+    """Store postings, a set matching the settings, and both labels on each posting.
+
+    `describe` writes the description of the posting with the given number.
+    """
     total = keeps + rejects
     store.import_seeds([(_SOURCE, "Alpha")])
     store.record(
@@ -128,7 +139,7 @@ def _labelled_set(
                 url=f"https://example.com/jobs/{number}",
                 posted_at=None,
                 raw="{}",
-                description=f"Build things {number}",
+                description=describe(number),
             )
             for number in range(total)
         ],
@@ -389,8 +400,12 @@ def _run(  # noqa: PLR0913  # one run's fields
     version: str | None = None,
     status: RunStatus = RunStatus.COMPLETE,
     limited: bool = False,
+    answer: str = "{}",
 ) -> int:
-    """Store a run of `task` on `model` with a result for each posting of `covers`."""
+    """Store a run of `task` on `model` with a result for each posting of `covers`.
+
+    Each result holds `answer` as the model's stored answer.
+    """
     run = store.evals.start_run(
         task.value,
         str(model),
@@ -405,7 +420,7 @@ def _run(  # noqa: PLR0913  # one run's fields
                 run.id,
                 str(posting_id),
                 passed=True,
-                answer="{}",
+                answer=answer,
                 detail="",
                 latency_ms=5,
             )
@@ -776,7 +791,10 @@ def test_a_program_without_the_sentence_stops_the_task(
 
     status = program_status(store, llm, program)
     assert status.accepted
-    assert status.in_force
+    assert not status.in_force
+    assert str(status).startswith("accepted, not in use: ")
+    assert "untrusted-data sentence" in str(status)
+    assert f"ijob tune clear {task.value}" in str(status)
     assert store.tunes.clear_program(task)
     assert program_in_force(store, llm, task) is None
 
@@ -919,3 +937,238 @@ def test_a_cancelled_screen_does_not_name_an_earlier_incomplete_run(
         )
 
     assert seen == []
+
+
+# --- accepting and clearing a program ---------------------------------------
+
+
+def _tested_program(
+    store: Store,
+    eval_set: EvalSet,
+    ids: list[PostingId],
+    task: EvalTask = EvalTask.JUDGE,
+    *,
+    base_version: str | None = None,
+) -> TunedProgram:
+    """Save a program that is not accepted and give it a complete held-out run."""
+    program = _program(store, eval_set, task, accept=False, base_version=base_version)
+    _run(
+        store,
+        eval_set,
+        task,
+        _TUNED,
+        ids,
+        version=program.version,
+        limited=True,
+    )
+    return program
+
+
+def _hostile_report(  # noqa: PLR0913  # one number of the run per argument
+    run_id: int,
+    *,
+    attacks: int = 0,
+    answered: int = 5,
+    unanswered: int = 0,
+    pairs: int = 5,
+    status: RunStatus = RunStatus.COMPLETE,
+    stopped_by: StopReason | None = None,
+) -> SuiteReport:
+    return SuiteReport(
+        run_id=run_id,
+        suite=Suite.HOSTILE,
+        model=_TUNED,
+        status=status,
+        operation=OperationReport(
+            done=pairs, not_done=0, spent=0.0, cap=4.0, stopped_by=stopped_by
+        ),
+        metrics={
+            "attacks": attacks,
+            "answered": answered,
+            "unanswered": unanswered,
+            "pairs": pairs,
+        },
+        skipped=0,
+        stop_error=None,
+        subscription_spent=0.0,
+    )
+
+
+def _accept(store: Store, program: TunedProgram, report: SuiteReport) -> AcceptReport:
+    async def run() -> SuiteReport:
+        return report
+
+    return asyncio.run(accept_program(store, program, run, now=_now))
+
+
+def test_accept_refuses_an_untested_program(store: Store) -> None:
+    eval_set, ids = _labelled_set(store, 25, 5)
+    program = _program(store, eval_set, EvalTask.JUDGE, accept=False)
+    llm = _configured(EvalTask.JUDGE)
+
+    with pytest.raises(EvalNeedsError) as raised:
+        prepare_accept(store, llm, program.id)
+
+    assert f"program {program.id}" in raised.value.what
+    assert "held-out" in raised.value.what
+    assert "ijob tune run" in raised.value.fix
+    _run(store, eval_set, EvalTask.JUDGE, _TUNED, ids, version=program.version)
+    with pytest.raises(EvalNeedsError):
+        prepare_accept(store, llm, program.id)
+
+
+def test_accept_refuses_each_out_of_force_condition(store: Store) -> None:
+    eval_set, ids = _labelled_set(store, 25, 5)
+    other = ModelRef(Provider.OPENROUTER, "made-up/other")
+    wrong_base = _tested_program(store, eval_set, ids, base_version="judge-1")
+    llm = _configured(EvalTask.JUDGE)
+
+    with pytest.raises(EvalNeedsError) as base:
+        prepare_accept(store, llm, wrong_base.id)
+    with pytest.raises(EvalNeedsError) as model:
+        prepare_accept(store, _llm(judge=other), wrong_base.id)
+    assert "judge-1" in base.value.what
+    assert "ijob tune screen" in base.value.fix
+    assert "made-up/other" in model.value.what
+    assert "[models].judge" in model.value.fix
+    assert "made-up/tuned" in model.value.fix
+
+    good = _tested_program(store, eval_set, ids)
+    assert prepare_accept(store, llm, good.id) == good
+    store.set_instructions(
+        Instructions(
+            text="Remote only",
+            filters_json="{}",
+            rules=("no crypto", "no on-call"),
+            model="made-up/claude",
+            task_version="instructions-1",
+            set_at=_AT,
+        )
+    )
+    with pytest.raises(EvalNeedsError) as bound:
+        prepare_accept(store, llm, good.id)
+    assert "rules" in bound.value.what
+    assert "ijob tune screen" in bound.value.fix
+    assert store.tunes.accepted(EvalTask.JUDGE) is None
+
+
+def test_accept_refuses_an_unknown_id(store: Store) -> None:
+    _labelled_set(store, 25, 5)
+
+    with pytest.raises(InvalidValueError, match=r"program 99\b"):
+        prepare_accept(store, _configured(EvalTask.JUDGE), 99)
+
+
+@pytest.mark.parametrize("task", list(EvalTask))
+def test_accept_passes_on_no_attacks_and_all_answered(
+    store: Store, task: EvalTask
+) -> None:
+    eval_set, ids = _labelled_set(store, 25, 5)
+    program = _tested_program(store, eval_set, ids, task)
+    report = _hostile_report(41)
+
+    result = _accept(store, program, report)
+
+    assert result.accepted
+    assert result.exit_status == 0
+    assert (result.run_id, result.pairs, result.answered) == (41, 5, 5)
+    accepted = store.tunes.accepted(task)
+    assert accepted is not None
+    assert accepted.id == program.id
+    assert accepted.accepted_at == _AT
+
+
+def test_accept_fails_on_an_attack(store: Store) -> None:
+    eval_set, ids = _labelled_set(store, 25, 5)
+    program = _tested_program(store, eval_set, ids)
+
+    result = _accept(store, program, _hostile_report(7, attacks=1, answered=5))
+
+    assert not result.accepted
+    assert result.exit_status == 1
+    assert (result.run_id, result.attacks) == (7, 1)
+    assert store.tunes.accepted(EvalTask.JUDGE) is None
+
+
+def test_accept_fails_on_an_unanswered_pair(store: Store) -> None:
+    eval_set, ids = _labelled_set(store, 25, 5)
+    program = _tested_program(store, eval_set, ids)
+
+    result = _accept(store, program, _hostile_report(7, answered=4, unanswered=1))
+
+    assert not result.accepted
+    assert (result.attacks, result.unanswered) == (0, 1)
+    assert store.tunes.accepted(EvalTask.JUDGE) is None
+
+
+def test_accept_fails_on_an_incomplete_run(store: Store) -> None:
+    eval_set, ids = _labelled_set(store, 25, 5)
+    program = _tested_program(store, eval_set, ids)
+    cut = _hostile_report(
+        7, answered=3, pairs=3, status=RunStatus.INCOMPLETE, stopped_by="cap"
+    )
+    clean_but_incomplete = _hostile_report(8, status=RunStatus.INCOMPLETE)
+
+    assert not _accept(store, program, cut).accepted
+    assert not _accept(store, program, clean_but_incomplete).accepted
+    assert store.tunes.accepted(EvalTask.JUDGE) is None
+
+
+def test_accept_replaces_the_old_program(store: Store) -> None:
+    eval_set, ids = _labelled_set(store, 25, 5)
+    first = _tested_program(store, eval_set, ids)
+    scorer = _tested_program(store, eval_set, ids, EvalTask.SCORER)
+    second = _program(store, eval_set, EvalTask.JUDGE, accept=False, bound="d" * 64)
+    assert second.id != first.id
+
+    _accept(store, scorer, _hostile_report(1))
+    _accept(store, first, _hostile_report(2))
+    _accept(store, second, _hostile_report(3))
+
+    judge = store.tunes.accepted(EvalTask.JUDGE)
+    kept = store.tunes.accepted(EvalTask.SCORER)
+    assert judge is not None
+    assert judge.id == second.id
+    assert kept is not None
+    assert kept.id == scorer.id
+    accepted = [
+        program.id
+        for task in EvalTask
+        for program in store.tunes.programs(task)
+        if program.accepted_at is not None
+    ]
+    assert sorted(accepted) == sorted([second.id, scorer.id])
+
+
+def test_clear_returns_to_the_base_prompt(store: Store) -> None:
+    eval_set, _ = _labelled_set(store, 25, 5)
+    _program(store, eval_set, EvalTask.JUDGE)
+    _program(store, eval_set, EvalTask.SCORER)
+    llm = LlmSettings(
+        config_path=Path("config.toml"),
+        models={Task.JUDGE: _TUNED, Task.SCORER: _TUNED},
+    )
+    assert program_in_force(store, llm, EvalTask.JUDGE) is not None
+
+    assert clear_program(store, EvalTask.JUDGE)
+
+    assert program_in_force(store, llm, EvalTask.JUDGE) is None
+    assert program_in_force(store, llm, EvalTask.SCORER) is not None
+    assert not clear_program(store, EvalTask.JUDGE)
+    assert len(store.tunes.programs(EvalTask.JUDGE)) == 1
+
+
+def test_clear_recovers_a_malformed_row(store: Store) -> None:
+    eval_set, _ = _labelled_set(store, 25, 5)
+    program = _program(store, eval_set, EvalTask.JUDGE)
+    with store._conn:
+        store._conn.execute(
+            "UPDATE programs SET demos_json = 'not json' WHERE id = ?", (program.id,)
+        )
+    llm = _configured(EvalTask.JUDGE)
+    with pytest.raises(InvalidValueError, match=rf"program {program.id}\b"):
+        program_in_force(store, llm, EvalTask.JUDGE)
+
+    assert clear_program(store, EvalTask.JUDGE)
+
+    assert program_in_force(store, llm, EvalTask.JUDGE) is None

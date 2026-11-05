@@ -223,3 +223,33 @@ def test_a_closed_job_leaves_the_list_but_a_known_score_stays() -> None:
     assert list(jobs.rows) == [PostingId(1)]
     assert jobs.rows[PostingId(1)].score is not None
     assert not jobs.rows[PostingId(1)].is_new
+
+
+def test_replacing_saved_scores_leaves_no_score_of_another_prompt() -> None:
+    jobs = JobList()
+    jobs.set_jobs([_posting(1), _posting(2), _posting(3)], mark_new=False)
+    jobs.set_saved_scores({PostingId(1): Score(score=10, reasons=("base",))})
+    jobs.rows[PostingId(3)].state = ScoreState.QUEUED
+
+    jobs.replace_saved_scores({PostingId(2): Score(score=90, reasons=("tuned",))})
+
+    assert jobs.rows[PostingId(1)].score is None
+    assert jobs.rows[PostingId(1)].state is ScoreState.NONE
+    assert jobs.rows[PostingId(2)].score == Score(score=90, reasons=("tuned",))
+    assert jobs.rows[PostingId(2)].state is ScoreState.SCORED
+    assert jobs.rows[PostingId(3)].state is ScoreState.QUEUED
+    assert jobs.scored == 1
+
+
+def test_a_search_replaces_the_scores_of_an_earlier_listing() -> None:
+    fake = _FakeService(
+        saved=[1, 2], stored_scores={PostingId(1): Score(score=10, reasons=("base",))}
+    )
+    jobs = JobList()
+    _run(fake, jobs, fetch=False)
+    fake.stored_scores = {PostingId(2): Score(score=90, reasons=("tuned",))}
+
+    _run(fake, jobs, fetch=False)
+
+    assert jobs.rows[PostingId(1)].score is None
+    assert jobs.rows[PostingId(2)].score == Score(score=90, reasons=("tuned",))

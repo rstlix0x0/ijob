@@ -25,6 +25,12 @@ from ijob_ai.llm.call import run_call
 from ijob_ai.llm.reference import ModelRef, Provider
 from ijob_ai.llm.settings import Task
 from ijob_ai.tasks.text import input_sha256, posting_block
+from ijob_ai.tasks.versions import (
+    JUDGE_UNTRUSTED,
+    JUDGE_VERSION,
+    SCORER_UNTRUSTED,
+    SCORER_VERSION,
+)
 from ijob_ai.tracing.setup import current_operation_trace
 from ijob_app.config import FilterFlags, FilterLayers, read_filter_layers
 from ijob_app.home import IjobHome
@@ -48,8 +54,10 @@ from ijob_app.llm_ops import (
     run_items,
     score_operation,
 )
+from ijob_app.tune_ops import program_in_force
 from ijob_core.countries import CountryCode
 from ijob_core.errors import InvalidValueError
+from ijob_core.eval_records import EvalTask
 from ijob_core.model import (
     ExternalId,
     Instructions,
@@ -64,6 +72,7 @@ from ijob_core.model import (
 )
 from ijob_core.store import Store
 from ijob_core.traces import TraceStore
+from ijob_core.tune_records import TunedProgram
 from ijob_sources.seeds import load_seeds
 
 from .llm_fakes import (
@@ -73,6 +82,7 @@ from .llm_fakes import (
     FakeAsyncEngine,
     FakeCli,
     FakeEngines,
+    Opaque,
     instructions_answer,
     profile_answer,
     request_text,
@@ -1069,6 +1079,7 @@ def _judge(
     store: Store,
     postings: Sequence[Posting],
     instructions: Instructions | None = None,
+    program: TunedProgram | None = None,
 ) -> tuple[list[SearchItem], OperationReport]:
     reports: list[OperationReport] = []
 
@@ -1082,6 +1093,7 @@ def _judge(
                 instructions or _rules(),
                 now=lambda: _AT,
                 on_report=reports.append,
+                program=program,
             )
         ]
 
@@ -1400,7 +1412,11 @@ def _stored_profile(store: Store, summary: str = "Backend engineer") -> ResumePr
 
 
 def _score(
-    runtime: LlmRuntime, store: Store, postings: Sequence[Posting], cv_path: Path
+    runtime: LlmRuntime,
+    store: Store,
+    postings: Sequence[Posting],
+    cv_path: Path,
+    program: TunedProgram | None = None,
 ) -> tuple[list[ScoreItem], OperationReport]:
     reports: list[OperationReport] = []
 
@@ -1414,6 +1430,7 @@ def _score(
                 cv_path,
                 now=lambda: _AT,
                 on_report=reports.append,
+                program=program,
             )
         ]
 
@@ -1633,4 +1650,237 @@ def test_score_unreadable_cv_raises_before_any_call(
     with pytest.raises(CvTextError):
         _score(runtime, store, postings, cv_path)
 
+    assert engines.engine.requests == []
+
+
+_TUNED_WORDS = "Tuned words for the program under test."
+
+
+def _accepted_program(  # noqa: PLR0913  # one knob of the row per argument
+    store: Store,
+    task: EvalTask,
+    *,
+    bound: str,
+    base: str,
+    instructions: str | None = None,
+    accept: bool = True,
+) -> TunedProgram:
+    """Save a program for the task, accepted unless `accept` is false."""
+    sentence = JUDGE_UNTRUSTED if task is EvalTask.JUDGE else SCORER_UNTRUSTED
+    eval_set = store.evals.find_or_create_set(
+        "r" * 64, "p" * 64, ["claude-sdk/juror"], created_at=_AT
+    )
+    saved = store.tunes.save_program(
+        task=task,
+        model=_MODEL,
+        optimizer="gepa",
+        base_version=base,
+        set_id=eval_set.id,
+        bound_sha256=bound,
+        instructions=instructions or f"{_TUNED_WORDS} {sentence}",
+        demos_json="[]",
+        version=f"{base}+0a1b2c3d",
+        tune_run_id=None,
+        created_at=_AT,
+    )
+    if accept:
+        store.tunes.accept_program(saved.id, accepted_at=_AT)
+    return saved
+
+
+def _prompt_text(request: Opaque) -> str:
+    """Return the system text of a request followed by its message text."""
+    system = request.system
+    if system is None:
+        head = ""
+    elif isinstance(system, str):
+        head = system
+    else:
+        head = "".join(part.text for part in system if hasattr(part, "text"))
+    return head + request_text(request)
+
+
+def _span_versions(home: IjobHome) -> set[object]:
+    """Collect every `ijob.task_version` the recorded spans carry."""
+    found: set[object] = set()
+    with TraceStore.open(home.traces) as traces:
+        for summary in traces.summaries(10):
+            stack = list(traces.tree(summary.trace_id).roots)
+            while stack:
+                node = stack.pop()
+                stack.extend(node.children)
+                if "ijob.task_version" in node.span.attributes:
+                    found.add(node.span.attributes["ijob.task_version"])
+    return found
+
+
+def test_search_uses_the_judge_program_in_force(
+    make_runtime: _MakeRuntime, store: Store
+) -> None:
+    engines = _keeping()
+    runtime = make_runtime(engines=engines)
+    postings = _seed(store, ["one"])
+    rules = _rules()
+    program = _accepted_program(
+        store, EvalTask.JUDGE, bound=rules.rules_sha256, base=JUDGE_VERSION
+    )
+
+    items, _ = _judge(runtime, store, postings, rules, program)
+
+    [request] = engines.engine.requests
+    assert _TUNED_WORDS in _prompt_text(request)
+    assert [item.status for item in items] == [JudgeStatus.JUDGED]
+    ref = str(runtime.settings.model_for(Task.JUDGE))
+    digest = input_sha256(posting_block(postings[0]))
+    assert store.verdict(
+        postings[0].id, digest, rules.rules_sha256, ref, program.version
+    ) == Verdict(keep=True, reason="fits", rule=None)
+    assert (
+        store.verdict(postings[0].id, digest, rules.rules_sha256, ref, JUDGE_VERSION)
+        is None
+    )
+
+
+def test_search_uses_the_scorer_program_in_force(
+    make_runtime: _MakeRuntime, store: Store, tmp_path: Path
+) -> None:
+    engines = _scoring()
+    runtime = make_runtime(engines=engines)
+    cv_path = _store_cv(store, tmp_path / "cv.pdf")
+    profile = _stored_profile(store)
+    postings = _seed(store, ["one"])
+    program = _accepted_program(
+        store, EvalTask.SCORER, bound=profile.sha256(), base=SCORER_VERSION
+    )
+
+    items, _ = _score(runtime, store, postings, cv_path, program)
+
+    [request] = engines.engine.requests
+    assert _TUNED_WORDS in _prompt_text(request)
+    assert [item.status for item in items] == [ScoreStatus.JUDGED]
+    ref = str(runtime.settings.model_for(Task.SCORER))
+    digest = input_sha256(posting_block(postings[0]))
+    assert store.score(
+        postings[0].id, digest, profile.sha256(), ref, program.version
+    ) == Score(80, ("fits",))
+    assert (
+        store.score(postings[0].id, digest, profile.sha256(), ref, SCORER_VERSION)
+        is None
+    )
+
+
+def test_search_span_shows_the_program_version(
+    home: IjobHome, make_runtime: _MakeRuntime, store: Store
+) -> None:
+    runtime = make_runtime(engines=_keeping())
+    postings = _seed(store, ["one"])
+    rules = _rules()
+    program = _accepted_program(
+        store, EvalTask.JUDGE, bound=rules.rules_sha256, base=JUDGE_VERSION
+    )
+
+    _judge(runtime, store, postings, rules, program)
+
+    assert _span_versions(home) == {program.version}
+
+
+def test_saved_verdict_of_the_base_is_not_reused(
+    make_runtime: _MakeRuntime, store: Store
+) -> None:
+    engines = _keeping()
+    runtime = make_runtime(engines=engines)
+    postings = _seed(store, ["one"])
+    rules = _rules()
+    program = _accepted_program(
+        store, EvalTask.JUDGE, bound=rules.rules_sha256, base=JUDGE_VERSION
+    )
+    _judge(runtime, store, postings, rules)
+
+    items, report = _judge(runtime, store, postings, rules, program)
+
+    assert len(engines.engine.requests) == 2
+    assert [item.status for item in items] == [JudgeStatus.JUDGED]
+    assert report.cached == 0
+
+
+def test_out_of_force_program_uses_the_base_prompt(
+    home: IjobHome, make_runtime: _MakeRuntime, store: Store
+) -> None:
+    engines = _keeping()
+    runtime = make_runtime(engines=engines)
+    postings = _seed(store, ["one"])
+    store.set_instructions(_rules("changed rules"))
+    _accepted_program(
+        store, EvalTask.JUDGE, bound=_rules().rules_sha256, base=JUDGE_VERSION
+    )
+    in_force = program_in_force(store, runtime.settings, EvalTask.JUDGE)
+
+    _judge(runtime, store, postings, _rules("changed rules"), in_force)
+
+    assert in_force is None
+    [request] = engines.engine.requests
+    assert _TUNED_WORDS not in _prompt_text(request)
+    assert _span_versions(home) == {JUDGE_VERSION}
+
+
+def test_replaced_cv_scores_with_the_base_prompt(
+    make_runtime: _MakeRuntime, store: Store, tmp_path: Path
+) -> None:
+    engines = _scoring(profile_answer("Rebuilt profile"), score_answer())
+    runtime = make_runtime(engines=engines)
+    cv_path = _store_cv(store, tmp_path / "cv.pdf")
+    old = _stored_profile(store)
+    program = _accepted_program(
+        store, EvalTask.SCORER, bound=old.sha256(), base=SCORER_VERSION
+    )
+    in_force = program_in_force(store, runtime.settings, EvalTask.SCORER)
+    _store_cv(store, cv_path, "Another CV entirely")
+    postings = _seed(store, ["one"])
+
+    items, _ = _score(runtime, store, postings, cv_path, in_force)
+
+    assert in_force is not None
+    assert in_force.id == program.id
+    profile_request, score_request = engines.engine.requests
+    assert _TUNED_WORDS not in _prompt_text(profile_request)
+    assert _TUNED_WORDS not in _prompt_text(score_request)
+    assert [item.status for item in items] == [ScoreStatus.JUDGED]
+    stored = store.cv_profile()
+    assert stored is not None
+    ref = str(runtime.settings.model_for(Task.SCORER))
+    digest = input_sha256(posting_block(postings[0]))
+    sha256 = stored.profile.sha256()
+    assert store.score(postings[0].id, digest, sha256, ref, SCORER_VERSION) is not None
+    assert store.score(postings[0].id, digest, sha256, ref, program.version) is None
+
+
+def test_malformed_program_stops_search_with_its_id(
+    make_runtime: _MakeRuntime, store: Store, tmp_path: Path
+) -> None:
+    engines = _keeping()
+    runtime = make_runtime(engines=engines)
+    postings = _seed(store, ["one"])
+    rules = _rules()
+    program = _accepted_program(
+        store,
+        EvalTask.JUDGE,
+        bound=rules.rules_sha256,
+        base=JUDGE_VERSION,
+        instructions="Tuned words with no untrusted sentence.",
+    )
+
+    with pytest.raises(InvalidValueError, match=f"program {program.id}"):
+        _judge(runtime, store, postings, rules, program)
+
+    cv_path = _store_cv(store, tmp_path / "cv.pdf")
+    profile = _stored_profile(store)
+    scorer = _accepted_program(
+        store,
+        EvalTask.SCORER,
+        bound=profile.sha256(),
+        base=SCORER_VERSION,
+        instructions="Tuned words with no untrusted sentence.",
+    )
+    with pytest.raises(InvalidValueError, match=f"program {scorer.id}"):
+        _score(runtime, store, postings, cv_path, scorer)
     assert engines.engine.requests == []

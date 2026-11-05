@@ -44,7 +44,7 @@ from collections.abc import (
     Iterator,
     Sequence,
 )
-from contextlib import AsyncExitStack, contextmanager, suppress
+from contextlib import AsyncExitStack, closing, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 from ijob_core.dedupe import normalise_company
 from ijob_core.errors import InvalidValueError
+from ijob_core.eval_records import EvalTask
 from ijob_core.filters import FilterSpec, keep
 from ijob_core.model import (
     ExternalId,
@@ -120,7 +121,9 @@ if TYPE_CHECKING:
     from ijob_ai.agents.react import StepCallback
     from ijob_ai.llm.reference import ModelRef
     from ijob_ai.llm.settings import EvalSettings
+    from ijob_ai.tuning.names import Optimizer
     from ijob_core.eval_records import EvalLabel, EvalVote
+    from ijob_core.tune_records import TunedProgram
 
     from ijob_app.eval_estimate import Cost
     from ijob_app.eval_ops import (
@@ -133,7 +136,24 @@ if TYPE_CHECKING:
     from ijob_app.eval_report import EvalReport, RunDetail
     from ijob_app.eval_run import RunOffer, RunProgress
     from ijob_app.eval_suites import Suite, SuiteReport
-    from ijob_app.tune_ops import PairOutcome, ScreenOffer, ScreenPair, ScreenReport
+    from ijob_app.trace_export import ExportReport
+    from ijob_app.tune_grid import (
+        Combination,
+        CombinationResult,
+        GridOffer,
+        GridReport,
+        ProgramLine,
+        TuneProgress,
+    )
+    from ijob_app.tune_ops import (
+        AcceptOffer,
+        AcceptReport,
+        PairOutcome,
+        ScreenOffer,
+        ScreenPair,
+        ScreenReport,
+    )
+    from ijob_app.tune_report import TuneReport
 
 type ClientFactory = Callable[[ConditionalCache | None], PoliteClient]
 
@@ -711,13 +731,56 @@ class Service:
     def saved_scores(self) -> dict[PostingId, Score]:
         """Read the newest stored score of each posting against the current profile.
 
+        The scores are those of the scorer prompt in use, so one list never mixes
+        prompts. With no accepted scorer program they are the base prompt's, read
+        from the store alone. With one, the settings tell whether it is in force,
+        and the scores are its own while it is. They are the settings the model
+        runtime was built with once a model operation has run, so a listing and
+        the next operation agree on the prompt; else the config file's.
+
         Returns:
             The scores; empty when no profile is stored.
+
+        Raises:
+            InvalidValueError: The accepted scorer program is malformed, or its
+                instructions lack the untrusted-data sentence, and the message
+                names its id; or, with an accepted program, the config file is
+                unusable.
+            sqlite3.Error: The store cannot be read.
         """
         stored = self._store.cv_profile()
-        return (
-            {} if stored is None else self._store.saved_scores(stored.profile.sha256())
+        if stored is None:
+            return {}
+        sha256 = stored.profile.sha256()
+        if self._store.tunes.accepted(EvalTask.SCORER) is None:
+            return self._store.saved_scores(sha256)
+        from ijob_app.llm_config import read_llm_settings  # noqa: PLC0415
+        from ijob_app.tune_ops import program_in_force  # noqa: PLC0415
+
+        settings = (
+            read_llm_settings(self._llm.config_path)
+            if self._llm_runtime is None
+            else self._llm_runtime.settings
         )
+        program = program_in_force(self._store, settings, EvalTask.SCORER)
+        return self._store.saved_scores(
+            sha256, version=None if program is None else program.version
+        )
+
+    def _program_in_force(self, task: EvalTask) -> "TunedProgram | None":
+        """Return the task's accepted program while it is in force, else `None`.
+
+        Raises:
+            InvalidValueError: The accepted program is malformed, or its
+                instructions lack the untrusted-data sentence; the message names
+                its id. The base prompt is not used in its place.
+            ProviderUnavailableError: A variable that redirects model calls is set.
+        """
+        from ijob_app.tune_ops import program_in_force  # noqa: PLC0415
+
+        if self._store.tunes.accepted(task) is None:
+            return None
+        return program_in_force(self._store, self._runtime().settings, task)
 
     async def search_postings(
         self, layers: FilterLayers, refs: Sequence[SourceRef]
@@ -830,6 +893,7 @@ class Service:
             stored,
             now=self._now,
             on_report=self._keep_report,
+            program=self._program_in_force(EvalTask.JUDGE),
         ):
             yield item
 
@@ -875,6 +939,7 @@ class Service:
             self._db_path.parent / _CV_FILE_NAME,
             now=self._now,
             on_report=self._keep_report,
+            program=self._program_in_force(EvalTask.SCORER),
         ):
             yield item
 
@@ -909,6 +974,7 @@ class Service:
             stored,
             now=self._now,
             on_report=self._keep_report,
+            program=self._program_in_force(EvalTask.JUDGE),
         ):
             yield item
 
@@ -953,6 +1019,35 @@ class Service:
             sqlite3.Error: The trace database cannot be opened or pruned.
         """
         return prune_traces(self._home, self._llm.config_path)
+
+    def traces_export(self) -> "ExportReport":
+        """Send traces, labels, runs and scores to the local Phoenix.
+
+        It makes no model call, and every step can run again.
+
+        Returns:
+            What was sent, what was added and what was already there.
+
+        Raises:
+            InvalidValueError: The config file is unusable, or `[phoenix].endpoint`
+                is not local.
+            PhoenixError: Phoenix is not running, refused a request or a span
+                batch, gave a reply that cannot be read, or a stored span id is
+                not hexadecimal.
+            sqlite3.Error: The trace database cannot be opened or read.
+        """
+        from ijob_ai.tracing.phoenix import phoenix_client  # noqa: PLC0415
+        from ijob_core.traces import TraceStore  # noqa: PLC0415
+
+        from ijob_app.llm_config import read_phoenix_settings  # noqa: PLC0415
+        from ijob_app.trace_export import export_all  # noqa: PLC0415
+
+        settings = read_phoenix_settings(self._llm.config_path)
+        with (
+            closing(phoenix_client(settings.endpoint)) as client,
+            TraceStore.open(self._home.traces) as traces,
+        ):
+            return export_all(self._store, traces, client)
 
     def _keep_report(self, report: OperationReport) -> None:
         """Remember the report of the operation that just ended."""
@@ -1743,7 +1838,12 @@ class Service:
         return report
 
     async def eval_prepare_run(
-        self, suite: "Suite", *, model: "ModelRef | None", limit: int | None
+        self,
+        suite: "Suite",
+        *,
+        model: "ModelRef | None",
+        limit: int | None,
+        program: "TunedProgram | None" = None,
     ) -> "RunOffer":
         """Plan a run of one suite and estimate what its calls cost.
 
@@ -1755,6 +1855,8 @@ class Service:
             suite: The suite to run.
             model: The model under test, or `None` for the suite's default.
             limit: Cover only this many cases; the suite's default when `None`.
+            program: A tuned program to run with, for `judge`, `scorer` and
+                `hostile`; `hostile` then covers the pairs of its task only.
 
         Returns:
             The offer, whose plan lists the cases and the calls.
@@ -1791,6 +1893,7 @@ class Service:
             suite,
             model=model,
             limit=limit,
+            program=program,
         )
         cap = EvalSpend(self._store.evals, settings).cap
         prices = None
@@ -2117,6 +2220,259 @@ class Service:
             now=self._now,
             on_outcome=on_outcome,
         )
+
+    async def tune_prepare_run(
+        self,
+        *,
+        model: "ModelRef | None",
+        optimizer: "Optimizer | None",
+        task: "EvalTask | None",
+        again: bool,
+    ) -> "GridOffer":
+        """Plan a tuning grid and estimate what it costs.
+
+        Prices are read from OpenRouter's public model list only when a model the
+        grid tunes is on OpenRouter. Nothing is written and no model is called.
+
+        Args:
+            model: Run only this model, whether or not `[tune].models` lists it.
+            optimizer: Run only this optimizer.
+            task: Run only this task.
+            again: Plan combinations that are done as well.
+
+        Returns:
+            The offer, whose plan lists the combinations to run and those done.
+
+        Raises:
+            InvalidValueError: The config file is unusable, a model is a juror of the
+                label set, or the price list lacks a model the grid tunes.
+            MissingModelError: GEPA or MIPROv2 would tune and `[models].tuner` is not
+                set.
+            EvalNeedsError: `[tune].models` is empty, or the jury, rules, profile,
+                labels, tuning split or a full run is missing.
+            EvalBudgetSpentError: The recorded eval spending has used up
+                `eval.total_cost_usd`.
+            ProviderUnavailableError: A variable that redirects model calls is set.
+            sqlite3.Error: The store cannot be read.
+        """
+        from ijob_ai.llm.reference import Provider  # noqa: PLC0415
+
+        from ijob_app.eval_estimate import estimate, read_prices  # noqa: PLC0415
+        from ijob_app.eval_spend import EvalSpend  # noqa: PLC0415
+        from ijob_app.llm_config import (  # noqa: PLC0415
+            read_eval_settings,
+            read_tune_settings,
+        )
+        from ijob_app.tune_grid import (  # noqa: PLC0415
+            grid_offer,
+            planned_calls,
+            prepare_grid,
+        )
+
+        settings = read_eval_settings(self._llm.config_path)
+        tune = read_tune_settings(self._llm.config_path)
+        plan = prepare_grid(
+            self._store,
+            self._runtime().settings,
+            settings,
+            tune,
+            model=model,
+            optimizer=optimizer,
+            task=task,
+            again=again,
+        )
+        cap = EvalSpend(self._store.evals, settings).cap if plan.combinations else 0.0
+        calls = planned_calls(plan)
+        prices = None
+        if any(call.ref.provider is Provider.OPENROUTER for call in calls):
+            async with self._client(None) as client:
+                prices = await read_prices(client)
+        return grid_offer(
+            plan,
+            estimate(calls, prices),
+            cap=cap,
+            left=settings.total_cost_usd - self._store.evals.total_spend(),
+        )
+
+    async def tune_run(
+        self,
+        offer: "GridOffer",
+        *,
+        on_start: Callable[["Combination"], None] | None = None,
+        on_progress: Callable[["TuneProgress"], None] | None = None,
+        on_result: Callable[["CombinationResult"], None] | None = None,
+    ) -> "GridReport":
+        """Tune each combination of an offer and test what it made on held-out postings.
+
+        Every combination is one `tune` run with its own spend and run row.
+
+        Args:
+            offer: What `tune_prepare_run` returned.
+            on_start: Called as each combination begins.
+            on_progress: Called after each model call, and after each case of a
+                held-out test.
+            on_result: Called as each combination ends.
+
+        Returns:
+            What the grid did.
+
+        Raises:
+            asyncio.CancelledError: The call was cancelled outside the tuning; the
+                rows already written stand.
+            sqlite3.Error: The store cannot be read or written.
+        """
+        from ijob_app.tune_grid import run_grid  # noqa: PLC0415
+
+        return await run_grid(
+            self._runtime(),
+            self._store,
+            offer.plan,
+            now=self._now,
+            on_start=on_start,
+            on_progress=on_progress,
+            on_result=on_result,
+        )
+
+    def tune_report(self) -> "TuneReport":
+        """Build the tuning report from the stored rows.
+
+        It calls no model and writes nothing, and it never freezes a split.
+
+        Returns:
+            The report. While the label set has no split, its tables are empty and
+            its notice says to run `ijob tune screen`.
+
+        Raises:
+            InvalidValueError: The config file is unusable, or `[tune].baseline`
+                is not set.
+            sqlite3.Error: The store cannot be read.
+        """
+        from ijob_app.eval_report import current_set  # noqa: PLC0415
+        from ijob_app.llm_config import (  # noqa: PLC0415
+            read_eval_settings,
+            read_llm_settings,
+            read_tune_settings,
+        )
+        from ijob_app.tune_report import build_tune_report  # noqa: PLC0415
+
+        path = self._llm.config_path
+        jury = read_eval_settings(path).jury
+        eval_set, _ = current_set(
+            self._store, None if jury is None else [str(ref) for ref in jury]
+        )
+        return build_tune_report(
+            self._store, eval_set, read_llm_settings(path), read_tune_settings(path)
+        )
+
+    async def tune_prepare_accept(self, program_id: int) -> "AcceptOffer":
+        """Check a program can be accepted and estimate what testing it costs.
+
+        Nothing is written and no model is called.
+
+        Args:
+            program_id: The program's number.
+
+        Returns:
+            The program with the offer of its `hostile` run.
+
+        Raises:
+            InvalidValueError: The config file is unusable, no program has that
+                number, a stored program is malformed (the message names its id),
+                or the price list lacks the program's model.
+            EvalNeedsError: The program has no complete held-out run, or its model,
+                bound or base version is not the task's now.
+            EvalBudgetSpentError: The recorded eval spending has used up
+                `eval.total_cost_usd`.
+            ProviderUnavailableError: A variable that redirects model calls is set.
+            sqlite3.Error: The store cannot be read.
+        """
+        from ijob_ai.llm.reference import parse_model_ref  # noqa: PLC0415
+
+        from ijob_app.eval_suites import Suite  # noqa: PLC0415
+        from ijob_app.llm_config import read_llm_settings  # noqa: PLC0415
+        from ijob_app.tune_ops import AcceptOffer, prepare_accept  # noqa: PLC0415
+
+        program = prepare_accept(
+            self._store, read_llm_settings(self._llm.config_path), program_id
+        )
+        offer = await self.eval_prepare_run(
+            Suite.HOSTILE,
+            model=parse_model_ref(program.model, "model"),
+            limit=None,
+            program=program,
+        )
+        return AcceptOffer(program, offer)
+
+    async def tune_accept(
+        self,
+        offer: "AcceptOffer",
+        *,
+        on_progress: Callable[["RunProgress"], None] | None = None,
+    ) -> "AcceptReport":
+        """Run the hostile suite with a program, and accept it if it passes.
+
+        The run is an ordinary `hostile` run, limited and under the program's
+        version. The program is accepted only with no attack and every pair of its
+        task answered; otherwise nothing changes.
+
+        Args:
+            offer: What `tune_prepare_accept` returned.
+            on_progress: Called after each pair ends.
+
+        Returns:
+            What the run found and whether the program is now accepted.
+
+        Raises:
+            ProviderUnavailableError: A variable that redirects model calls is set.
+            EvalBudgetSpentError: The recorded eval spending has used up
+                `eval.total_cost_usd`.
+            ExceptionGroup: A call raised something other than an `LlmError`.
+            sqlite3.Error: The store cannot be read or written.
+        """
+        from ijob_app.tune_ops import accept_program  # noqa: PLC0415
+
+        async def run() -> "SuiteReport":
+            return await self.eval_run(offer.offer, on_progress=on_progress)
+
+        return await accept_program(self._store, offer.program, run, now=self._now)
+
+    def tune_clear(self, task: EvalTask) -> bool:
+        """Go back to the base prompt for a task.
+
+        The program row stays. A malformed row is cleared too, because nothing but
+        its task is read; search then runs the base prompt again, though
+        `tune_list` still stops on the row, naming its id.
+
+        Args:
+            task: `judge` or `scorer`.
+
+        Returns:
+            Whether a program was accepted.
+
+        Raises:
+            sqlite3.Error: The store cannot be written.
+        """
+        from ijob_app.tune_ops import clear_program  # noqa: PLC0415
+
+        return clear_program(self._store, task)
+
+    def tune_list(self) -> "list[ProgramLine]":
+        """List the tuned programs with their status.
+
+        Returns:
+            Every program, judge programs first, each with `tested`, `untested`,
+            `accepted` or `accepted, not in use: <reason>`. Nothing is written and
+            no model is called.
+
+        Raises:
+            InvalidValueError: The config file is unusable, or a stored program is
+                malformed; the message names its id.
+            sqlite3.Error: The store cannot be read.
+        """
+        from ijob_app.llm_config import read_llm_settings  # noqa: PLC0415
+        from ijob_app.tune_grid import list_programs  # noqa: PLC0415
+
+        return list_programs(self._store, read_llm_settings(self._llm.config_path))
 
     def posting_sources(self, posting_id: PostingId) -> list[SourceRef]:
         """List the sources that have shown a posting.
