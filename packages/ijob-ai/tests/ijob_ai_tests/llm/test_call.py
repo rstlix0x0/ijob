@@ -17,14 +17,25 @@ from ijob_ai.errors import (
     TaskOutputError,
 )
 from ijob_ai.llm.budget import Budget
-from ijob_ai.llm.call import _ForgivingJSONAdapter, _translate, run_call
+from ijob_ai.llm.call import (
+    ForgivingJSONAdapter,
+    call_span,
+    run_call,
+    translate_failure,
+)
+from ijob_ai.llm.meter import open_meter
 from ijob_ai.llm.reference import Provider
 from ijob_ai.llm.registry import prepare_environment
 from ijob_ai.llm.settings import Task
 from ijob_ai.tasks.outputs import VerdictOut
 from ijob_ai.tasks.signatures import JudgeSig, ScoreSig
 from ijob_ai.tracing import attributes
-from ijob_ai.tracing.setup import Tracing, operation_trace
+from ijob_ai.tracing.setup import (
+    OperationTrace,
+    Tracing,
+    current_operation_trace,
+    operation_trace,
+)
 from ijob_ai.tracing.sqlite_exporter import SqliteSpanExporter
 from ijob_core.model import PostingId
 from ijob_core.traces import TraceStore
@@ -338,6 +349,43 @@ def test_call_span_name_and_genai_attributes(tmp_path: Path) -> None:
     assert values[attributes.COMPLETION] == VERDICT
 
 
+def open_call_span(trace: OperationTrace | None) -> None:
+    """Enter and leave a `call_span` on a fresh meter, passing `trace` as given."""
+    with (
+        open_meter() as meter,
+        call_span(
+            provider=Provider.CLAUDE_SDK,
+            model="m",
+            meter=meter,
+            history=[],
+            inputs={"posting": "AAA"},
+            task=Task.JUDGE,
+            task_version="v1",
+            posting_id=None,
+            trace=trace,
+        ),
+    ):
+        pass
+
+
+def test_call_span_uses_the_trace_it_is_given(tmp_path: Path) -> None:
+    tracing, exporter = make_tracing(tmp_path)
+
+    open_call_span(OperationTrace(tracing, "tune"))
+    tracing.finish()
+
+    values = attrs(span_named(exporter, "chat m"))
+    assert values[attributes.OUTCOME] == "ok"
+    assert attributes.POSTING_ID not in values
+    assert span_named(exporter, "ijob tune")
+
+
+def test_call_span_without_a_trace_opens_none() -> None:
+    open_call_span(None)
+
+    assert current_operation_trace() is None
+
+
 def test_call_span_omits_posting_id_when_none(tmp_path: Path) -> None:
     with traced(tmp_path) as exporter:
         asyncio.run(
@@ -538,7 +586,7 @@ def test_run_call_translated_errors_chain_the_failure() -> None:
 
 
 def test_translate_unrecognised_failure_is_not_reported_as_timeout() -> None:
-    translated = _translate(KeyError("k"), 5, Task.JUDGE)
+    translated = translate_failure(KeyError("k"), 5, Task.JUDGE)
 
     assert isinstance(translated, ProviderFailedError)
     assert "timed out" not in str(translated)
@@ -559,7 +607,7 @@ _FLAT_SCORE = '{"score": 70, "reasons": ["fits"]}'
     ],
 )
 def test_a_verdict_reads_with_or_without_its_field_name(reply: str) -> None:
-    parsed = _ForgivingJSONAdapter().parse(JudgeSig, reply)
+    parsed = ForgivingJSONAdapter().parse(JudgeSig, reply)
 
     assert parsed["verdict"].keep is True
     assert parsed["verdict"].reason == "fits"
@@ -567,7 +615,7 @@ def test_a_verdict_reads_with_or_without_its_field_name(reply: str) -> None:
 
 @pytest.mark.parametrize("reply", [_FLAT_SCORE, f'{{"score": {_FLAT_SCORE}}}'])
 def test_a_score_reads_with_or_without_its_field_name(reply: str) -> None:
-    parsed = _ForgivingJSONAdapter().parse(ScoreSig, reply)
+    parsed = ForgivingJSONAdapter().parse(ScoreSig, reply)
 
     assert parsed["score"].score == 70
     assert parsed["score"].reasons == ["fits"]
@@ -585,7 +633,7 @@ def test_a_score_reads_with_or_without_its_field_name(reply: str) -> None:
 )
 def test_a_flat_answer_that_does_not_fit_is_still_refused(reply: str) -> None:
     with pytest.raises(AdapterParseError):
-        _ForgivingJSONAdapter().parse(JudgeSig, reply)
+        ForgivingJSONAdapter().parse(JudgeSig, reply)
 
 
 def test_a_signature_of_several_answers_needs_their_field_names() -> None:
@@ -596,7 +644,7 @@ def test_a_signature_of_several_answers_needs_their_field_names() -> None:
         second: VerdictOut = dspy.OutputField()
 
     with pytest.raises(AdapterParseError):
-        _ForgivingJSONAdapter().parse(_Two, _FLAT_VERDICT)
+        ForgivingJSONAdapter().parse(_Two, _FLAT_VERDICT)
 
 
 def test_an_answer_of_plain_text_needs_its_field_name() -> None:
@@ -606,7 +654,7 @@ def test_an_answer_of_plain_text_needs_its_field_name() -> None:
         text: str = dspy.OutputField()
 
     with pytest.raises(AdapterParseError):
-        _ForgivingJSONAdapter().parse(_Text, '{"other": 1}')
+        ForgivingJSONAdapter().parse(_Text, '{"other": 1}')
 
 
 def test_a_flat_answer_passes_the_call_boundary() -> None:
