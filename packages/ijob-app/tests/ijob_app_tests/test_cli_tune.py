@@ -37,7 +37,7 @@ from typer.testing import CliRunner, Result
 from .conftest import ClientFactoryBuilder
 from .eval_fakes import JurorEngine, JurorEngines, serve_openrouter_by_kind
 from .llm_fakes import Opaque, score_answer, verdict_answer
-from .test_cli_eval import _A, _B, _ROUTED, _SOURCE, _more_postings, _World
+from .test_cli_eval import _A, _ANSI, _B, _ROUTED, _SOURCE, _more_postings, _World
 from .test_tune_grid import _script, _Scripted
 
 _AT = datetime(2026, 11, 3, 9, 0, tzinfo=UTC)
@@ -588,7 +588,8 @@ def test_screen_help_lists_its_flags(
 
     assert result.exit_code == 0
     for flag in ("--yes", "--db", "--config"):
-        assert flag in result.stdout
+        # Typer forces styled help under GITHUB_ACTIONS, which splits a flag's text.
+        assert flag in _ANSI.sub("", result.stdout)
 
 
 def test_eval_commands_write_no_split(
@@ -866,7 +867,8 @@ def test_run_help_lists_its_flags(
 
     assert result.exit_code == 0
     for flag in ("--model", "--optimizer", "--task", "--again", "--yes", "--db"):
-        assert flag in result.stdout
+        # Typer forces styled help under GITHUB_ACTIONS, which splits a flag's text.
+        assert flag in _ANSI.sub("", result.stdout)
 
 
 def _seed_programs(world: _World, *, tested: bool) -> None:
@@ -1415,4 +1417,5 @@ def test_accept_clear_and_report_help_list_their_flags(
     ):
         assert result.exit_code == 0
         for flag in flags:
-            assert flag in result.stdout
+            # Typer forces styled help under GITHUB_ACTIONS, which splits a flag's text.
+            assert flag in _ANSI.sub("", result.stdout)
