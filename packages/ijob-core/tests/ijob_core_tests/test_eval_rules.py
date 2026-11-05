@@ -18,8 +18,10 @@ from ijob_core.eval_rules import (
     score_label,
     spot_order,
     spot_per_task,
+    tune_split,
 )
 from ijob_core.model import PostingId
+from ijob_core.tune_records import SplitPart
 
 _MOMENT = datetime(2026, 10, 1, 8, 0, tzinfo=UTC)
 
@@ -409,3 +411,98 @@ def test_spot_order_takes_more_for_a_larger_set() -> None:
     assert len(order) == 10
     assert [c.task for c in order].count(EvalTask.JUDGE) == 5
     assert [c.task for c in order].count(EvalTask.SCORER) == 5
+
+
+def _ids(start: int, count: int) -> list[PostingId]:
+    return [PostingId(number) for number in range(start, start + count)]
+
+
+def _tally(
+    parts: dict[PostingId, SplitPart], posting_ids: list[PostingId]
+) -> dict[SplitPart, int]:
+    return {part: [parts[i] for i in posting_ids].count(part) for part in SplitPart}
+
+
+@pytest.mark.parametrize(
+    ("keeps", "rejects", "held_out", "n", "train", "val", "unused"),
+    [
+        (21, 79, 50, 10, 12, 8, 30),
+        (39, 161, 100, 19, 22, 16, 62),
+        (40, 160, 100, 20, 24, 16, 60),
+        (59, 141, 100, 29, 34, 24, 42),
+        (150, 50, 100, 25, 30, 20, 50),
+    ],
+)
+def test_tune_split_rows(  # noqa: PLR0913, PLR0917  # one table row per case
+    keeps: int,
+    rejects: int,
+    held_out: int,
+    n: int,
+    train: int,
+    val: int,
+    unused: int,
+) -> None:
+    kept = _ids(1, keeps)
+    rejected = _ids(1000, rejects)
+
+    parts, found = tune_split("r", "p", kept, rejected)
+
+    assert found == n
+    counts = _tally(parts, kept + rejected)
+    assert counts[SplitPart.HELD_OUT] == held_out
+    assert counts[SplitPart.TRAIN] == train
+    assert counts[SplitPart.VAL] == val
+    assert counts[SplitPart.UNUSED] == unused
+
+
+def test_tune_split_holds_out_the_natural_keep_rate() -> None:
+    kept = _ids(1, 59)
+    rejected = _ids(1000, 141)
+
+    parts, _ = tune_split("r", "p", kept, rejected)
+
+    assert _tally(parts, kept)[SplitPart.HELD_OUT] == 30
+    assert _tally(parts, rejected)[SplitPart.HELD_OUT] == 70
+
+
+def test_tune_split_is_seeded() -> None:
+    kept = _ids(1, 50)
+    rejected = _ids(1000, 50)
+
+    first = tune_split("r", "p", kept, rejected)
+
+    assert tune_split("r", "p", kept, rejected) == first
+    assert tune_split("r", "other", kept, rejected) != first
+    assert tune_split("other", "p", kept, rejected) != first
+
+
+def test_tune_split_does_not_depend_on_the_order_given() -> None:
+    kept = _ids(1, 50)
+    rejected = _ids(1000, 50)
+    reordered_kept = [*kept[25:], *reversed(kept[:25])]
+    reordered_rejected = [*reversed(rejected)]
+
+    assert tune_split("r", "p", reordered_kept, reordered_rejected) == tune_split(
+        "r", "p", kept, rejected
+    )
+
+
+def test_tune_split_balances_train_and_val() -> None:
+    kept = _ids(1, 59)
+    rejected = _ids(1000, 141)
+
+    parts, _ = tune_split("r", "p", kept, rejected)
+
+    for group in (kept, rejected):
+        counts = _tally(parts, group)
+        assert counts[SplitPart.TRAIN] == 17
+        assert counts[SplitPart.VAL] == 12
+
+
+def test_tune_split_puts_each_posting_in_one_part() -> None:
+    kept = _ids(1, 40)
+    rejected = _ids(1000, 160)
+
+    parts, _ = tune_split("r", "p", kept, rejected)
+
+    assert sorted(parts) == sorted(kept + rejected)

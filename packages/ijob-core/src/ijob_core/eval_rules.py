@@ -2,8 +2,9 @@
 
 All of it is pure: the draw of a label set from the pools, the split a `--limit`
 makes of it, the draw `--add` makes to grow it, the label the jurors' votes give
-(or the reason they give none), and the order in which agreed labels are offered
-for a spot check. Nothing here reads or writes the store.
+(or the reason they give none), the order in which agreed labels are offered
+for a spot check, and the split of a label set for tuning. Nothing here reads or
+writes the store.
 """
 
 import hashlib
@@ -19,6 +20,7 @@ from typing import Final
 from ijob_core.errors import InvalidValueError
 from ijob_core.eval_records import Bucket, EvalTask, EvalVote, Pools
 from ijob_core.model import PostingId
+from ijob_core.tune_records import SplitPart
 
 _KEPT_DRAWN: Final = 40
 _REJECTED_DRAWN: Final = 40
@@ -28,6 +30,8 @@ _LIMIT_MAX: Final = 100
 _MAX_SPREAD: Final = 20
 _SPOT_MIN_PER_TASK: Final = 5
 _SPOT_CASES_PER_CHECK: Final = 20
+_TRAIN_TENTHS: Final = 6
+_TENTHS: Final = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,3 +374,48 @@ def _spot_key(seed: str, candidate: SpotCandidate) -> str:
     """Hash seed, posting and task into the sort key of a candidate."""
     text = f"{seed}\0{candidate.posting_id}\0{candidate.task.value}"
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+def tune_split(
+    rules_sha256: str,
+    profile_sha256: str,
+    keeps: Sequence[PostingId],
+    rejects: Sequence[PostingId],
+) -> tuple[dict[PostingId, SplitPart], int]:
+    """Divide labelled postings into held-out, train, val and unused.
+
+    Half the keeps, rounded up, are held out, and so are enough rejects to hold
+    out half of all postings, rounded up, which keeps the natural keep rate. From
+    the rest, N is the smaller of the keeps and rejects left; N of each are
+    tuned on, 60 percent of N rounded to the nearest (halves up) to train and the
+    remainder to val, and the others are unused. The same hashes and postings give
+    the same split; other hashes give another. The rule does not refuse a small N.
+
+    Args:
+        rules_sha256: The SHA-256 of the rules.
+        profile_sha256: The SHA-256 of the profile.
+        keeps: The postings labelled keep.
+        rejects: The postings labelled reject.
+
+    Returns:
+        The part of every posting, and N.
+    """
+    rng = random.Random(rules_sha256 + profile_sha256)  # noqa: S311  # not a secret
+    kept = rng.sample(sorted(keeps), len(keeps))
+    rejected = rng.sample(sorted(rejects), len(rejects))
+    held_keeps = (len(kept) + 1) // 2
+    held_rejects = (len(kept) + len(rejected) + 1) // 2 - held_keeps
+    n = min(len(kept) - held_keeps, len(rejected) - held_rejects)
+    train = (_TRAIN_TENTHS * n + _TENTHS // 2) // _TENTHS
+    parts: dict[PostingId, SplitPart] = {}
+    for shuffled, held in ((kept, held_keeps), (rejected, held_rejects)):
+        for posting_id in shuffled[:held]:
+            parts[posting_id] = SplitPart.HELD_OUT
+        for offset, posting_id in enumerate(shuffled[held:]):
+            if offset < train:
+                parts[posting_id] = SplitPart.TRAIN
+            elif offset < n:
+                parts[posting_id] = SplitPart.VAL
+            else:
+                parts[posting_id] = SplitPart.UNUSED
+    return parts, n
