@@ -1,23 +1,25 @@
 """LLM, tracing and eval settings read from the user's config file.
 
-The `[models]`, `[llm]`, `[providers.claude-sdk]`, `[tracing]`, `[phoenix]` and
-`[eval]` tables become `LlmSettings`, `TracingSettings`, `PhoenixSettings` and
-`EvalSettings`. A missing file or table gives the defaults; an unknown key or an
-out-of-range value raises `InvalidValueError` naming the key.
+The `[models]`, `[llm]`, `[providers.claude-sdk]`, `[tracing]`, `[phoenix]`,
+`[eval]` and `[tune]` tables become `LlmSettings`, `TracingSettings`,
+`PhoenixSettings`, `EvalSettings` and `TuneSettings`. A missing file or table
+gives the defaults; an unknown key or an out-of-range value raises
+`InvalidValueError` naming the key.
 """
 
 import tomllib
 from pathlib import Path
 from typing import Final
-from urllib.parse import urlsplit
 
-from ijob_ai.llm.reference import ModelRef, parse_model_ref
+from ijob_ai.llm.reference import ModelRef, Provider, parse_model_ref
 from ijob_ai.llm.settings import (
     EvalSettings,
     LlmSettings,
     PhoenixSettings,
     Task,
     TracingSettings,
+    TuneSettings,
+    check_local_endpoint,
 )
 from ijob_core.errors import InvalidValueError
 
@@ -29,8 +31,8 @@ _CLAUDE_SDK_KEYS: Final = frozenset({"cli_path"})
 _TRACING_KEYS: Final = frozenset({"max_size_mb"})
 _PHOENIX_KEYS: Final = frozenset({"endpoint"})
 _EVAL_KEYS: Final = frozenset({"jury", "max_cost_usd", "total_cost_usd"})
+_TUNE_KEYS: Final = frozenset({"candidates", "baseline", "models", "max_cost_usd"})
 _JURY_SIZE: Final = range(2, 6)
-_LOCAL_HOSTS: Final = frozenset({"localhost", "127.0.0.1", "::1"})
 _MAX_COST_USD: Final = 100
 _CONCURRENCY: Final = range(1, 17)
 _TIMEOUT_S: Final = range(10, 601)
@@ -156,6 +158,39 @@ def read_eval_settings(config_path: Path) -> EvalSettings:
     )
 
 
+def read_tune_settings(config_path: Path) -> TuneSettings:
+    """Read the models and spending cap of the tuning commands.
+
+    Args:
+        config_path: The user's config file; it need not exist.
+
+    Returns:
+        The settings; an absent table gives no baseline, empty lists and a cap
+        of 2 US dollars. A model listed twice is kept once, in order.
+
+    Raises:
+        InvalidValueError: If the file cannot be read or parsed, the table
+            holds an unknown key, a list is malformed, an entry is not a valid
+            model reference, or the cap is not above 0 and at most 100.
+    """
+    table = _section(_read(config_path), "tune")
+    _only_keys(table, _TUNE_KEYS, "tune")
+    defaults = TuneSettings()
+    baseline = table.get("baseline")
+    if baseline is not None and not isinstance(baseline, str):
+        raise InvalidValueError("tune.baseline", f"{baseline!r} is not a string")
+    return TuneSettings(
+        candidates=_model_list(table.get("candidates"), "tune.candidates"),
+        baseline=(
+            None if baseline is None else parse_model_ref(baseline, "tune.baseline")
+        ),
+        models=_model_list(table.get("models"), "tune.models"),
+        max_cost_usd=_cost(
+            table.get("max_cost_usd"), "tune.max_cost_usd", defaults.max_cost_usd
+        ),
+    )
+
+
 def _read(path: Path) -> _Table:
     """Read the config file; an absent file reads as empty."""
     try:
@@ -196,8 +231,29 @@ def _models(table: _Table) -> dict[Task, ModelRef]:
             raise InvalidValueError(key, "unknown key") from None
         if not isinstance(value, str):
             raise InvalidValueError(key, f"{value!r} is not a string")
-        models[task] = parse_model_ref(value, key)
+        ref = parse_model_ref(value, key)
+        if task is Task.TUNER and ref.provider is not Provider.CLAUDE_SDK:
+            raise InvalidValueError(
+                key, f"{value!r} must use {_CLAUDE_SDK}; its prompts carry your data"
+            )
+        models[task] = ref
     return models
+
+
+def _model_list(value: object, key: str) -> tuple[ModelRef, ...]:
+    """Read a list of model references, keeping each one once, in order."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise InvalidValueError(key, f"{value!r} is not a list")
+    refs: list[ModelRef] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise InvalidValueError(key, f"{item!r} is not a string")
+        ref = parse_model_ref(item, key)
+        if ref not in refs:
+            refs.append(ref)
+    return tuple(refs)
 
 
 def _max_cost(value: object, default: float) -> float:
@@ -268,14 +324,5 @@ def _endpoint(value: object, key: str, default: str) -> str:
         return default
     if not isinstance(value, str):
         raise InvalidValueError(key, f"{value!r} is not a string")
-    try:
-        parts = urlsplit(value)
-        _ = parts.port
-    except ValueError as error:
-        raise InvalidValueError(key, f"{value!r} is not a valid URL") from error
-    if parts.scheme not in {"http", "https"}:
-        raise InvalidValueError(key, f"{value!r} is not an http or https URL")
-    if parts.hostname not in _LOCAL_HOSTS:
-        hosts = ", ".join(sorted(_LOCAL_HOSTS))
-        raise InvalidValueError(key, f"host must be one of {hosts}")
+    check_local_endpoint(value, key)
     return value.removesuffix("/")

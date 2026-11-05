@@ -32,10 +32,39 @@ def test_langfuse_is_named_nowhere() -> None:
     assert hits == []
 
 
+_PUBLISHED = re.compile(r"^127\.0\.0\.1:\d+:\d+(/\w+)?$")
+
+
+def _published_ports(compose: str) -> list[str]:
+    """Return every entry under a `ports:` key, with quotes removed."""
+    entries: list[str] = []
+    lines = compose.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "ports:":
+            continue
+        indent = len(line) - len(line.lstrip())
+        for entry in lines[index + 1 :]:
+            if len(entry) - len(entry.lstrip()) <= indent and entry.strip():
+                break
+            if entry.strip().startswith("- "):
+                entries.append(entry.strip()[2:].strip().strip("\"'"))
+    return entries
+
+
+def _binds_only_to_localhost(compose: str) -> bool:
+    ports = _published_ports(compose)
+    return (
+        bool(ports)
+        and "network_mode" not in compose
+        and all(_PUBLISHED.match(port) for port in ports)
+    )
+
+
 def test_compose_binds_only_to_localhost() -> None:
     compose = _text("compose.yaml")
 
-    assert "127.0.0.1:6006:6006" in compose
+    assert _published_ports(compose) == ["127.0.0.1:6006:6006"]
+    assert _binds_only_to_localhost(compose)
     assert _IMAGE in compose
     assert compose.count("ports:") == 1
     services = compose.split("services:", 1)[1].split("\nvolumes:", 1)[0]
@@ -65,3 +94,21 @@ def test_env_example_says_nothing_loads_it() -> None:
     assert "OPENROUTER_API_KEY" in text
     assert "OTEL_" not in text
     assert "export" in text
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("- 127.0.0.1:6006:6006", "- 127.0.0.1:6006:6006\n      - 0.0.0.0:4317:4317"),
+        ("- 127.0.0.1:6006:6006", "- 127.0.0.1:6006:6006\n      - 4317:4317"),
+        ("    ports:", "    network_mode: host\n    ports:"),
+        ("127.0.0.1:6006:6006", "6006:6006"),
+    ],
+    ids=["second-all-interfaces-port", "second-bare-port", "host-network", "bare-port"],
+)
+def test_localhost_check_catches_a_widened_compose_file(old: str, new: str) -> None:
+    compose = _text("compose.yaml")
+    widened = compose.replace(old, new)
+
+    assert widened != compose
+    assert not _binds_only_to_localhost(widened)

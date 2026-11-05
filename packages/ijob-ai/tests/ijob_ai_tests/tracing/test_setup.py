@@ -166,6 +166,34 @@ def test_repeated_start_adds_no_log_handlers(tmp_path: Path) -> None:
     assert len(null_handlers) == 1
 
 
+@pytest.mark.parametrize(
+    "logger_name",
+    [
+        "opentelemetry.exporter.otlp.proto.http.trace_exporter",
+        "opentelemetry.sdk._shared_internal",
+        "opentelemetry.sdk.trace.export",
+    ],
+)
+def test_export_failures_print_nothing_on_stderr(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], logger_name: str
+) -> None:
+    start_tracing(tmp_path / "traces.db", TracingSettings()).finish()
+    with _no_root_handlers():
+        logging.getLogger(logger_name).error("Failed to export batch")
+        logging.getLogger(logger_name).warning("Exception while exporting Span")
+
+    assert capsys.readouterr().err == ""
+
+
+def test_the_stderr_check_sees_an_unsilenced_logger(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with _no_root_handlers():
+        logging.getLogger("ijob.test.unsilenced").error("Failed to export batch")
+
+    assert "Failed to export batch" in capsys.readouterr().err
+
+
 def test_global_tracer_provider_is_untouched(tmp_path: Path) -> None:
     tracing = start_tracing(tmp_path / "traces.db", TracingSettings())
     _one_call(tracing)

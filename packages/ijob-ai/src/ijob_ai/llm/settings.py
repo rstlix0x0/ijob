@@ -4,9 +4,39 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from typing import Final
+from urllib.parse import urlsplit
+
+from ijob_core.errors import InvalidValueError
 
 from ijob_ai.errors import MissingModelError
 from ijob_ai.llm.reference import ModelRef
+
+_LOCAL_HOSTS: Final = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def check_local_endpoint(value: str, key: str) -> None:
+    """Refuse an endpoint that is not a local `http` or `https` URL.
+
+    Args:
+        value: The URL to check.
+        key: Setting name to put in the error.
+
+    Raises:
+        InvalidValueError: If `value` is not a valid URL, its scheme is not
+            `http` or `https`, or its host is not `localhost`, `127.0.0.1` or
+            `::1`.
+    """
+    try:
+        parts = urlsplit(value)
+        _ = parts.port
+    except ValueError as error:
+        raise InvalidValueError(key, f"{value!r} is not a valid URL") from error
+    if parts.scheme not in {"http", "https"}:
+        raise InvalidValueError(key, f"{value!r} is not an http or https URL")
+    if parts.hostname not in _LOCAL_HOSTS:
+        hosts = ", ".join(sorted(_LOCAL_HOSTS))
+        raise InvalidValueError(key, f"host must be one of {hosts}")
 
 
 class Task(StrEnum):
@@ -21,6 +51,7 @@ class Task(StrEnum):
     SCORER = "scorer"
     SOURCE_AGENT = "source_agent"
     SOURCE_RECIPE = "source_recipe"
+    TUNER = "tuner"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -80,9 +111,17 @@ class PhoenixSettings:
     Attributes:
         endpoint: Base URL of the Phoenix server; always a local `http` or
             `https` address.
+
+    Raises:
+        InvalidValueError: If the endpoint is not a local `http` or `https`
+            URL.
     """
 
     endpoint: str = "http://127.0.0.1:6006"
+
+    def __post_init__(self) -> None:
+        """Refuse an endpoint that is not on this machine."""
+        check_local_endpoint(self.endpoint, "phoenix.endpoint")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -99,3 +138,20 @@ class EvalSettings:
     jury: tuple[ModelRef, ...] | None = None
     max_cost_usd: float = 4
     total_cost_usd: float = 10
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TuneSettings:
+    """What the tuning commands read from configuration.
+
+    Attributes:
+        candidates: Models the screening step tries, in the order written.
+        baseline: Model the candidates are compared with, or None when absent.
+        models: Models a tuning run covers, in the order written.
+        max_cost_usd: Spending cap for one tuning run, in US dollars.
+    """
+
+    candidates: tuple[ModelRef, ...] = ()
+    baseline: ModelRef | None = None
+    models: tuple[ModelRef, ...] = ()
+    max_cost_usd: float = 2

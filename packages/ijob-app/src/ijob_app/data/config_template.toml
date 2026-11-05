@@ -33,6 +33,7 @@
 # source_agent  = "claude-sdk/claude-sonnet-5-5"
 # explore_agent = "claude-sdk/claude-sonnet-5-5"
 # eval_grader   = "openrouter/openai/gpt-6.1-sol"
+# tuner         = "claude-sdk/claude-opus-5-5"   # must be claude-sdk: its prompts carry your data
 
 # Limits on model calls.
 # [llm]
@@ -59,3 +60,11 @@
 # jury = ["claude-sdk/claude-opus-5-5", "openrouter/openai/gpt-6.1-sol", "openrouter/google/gemini-4-argon"]
 # max_cost_usd   = 4          # per command; above 0 and at most 100
 # total_cost_usd = 10         # across all commands; above 0 and at most 100
+
+# The tuning commands. Candidates and models are written on one line each; a
+# model listed twice counts once.
+# [tune]
+# candidates = ["openrouter/z-ai/glm-5.3-flash", "openrouter/openai/gpt-5-nano", "openrouter/deepseek/deepseek-v4.1-flash", "openrouter/qwen/qwen3.8-flash", "openrouter/mistralai/mistral-small-2603", "openrouter/openai/gpt-5.4-nano"]
+# baseline = "claude-sdk/claude-sonnet-5-5"
+# models = []                 # set after reading the tuning report
+# max_cost_usd = 2            # per tuning run; above 0 and at most 100

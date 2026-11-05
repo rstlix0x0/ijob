@@ -3,6 +3,7 @@ from importlib.resources import files
 from pathlib import Path
 
 import pytest
+from ijob_ai.errors import MissingModelError
 from ijob_ai.llm.reference import ModelRef, Provider
 from ijob_ai.llm.settings import (
     EvalSettings,
@@ -10,12 +11,14 @@ from ijob_ai.llm.settings import (
     PhoenixSettings,
     Task,
     TracingSettings,
+    TuneSettings,
 )
 from ijob_app.llm_config import (
     read_eval_settings,
     read_llm_settings,
     read_phoenix_settings,
     read_tracing_settings,
+    read_tune_settings,
 )
 from ijob_core.errors import InvalidValueError
 
@@ -415,3 +418,161 @@ def test_eval_cost_ranges(tmp_path: Path, key: str, value: str) -> None:
         read_eval_settings(path)
 
     assert raised.value.field == f"eval.{key}"
+
+
+_SDK_REF = ModelRef(Provider.CLAUDE_SDK, "m1")
+_OR_REF = ModelRef(Provider.OPENROUTER, "vendor/m2")
+
+
+def test_tuner_on_claude_sdk_reads(tmp_path: Path) -> None:
+    path = _config(tmp_path, '[models]\ntuner = "claude-sdk/m1"\n')
+
+    assert read_llm_settings(path).model_for(Task.TUNER) == _SDK_REF
+
+
+def test_tuner_on_openrouter_is_refused(tmp_path: Path) -> None:
+    path = _config(tmp_path, '[models]\ntuner = "openrouter/vendor/m2"\n')
+
+    with pytest.raises(InvalidValueError, match=r"models\.tuner"):
+        read_llm_settings(path)
+
+
+def test_tuner_absent_raises_missing_model(tmp_path: Path) -> None:
+    path = _config(tmp_path, "")
+
+    with pytest.raises(MissingModelError):
+        read_llm_settings(path).model_for(Task.TUNER)
+
+
+def test_no_tune_table_gives_empty_settings(tmp_path: Path) -> None:
+    assert read_tune_settings(_config(tmp_path, "")) == TuneSettings()
+    assert read_tune_settings(tmp_path / "absent.toml") == TuneSettings()
+
+
+def test_empty_candidates_are_allowed(tmp_path: Path) -> None:
+    path = _config(tmp_path, "[tune]\ncandidates = []\n")
+
+    assert read_tune_settings(path).candidates == ()
+
+
+def test_empty_models_are_allowed(tmp_path: Path) -> None:
+    path = _config(tmp_path, "[tune]\nmodels = []\n")
+
+    assert read_tune_settings(path).models == ()
+
+
+def test_tune_settings_parsed(tmp_path: Path) -> None:
+    path = _config(
+        tmp_path,
+        '[tune]\nbaseline = "claude-sdk/m1"\ncandidates = ["openrouter/vendor/m2"]\n'
+        'models = ["claude-sdk/m1"]\nmax_cost_usd = 3\n',
+    )
+
+    assert read_tune_settings(path) == TuneSettings(
+        candidates=(_OR_REF,), baseline=_SDK_REF, models=(_SDK_REF,), max_cost_usd=3
+    )
+
+
+def test_duplicates_are_read_once(tmp_path: Path) -> None:
+    path = _config(
+        tmp_path,
+        '[tune]\ncandidates = ["openrouter/vendor/m2", "claude-sdk/m1", '
+        '"openrouter/vendor/m2"]\n',
+    )
+
+    assert read_tune_settings(path).candidates == (_OR_REF, _SDK_REF)
+
+
+def test_tune_unknown_key_is_refused(tmp_path: Path) -> None:
+    path = _config(tmp_path, "[tune]\nbogus = 1\n")
+
+    with pytest.raises(InvalidValueError, match=r"tune\.bogus"):
+        read_tune_settings(path)
+
+
+@pytest.mark.parametrize("value", ["0", "101", '"x"'])
+def test_tune_cost_out_of_bounds_is_refused(tmp_path: Path, value: str) -> None:
+    path = _config(tmp_path, f"[tune]\nmax_cost_usd = {value}\n")
+
+    with pytest.raises(InvalidValueError, match=r"tune\.max_cost_usd"):
+        read_tune_settings(path)
+
+
+@pytest.mark.parametrize("value", [2, 100])
+def test_tune_cost_bounds_are_read(tmp_path: Path, value: int) -> None:
+    path = _config(tmp_path, f"[tune]\nmax_cost_usd = {value}\n")
+
+    assert read_tune_settings(path).max_cost_usd == value
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '[tune]\nbaseline = "m1"\n',
+        '[tune]\ncandidates = ["m1"]\n',
+        '[tune]\nmodels = ["m1"]\n',
+    ],
+)
+def test_bad_model_reference_is_refused(tmp_path: Path, text: str) -> None:
+    with pytest.raises(InvalidValueError, match=r"tune\."):
+        read_tune_settings(_config(tmp_path, text))
+
+
+def test_tune_wrong_types_are_refused(tmp_path: Path) -> None:
+    for text in ('[tune]\ncandidates = "x"\n', "[tune]\ncandidates = [1]\n"):
+        with pytest.raises(InvalidValueError, match=r"tune\.candidates"):
+            read_tune_settings(_config(tmp_path, text))
+
+
+def test_template_stays_all_comments(tmp_path: Path) -> None:
+    path = _config(tmp_path, "\n".join(_template_lines()))
+
+    assert read_tune_settings(path) == TuneSettings()
+
+
+def _uncommented(section: str) -> str:
+    """Return the template's commented lines of one table, as active TOML."""
+    lines = _template_lines()
+    start = lines.index(f"# [{section}]")
+    block: list[str] = []
+    for line in lines[start:]:
+        if line.startswith("# [") and line != f"# [{section}]":
+            break
+        if line.startswith("# ") and ("=" in line or line == f"# [{section}]"):
+            block.append(line.removeprefix("# "))
+    return "\n".join(block)
+
+
+def test_template_tracing_and_phoenix_lines_parse_through_the_reader(
+    tmp_path: Path,
+) -> None:
+    path = _config(tmp_path, _uncommented("tracing") + "\n" + _uncommented("phoenix"))
+
+    assert read_tracing_settings(path) == TracingSettings(max_size_mb=256)
+    assert read_phoenix_settings(path) == PhoenixSettings(
+        endpoint="http://127.0.0.1:6006"
+    )
+
+
+def test_template_tune_block_parses_once_uncommented(tmp_path: Path) -> None:
+    block = _uncommented("tune")
+    path = _config(tmp_path, block)
+
+    tune = read_tune_settings(path)
+
+    assert len(tune.candidates) == 6
+    assert tune.baseline is not None
+    assert tomllib.loads(block)["tune"]["baseline"].startswith("claude-sdk/")
+    assert not any(
+        line.strip() and not line.startswith("#") and "tune" in line
+        for line in _template_lines()
+    )
+
+
+def test_tune_baseline_must_be_a_string(tmp_path: Path) -> None:
+    path = _config(tmp_path, "[tune]\nbaseline = 1\n")
+
+    with pytest.raises(InvalidValueError) as raised:
+        read_tune_settings(path)
+
+    assert raised.value.field == "tune.baseline"

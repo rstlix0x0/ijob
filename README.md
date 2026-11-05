@@ -89,7 +89,9 @@ CI runs the same commands. Tests never call an LLM or the network.
 
 Tracing is local and Phoenix is optional. To run a local Phoenix, run `docker compose up -d`; the
 UI is at <http://127.0.0.1:6006>. Run `docker compose down` when you are done. `.env.example` lists
-the variables ijob reads; nothing loads that file, so export them in your shell.
+the provider key ijob reads; nothing loads that file, so export it in your shell. `IJOB_HOME`
+moves ijob's data folder, and `OTEL_SDK_DISABLED` is ignored with a warning, because ijob tracing
+cannot be turned off.
 
 Phoenix runs with auth off, because its port is bound to localhost only. While it runs, anything
 on the same Mac can read, change or delete its data, which holds your CV and rules, so stop it after
