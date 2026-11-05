@@ -36,6 +36,7 @@ from ijob_ai.llm.budget import Budget
 from ijob_ai.llm.call import run_call
 from ijob_ai.llm.reference import Provider
 from ijob_ai.llm.settings import Task
+from ijob_ai.tasks.text import neutralize_markers
 from ijob_ai.tracing import attributes
 from ijob_ai.tracing.setup import current_operation_trace
 
@@ -133,6 +134,17 @@ def _render(result: object) -> str:
         return result
     text: str = format_field_value(_OBSERVATION, result)
     return text
+
+
+def _neutral(value: object) -> object:
+    """Break the field markers in every text inside `value`, whatever its shape."""
+    if isinstance(value, str):
+        return neutralize_markers(value)
+    if isinstance(value, dict):
+        return {key: _neutral(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_neutral(item) for item in value]
+    return value
 
 
 def _one_line(text: str, limit: int) -> str:
@@ -316,6 +328,18 @@ class GuardedReAct(dspy.ReAct):  # type: ignore[misc]  # dspy exports it untyped
             NotImplementedError: Always.
         """
         raise NotImplementedError(_SYNC_REFUSED)
+
+    @override
+    def _format_trajectory(self, trajectory: dict[str, Any]) -> str:
+        """Render the trajectory with every field marker in its text broken.
+
+        Tool results and the arguments the model chose can hold third-party
+        text, so each text in the trajectory goes through `neutralize_markers`
+        before DSPy writes its own markers around it. Text without a marker is
+        rendered as DSPy renders it.
+        """
+        rendered: str = super()._format_trajectory(_neutral(trajectory))
+        return rendered
 
     @override
     async def _async_call_with_potential_trajectory_truncation(

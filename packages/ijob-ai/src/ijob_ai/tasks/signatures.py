@@ -4,10 +4,12 @@ This is the only module that subclasses `dspy.Signature`. Each docstring is the
 signature's instruction text and states that input fields, or for an agent its
 tool results, are untrusted data; the judge's rules are the seeker's own, so its
 docstring names only the posting field.
-A task version changes whenever its instruction text or output shape does.
+A task version, defined in `ijob_ai.tasks.versions` and re-exported here, changes
+whenever its instruction text or output shape does. `JUDGE_UNTRUSTED` and
+`SCORER_UNTRUSTED`, defined there and re-exported here too, are the sentences
+that state this in the judge and scorer docstrings; a tuned text that loses its
+sentence gets it back.
 """
-
-from typing import Final
 
 import dspy
 
@@ -19,15 +21,39 @@ from ijob_ai.tasks.outputs import (
     SourceRecipeOut,
     VerdictOut,
 )
+from ijob_ai.tasks.versions import (
+    CV_PROFILE_VERSION,
+    EXPLORE_AGENT_VERSION,
+    INSTRUCTIONS_VERSION,
+    JOB_EXTRACT_VERSION,
+    JUDGE_UNTRUSTED,
+    JUDGE_VERSION,
+    SCORER_UNTRUSTED,
+    SCORER_VERSION,
+    SOURCE_AGENT_VERSION,
+    SOURCE_RECIPE_VERSION,
+)
 
-CV_PROFILE_VERSION: Final = "cv_profile-1"
-INSTRUCTIONS_VERSION: Final = "instructions-1"
-JOB_EXTRACT_VERSION: Final = "job_extract-2"
-JUDGE_VERSION: Final = "judge-2"
-SCORER_VERSION: Final = "scorer-1"
-SOURCE_RECIPE_VERSION: Final = "source_recipe-1"
-SOURCE_AGENT_VERSION: Final = "source_agent-1"
-EXPLORE_AGENT_VERSION: Final = "explore_agent-1"
+__all__ = [
+    "CV_PROFILE_VERSION",
+    "EXPLORE_AGENT_VERSION",
+    "INSTRUCTIONS_VERSION",
+    "JOB_EXTRACT_VERSION",
+    "JUDGE_UNTRUSTED",
+    "JUDGE_VERSION",
+    "SCORER_UNTRUSTED",
+    "SCORER_VERSION",
+    "SOURCE_AGENT_VERSION",
+    "SOURCE_RECIPE_VERSION",
+    "CvProfileSig",
+    "ExploreAgentSig",
+    "JobExtractSig",
+    "JudgeSig",
+    "ParseInstructionsSig",
+    "ScoreSig",
+    "SourceAgentSig",
+    "SourceRecipeSig",
+]
 
 
 class CvProfileSig(dspy.Signature):
