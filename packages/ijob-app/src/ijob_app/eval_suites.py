@@ -33,7 +33,12 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Final
 
-from ijob_ai.errors import CapReachedError, LlmError, TaskOutputError
+from ijob_ai.errors import (
+    CapReachedError,
+    LlmError,
+    ProviderFailedError,
+    TaskOutputError,
+)
 from ijob_ai.evals.hostile import HostilePair
 from ijob_ai.llm.budget import Budget
 from ijob_ai.llm.reference import ModelRef
@@ -863,6 +868,9 @@ def _report(header: _Header, executed: _Executed, spend: EvalSpend) -> SuiteRepo
     )
 
 
+_TIMEOUT_TRIES: Final = 3
+
+
 class _Asker:
     """Has the model under test judge or score a posting, charging the right budget."""
 
@@ -889,6 +897,25 @@ class _Asker:
             raise CapReachedError
         return charged
 
+    @staticmethod
+    async def _asked[Answer](ask: Callable[[], Awaitable[Answer]]) -> Answer:
+        """Ask, and ask again when the call times out.
+
+        A call that stalls is rare but ends a long run, so it gets more tries. Any
+        other failure is not retried.
+
+        Raises:
+            ProviderFailedError: The last try timed out, or a try failed otherwise.
+        """
+        tries_left = _TIMEOUT_TRIES
+        while True:
+            try:
+                return await ask()
+            except ProviderFailedError as error:
+                tries_left -= 1
+                if not tries_left or not isinstance(error.__cause__, TimeoutError):
+                    raise
+
     async def judge(
         self, posting: Posting, rules: Sequence[str], budget: Budget
     ) -> Verdict | TaskOutputError:
@@ -899,9 +926,9 @@ class _Asker:
         """
         from ijob_ai.tasks.judge import judge_posting  # noqa: PLC0415
 
-        charged = self._charged(budget)
-        registry = await self._runtime.registry_for_ref(self._model)
-        try:
+        async def ask() -> Verdict:
+            charged = self._charged(budget)
+            registry = await self._runtime.registry_for_ref(self._model)
             return await judge_posting(
                 posting,
                 rules,
@@ -911,6 +938,9 @@ class _Asker:
                 timeout_s=self._runtime.settings.timeout_s,
                 program=self._program,
             )
+
+        try:
+            return await self._asked(ask)
         except TaskOutputError as error:
             return error
 
@@ -924,9 +954,9 @@ class _Asker:
         """
         from ijob_ai.tasks.scorer import score_posting  # noqa: PLC0415
 
-        charged = self._charged(budget)
-        registry = await self._runtime.registry_for_ref(self._model)
-        try:
+        async def ask() -> Score:
+            charged = self._charged(budget)
+            registry = await self._runtime.registry_for_ref(self._model)
             return await score_posting(
                 posting,
                 profile,
@@ -936,6 +966,9 @@ class _Asker:
                 timeout_s=self._runtime.settings.timeout_s,
                 program=self._program,
             )
+
+        try:
+            return await self._asked(ask)
         except TaskOutputError as error:
             return error
 

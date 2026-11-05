@@ -826,12 +826,14 @@ class PairOutcome:
         status: `complete` or `incomplete`.
         interrupted: Whether the screen was cancelled while the pair ran; its run
             row and the results already stored stand, and the row is incomplete.
+        reason: Why a provider failure ended the pair's run, or `None`.
     """
 
     pair: ScreenPair
     run_id: int
     status: RunStatus
     interrupted: bool = False
+    reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -914,9 +916,10 @@ async def run_screen(  # noqa: PLR0913  # the screen's inputs, one each
     """Freeze the split, then run each pair of the plan in order.
 
     Each pair goes through `run`, which is an ordinary eval run with its own
-    spend. A spent budget, an unavailable provider, an unknown cost or a provider
-    failure ends the screen; the runs already written stand. A run that reached its
-    cap is incomplete and the screen goes on. When the screen is cancelled while a
+    spend. A spent budget, an unavailable provider or an unknown cost ends the
+    screen; the runs already written stand. A run that reached its cap or lost a
+    call to a provider failure is incomplete and the screen goes on, so one flaky
+    model does not hold back the others. When the screen is cancelled while a
     pair runs, that pair's incomplete run is reported to `on_outcome` as
     interrupted before the cancellation goes on.
 
@@ -953,11 +956,20 @@ async def run_screen(  # noqa: PLR0913  # the screen's inputs, one each
         except (EvalBudgetSpentError, ProviderUnavailableError) as error:
             stopped = str(error)
             break
-        outcome = PairOutcome(pair, report.run_id, report.status)
+        stopped_by = report.operation.stopped_by
+        ends_screen = stopped_by == "cost_unknown" or isinstance(
+            report.stop_error, ProviderUnavailableError
+        )
+        reason = (
+            str(report.stop_error or stopped_by)
+            if stopped_by == "provider" and not ends_screen
+            else None
+        )
+        outcome = PairOutcome(pair, report.run_id, report.status, reason=reason)
         outcomes.append(outcome)
         if on_outcome is not None:
             on_outcome(outcome)
-        if report.operation.stopped_by in ("provider", "cost_unknown"):
-            stopped = str(report.stop_error or report.operation.stopped_by)
+        if ends_screen:
+            stopped = str(report.stop_error or stopped_by)
             break
     return screen_report(plan, outcomes, stopped)

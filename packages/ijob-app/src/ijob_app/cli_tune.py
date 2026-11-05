@@ -117,6 +117,7 @@ from ijob_app.tune_view import (
     progress_text,
     report_lines,
     report_panel,
+    screen_failure_lines,
     screen_plan_lines,
     screen_plan_panel,
     screen_result_lines,
@@ -198,6 +199,8 @@ def _show_result(report: ScreenReport) -> None:
         return
     for line in screen_result_lines(report):
         typer.echo(line)
+    for line in screen_failure_lines(report):
+        say_note(f"note: {line}", literal=True)
     if report.stopped is not None:
         say_note(f"note: stopped: {report.stopped}", literal=True)
 

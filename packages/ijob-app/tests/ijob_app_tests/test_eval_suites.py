@@ -1,5 +1,6 @@
 import asyncio
 import json
+import pkgutil
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1298,6 +1299,84 @@ def test_only_keeps_the_named_postings(store: Store) -> None:
 
     assert {case.posting.id for case in plan.cases} == only
     assert plan.limited is True
+
+
+_STALLED = "timed out after 120 s"
+
+
+def _stall(
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    times: int,
+    *,
+    timed_out: bool = True,
+) -> list[int]:
+    """Make `target` fail its first `times` calls, and return the calls it got."""
+    real = pkgutil.resolve_name(target)
+    calls: list[int] = []
+
+    async def stalling(*args: object, **kwargs: object) -> object:
+        calls.append(1)
+        if len(calls) > times:
+            return await real(*args, **kwargs)
+        cause = TimeoutError() if timed_out else None
+        raise ProviderFailedError(_STALLED) from cause
+
+    monkeypatch.setattr(target, stalling)
+    return calls
+
+
+def test_a_timed_out_judge_call_is_asked_again(
+    store: Store, make_runtime: _MakeRuntime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _labelled(store, 12)
+    calls = _stall(monkeypatch, "ijob_ai.tasks.judge.judge_posting", 2)
+
+    report = _judge(make_runtime(JurorEngines()), store, _settings(_A, _B))
+
+    assert report.status is RunStatus.COMPLETE
+    assert len(store.evals.results(report.run_id)) == 12
+    assert len(calls) == 14
+
+
+def test_a_timed_out_scorer_call_is_asked_again(
+    store: Store, make_runtime: _MakeRuntime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _labelled(store, 12)
+    calls = _stall(monkeypatch, "ijob_ai.tasks.scorer.score_posting", 2)
+
+    report = _scorer(make_runtime(JurorEngines()), store, _settings(_A, _B))
+
+    assert report.status is RunStatus.COMPLETE
+    assert len(store.evals.results(report.run_id)) == 12
+    assert len(calls) == 14
+
+
+def test_a_call_that_keeps_timing_out_ends_the_run(
+    store: Store, make_runtime: _MakeRuntime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _labelled(store, 12)
+    calls = _stall(monkeypatch, "ijob_ai.tasks.judge.judge_posting", 99)
+
+    report = _judge(make_runtime(JurorEngines()), store, _settings(_A, _B))
+
+    assert report.status is RunStatus.INCOMPLETE
+    assert report.operation.stopped_by == "provider"
+    assert len(calls) == 3
+
+
+def test_another_provider_failure_is_not_asked_again(
+    store: Store, make_runtime: _MakeRuntime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _labelled(store, 12)
+    calls = _stall(
+        monkeypatch, "ijob_ai.tasks.judge.judge_posting", 99, timed_out=False
+    )
+
+    report = _judge(make_runtime(JurorEngines()), store, _settings(_A, _B))
+
+    assert report.status is RunStatus.INCOMPLETE
+    assert len(calls) == 1
 
 
 def test_program_sets_the_run_version(store: Store, make_runtime: _MakeRuntime) -> None:

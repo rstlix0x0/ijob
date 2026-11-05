@@ -170,6 +170,20 @@ def test_result_shows_the_pair_cut_short_by_ctrl_c_as_interrupted() -> None:
     assert lines[1].endswith("not run")
 
 
+def test_result_says_why_a_failed_pair_did_not_finish() -> None:
+    offer = _offer((_BASE,))
+    judge, _ = offer.plan.pairs
+    outcome = PairOutcome(
+        judge, 3, RunStatus.INCOMPLETE, reason="timed out after 120 s"
+    )
+    report = screen_report(offer.plan, [outcome], None)
+
+    drawn = " ".join(_draw(screen_result_panel(report)).split())
+
+    assert "judge claude-sdk/base: timed out after 120 s" in drawn
+    assert "Stopped" not in drawn
+
+
 def test_result_lists_a_line_per_pair() -> None:
     offer = _offer((_BASE,))
     judge, scorer = offer.plan.pairs

@@ -156,6 +156,15 @@ def screen_result_lines(report: ScreenReport) -> list[str]:
     return lines
 
 
+def screen_failure_lines(report: ScreenReport) -> list[str]:
+    """Write why each pair a provider failure ended did not finish."""
+    return [
+        f"{each.pair.task.value} {each.pair.model}: {each.reason}"
+        for each in report.outcomes
+        if each.reason is not None
+    ]
+
+
 def screen_result_panel(report: ScreenReport) -> Panel:
     """Draw what a screen did: a row per pair, and why it stopped if it did."""
     outcomes = {each.pair: each for each in report.outcomes}
@@ -174,6 +183,9 @@ def screen_result_panel(report: ScreenReport) -> Panel:
             Text(state, style=TEXT if state == "complete" else AMBER),
         )
     parts: list[RenderableType] = [table]
+    reasons = screen_failure_lines(report)
+    if reasons:
+        parts += [Text(""), *(Text(clean(line), style=AMBER) for line in reasons)]
     if report.stopped is not None:
         parts += [Text(""), Text(f"Stopped: {clean(report.stopped)}", style=AMBER)]
     return boxed("Screen result", Group(*parts), accent=True)

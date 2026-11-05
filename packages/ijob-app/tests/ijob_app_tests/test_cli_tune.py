@@ -450,7 +450,7 @@ def test_screen_stops_on_provider_unavailable(
     assert "scorer claude-sdk/base not run" in result.stdout
 
 
-def test_screen_stops_on_provider_failure(
+def test_screen_goes_on_after_a_provider_failure(
     tmp_path: Path, client_factory_for: ClientFactoryBuilder
 ) -> None:
     world = _tune_world(tmp_path, client_factory_for)
@@ -461,9 +461,13 @@ def test_screen_stops_on_provider_failure(
     result = _screen(world, "--yes")
 
     assert result.exit_code == 1
-    assert "boom" in result.stderr
-    assert world.runs() == 1
-    assert world.engines.engine("base").calls.count("scorer") == 0
+    assert f"note: judge {_BASE}: boom" in result.stderr
+    assert f"note: scorer {_BASE}: boom" in result.stderr
+    assert "stopped" not in result.stderr
+    assert world.runs() == 2
+    assert world.engines.engine("base").calls.count("scorer") == 1
+    assert f"judge {_BASE} run 1 incomplete" in result.stdout
+    assert f"scorer {_BASE} run 2 incomplete" in result.stdout
 
 
 def test_screen_stops_when_a_cost_is_unknown(
