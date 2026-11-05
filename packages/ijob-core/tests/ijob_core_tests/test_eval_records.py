@@ -413,6 +413,28 @@ def test_pools_use_the_newest_verdict(tmp_path: Path) -> None:
     )
 
 
+def test_pools_read_the_newest_verdict_of_any_version(tmp_path: Path) -> None:
+    with _store_with_postings(tmp_path, count=2) as store:
+        for posting_id, version, keep, at in (
+            (1, "judge-1", True, _T1),
+            (2, "judge-1", True, _T1),
+            (2, "judge-2", False, _T2),
+        ):
+            store.put_verdict(
+                PostingId(posting_id),
+                "in",
+                "rules",
+                "m",
+                version,
+                Verdict(keep=keep, reason="r", rule=None if keep else 1),
+                made_at=at,
+            )
+
+        pools = store.evals.pools("rules")
+
+    assert pools == Pools(kept=(PostingId(1),), rejected=(PostingId(2),), unjudged=())
+
+
 def test_pool_tie_goes_to_kept(tmp_path: Path) -> None:
     with _store_with_postings(tmp_path, count=1) as store:
         _put_verdict(store, 1, keep=False, at=_T1, model="a")

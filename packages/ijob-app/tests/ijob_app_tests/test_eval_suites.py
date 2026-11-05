@@ -726,7 +726,7 @@ def test_suite_run_row_keeps_spend_on_cancel(
     assert json.loads(run.metrics)["cases"] >= 2
 
 
-def test_hostile_records_both_task_versions(
+def test_hostile_run_version_holds_both_tasks(
     store: Store, make_runtime: _MakeRuntime
 ) -> None:
     runtime = make_runtime(JurorEngines())
@@ -736,7 +736,7 @@ def test_hostile_records_both_task_versions(
     run = store.evals.run(report.run_id)
     assert run is not None
     assert run.suite == "hostile"
-    assert run.task_version == "judge-1+scorer-1"
+    assert run.task_version == "judge-2+scorer-1"
     assert run.task_version == f"{JUDGE_VERSION}+{SCORER_VERSION}"
     assert run.set_id is None
     assert run.limited is False
@@ -1062,7 +1062,7 @@ def test_reasons_grades_and_stores(store: Store, make_runtime: _MakeRuntime) -> 
     assert run is not None
     assert run.suite == "reasons"
     assert run.model == str(_UNDER_TEST)
-    assert run.task_version == "judge-1+scorer-1"
+    assert run.task_version == "judge-2+scorer-1"
     assert run.set_id == eval_set.id
     assert run.limited is True
     assert report.metrics["mean_score"] == pytest.approx(0.7)

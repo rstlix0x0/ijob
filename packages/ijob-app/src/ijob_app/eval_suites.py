@@ -522,11 +522,6 @@ def prepare_suite(  # noqa: PLR0913  # the plan's inputs, one each
     )
 
 
-def _numbered(rules: Sequence[str]) -> str:
-    """Write rules as numbered lines from 1."""
-    return "\n".join(f"{number}. {rule}" for number, rule in enumerate(rules, 1))
-
-
 def _reason_text(task: EvalTask, answer: str) -> str | None:
     """Read the reason out of a stored answer, or `None` when it holds none."""
     stored = json.loads(answer)
@@ -666,10 +661,10 @@ def prepare_reasons(
 
 def _reason_input(task: EvalTask, context: _Context, posting: Posting) -> str:
     """Write the grader's input: the rules or profile, then the posting block."""
-    from ijob_ai.tasks.text import posting_block  # noqa: PLC0415
+    from ijob_ai.tasks.text import numbered_rules, posting_block  # noqa: PLC0415
 
     head = (
-        _numbered(context.instructions.rules)
+        numbered_rules(context.instructions.rules)
         if task is EvalTask.JUDGE
         else context.profile.to_json()
     )

@@ -1,7 +1,7 @@
 """The judge task: decide whether the seeker's rules keep a posting.
 
-The rules are the seeker's own and go in the instruction position; the posting
-is third-party text and goes only in the input field.
+The rules are the seeker's own and the posting is third-party text; each goes in
+its own input field and the instruction text holds neither.
 """
 
 from collections.abc import Sequence
@@ -17,14 +17,7 @@ from ijob_ai.llm.reference import Provider
 from ijob_ai.llm.settings import Task
 from ijob_ai.tasks.outputs import VerdictOut
 from ijob_ai.tasks.signatures import JUDGE_VERSION, JudgeSig
-from ijob_ai.tasks.text import posting_block, sanitize
-
-
-def _instructions(rules: Sequence[str]) -> str:
-    """Return the signature's instruction text followed by the numbered rules."""
-    base = str(JudgeSig.instructions)
-    numbered = "\n".join(f"{number}. {rule}" for number, rule in enumerate(rules, 1))
-    return f"{base}\n\nRules:\n{numbered}" if numbered else base
+from ijob_ai.tasks.text import numbered_rules, posting_block, sanitize
 
 
 def _verdict(answer: VerdictOut, rule_count: int) -> Verdict:
@@ -52,9 +45,9 @@ async def judge_posting(  # noqa: PLR0913  # the call's whole contract, one argu
 ) -> Verdict:
     """Judge whether a posting passes the seeker's rules.
 
-    The rules, numbered from 1, follow the signature's instruction text; the
-    posting block is the only input. The caller checks `Budget.try_start`
-    first.
+    The rules, numbered from 1, are the `rules` input and the posting block is
+    the `posting` input; the instruction text holds neither. The caller checks
+    `Budget.try_start` first.
 
     Args:
         posting: The posting to judge.
@@ -73,11 +66,11 @@ async def judge_posting(  # noqa: PLR0913  # the call's whole contract, one argu
             or has no reason once cleaned.
         LlmError: Any error `run_call` raises.
     """
-    predict = dspy.Predict(JudgeSig.with_instructions(_instructions(rules)))
+    predict = dspy.Predict(JudgeSig)
     prediction = await run_call(
         predict,
         lm,
-        inputs={"posting": posting_block(posting)},
+        inputs={"rules": numbered_rules(rules), "posting": posting_block(posting)},
         provider=provider,
         budget=budget,
         timeout_s=timeout_s,

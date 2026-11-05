@@ -1,7 +1,8 @@
 """What `ijob eval report` shows, read from the stored runs, labels and votes.
 
 `comparable_runs` picks the runs that may stand beside each other (the same suite,
-label set and task version, `complete` and not limited) and counts the rest.
+label set, task version and, for a labelled suite, case count, `complete` and not
+limited) and counts the rest.
 `jury_metrics` measures the jury from its votes and labels. `build_report` joins
 them, with the total OpenRouter spend, into an `EvalReport`; `run_detail` reads one
 run whatever its status. Nothing here calls a model or draws anything.
@@ -227,8 +228,10 @@ def comparable_runs(
     """Pick the runs of a suite that may be compared.
 
     Comparable means the same suite, label set and task version, status
-    `complete`, and not limited. The version is the newest such run's. A suite
-    without labels compares by suite and task version, whatever `set_id` is.
+    `complete`, and not limited. The version is the newest such run's. A labelled
+    suite also needs the stored `cases` metric of the newest run, so runs over a
+    larger or smaller set stand apart. A suite without labels compares by suite
+    and task version, whatever `set_id` is and however many cases it ran.
 
     Args:
         runs: Every run, oldest first.
@@ -250,6 +253,9 @@ def comparable_runs(
         )
     version = whole[-1].task_version
     same = tuple(run for run in whole if run.task_version == version)
+    if labelled:
+        size = run_metrics(same[-1]).get("cases")
+        same = tuple(run for run in same if run_metrics(run).get("cases") == size)
     return Comparison(
         suite,
         version,

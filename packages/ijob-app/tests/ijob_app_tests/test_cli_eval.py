@@ -372,6 +372,132 @@ def test_label_limit_out_of_range_exits_2(world: _World, limit: str) -> None:
     assert world.calls() == 0
 
 
+@pytest.mark.parametrize("count", ["0", "101"])
+def test_cli_add_range(world: _World, count: str) -> None:
+    result = world.run("--add", count, "--yes")
+
+    assert result.exit_code == 2
+    assert world.calls() == 0
+
+
+def test_cli_add_with_limit_exits_2(world: _World) -> None:
+    result = world.run("--add", "5", "--limit", "5", "--yes")
+
+    assert result.exit_code == 2
+    assert "limit" in result.stderr
+    assert world.calls() == 0
+
+
+def _more_postings(world: _World, count: int) -> None:
+    """Record `count` postings beyond the 30 the world starts with."""
+    with Store.open(world.home.db) as store:
+        store.record(
+            [
+                SightingDraft(
+                    source=_SOURCE,
+                    external_id=ExternalId(str(number)),
+                    title=f"Engineer {number}",
+                    company="Acme",
+                    location="Remote",
+                    url=f"https://example.com/jobs/{number}",
+                    posted_at=None,
+                    raw="{}",
+                    description=f"Build things {number}",
+                )
+                for number in range(30, 30 + count)
+            ],
+            seen_at=_AT,
+        )
+
+
+def _case_count(world: _World) -> int:
+    with Store.open(world.home.db) as store:
+        return sum(len(store.evals.cases(each.id)) for each in store.evals.sets())
+
+
+def _labelled_world(
+    tmp_path: Path,
+    client_factory_for: ClientFactoryBuilder,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    total_cost: float | None = None,
+) -> _World:
+    """Return a world whose 30-case set is fully voted and that has 20 more postings."""
+    world = _World(
+        tmp_path, client_factory_for, jury=(_A, _ROUTED), total_cost=total_cost
+    )
+    _routed(monkeypatch, 30)
+    first = world.run("--yes")
+    assert first.exit_code == 0, first.output
+    _more_postings(world, 20)
+    assert _case_count(world) == 30
+    return world
+
+
+def test_cli_declined_add_leaves_the_set_alone(
+    tmp_path: Path,
+    client_factory_for: ClientFactoryBuilder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _labelled_world(tmp_path, client_factory_for, monkeypatch)
+    calls = world.calls()
+
+    declined = world.run("--add", "5", interactive=True, stdin="n\n")
+    unattended = world.run("--add", "5")
+
+    assert declined.exit_code == 1
+    assert "Start the jury? [y/N]" in declined.stderr
+    assert unattended.exit_code == 1
+    assert "confirmation needed; pass --yes" in unattended.stderr
+    assert _case_count(world) == 30
+    assert world.calls() == calls
+    _routed(monkeypatch, 2)
+    later = world.run("--add", "2", "--yes")
+    assert later.exit_code == 0, later.output
+    assert _case_count(world) == 32
+
+
+def test_cli_budget_refused_add_leaves_the_set_alone(
+    tmp_path: Path,
+    client_factory_for: ClientFactoryBuilder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _labelled_world(tmp_path, client_factory_for, monkeypatch, total_cost=4.0)
+    with Store.open(world.home.db) as store:
+        spent = store.evals.start_run("judge", "m", "judge-1", None, started_at=_AT)
+        store.evals.record_spend(spent.id, spent_usd=0.5, subscription_usd=0)
+
+    result = world.run("--add", "5", "--yes")
+
+    assert result.exit_code == 1
+    assert "eval.total_cost_usd" in result.stderr
+    assert _case_count(world) == 30
+
+
+def test_cli_accepted_add_stores_the_cases_and_asks_for_the_new_votes(
+    tmp_path: Path,
+    client_factory_for: ClientFactoryBuilder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world = _labelled_world(tmp_path, client_factory_for, monkeypatch)
+    _routed(monkeypatch, 5)
+
+    result = world.run("--add", "5", "--yes")
+
+    assert result.exit_code == 0, result.output
+    assert _case_count(world) == 35
+    assert re.search(r"^requested +20$", result.stdout, re.MULTILINE)
+    assert re.search(r"^added +5 postings to the set$", result.stderr, re.MULTILINE)
+
+
+def test_cli_add_without_a_set_points_at_plain_label(world: _World) -> None:
+    result = world.run("--add", "5", "--yes")
+
+    assert result.exit_code == 1
+    assert "ijob eval label" in result.stderr
+    assert world.calls() == 0
+
+
 def test_label_absent_jury_exits_2(
     tmp_path: Path, client_factory_for: ClientFactoryBuilder
 ) -> None:
@@ -569,7 +695,7 @@ def test_label_help_lists_its_flags(world: _World) -> None:
     )
 
     assert result.exit_code == 0
-    for flag in ("--limit", "--yes", "--db", "--config"):
+    for flag in ("--limit", "--add", "--yes", "--db", "--config"):
         # Typer forces styled help under GITHUB_ACTIONS, which splits a flag's text.
         assert flag in _ANSI.sub("", result.stdout)
 

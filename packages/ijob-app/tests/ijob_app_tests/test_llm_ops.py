@@ -24,6 +24,7 @@ from ijob_ai.llm.budget import Budget
 from ijob_ai.llm.call import run_call
 from ijob_ai.llm.reference import ModelRef, Provider
 from ijob_ai.llm.settings import Task
+from ijob_ai.tasks.text import input_sha256, posting_block
 from ijob_ai.tracing.setup import current_operation_trace
 from ijob_app.config import FilterFlags, FilterLayers, read_filter_layers
 from ijob_app.home import IjobHome
@@ -58,6 +59,7 @@ from ijob_core.model import (
     Score,
     SightingDraft,
     StoredCv,
+    Verdict,
     parse_source_ref,
 )
 from ijob_core.store import Store
@@ -1151,6 +1153,32 @@ def test_judge_changed_input_rejudges_only_that_posting(
         int(postings[1].id): JudgeStatus.JUDGED,
         int(postings[2].id): JudgeStatus.CACHED,
     }
+
+
+def test_a_judge_1_verdict_is_judged_again(
+    make_runtime: _MakeRuntime, store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engines = _keeping()
+    runtime = make_runtime(engines=engines)
+    postings = _seed(store, ["one", "two"])
+    rules = _rules()
+    ref = str(runtime.settings.model_for(Task.JUDGE))
+    with monkeypatch.context() as earlier:
+        earlier.setattr("ijob_ai.tasks.signatures.JUDGE_VERSION", "judge-1")
+        _judge(runtime, store, postings, rules)
+    assert len(engines.engine.requests) == 2
+
+    items, report = _judge(runtime, store, postings, rules)
+
+    assert len(engines.engine.requests) == 4
+    assert {item.status for item in items} == {JudgeStatus.JUDGED}
+    assert report.cached == 0
+    for posting in postings:
+        digest = input_sha256(posting_block(posting))
+        for version in ("judge-1", "judge-2"):
+            assert store.verdict(
+                posting.id, digest, rules.rules_sha256, ref, version
+            ) == Verdict(keep=True, reason="fits", rule=None)
 
 
 def test_judge_changed_rules_rejudge_everything(

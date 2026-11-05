@@ -1625,23 +1625,32 @@ class Service:
         self._keep_report(report.report)
         return report
 
-    async def eval_prepare(self, *, limit: int | None = None) -> LabelOffer:
+    async def eval_prepare(
+        self, *, limit: int | None = None, add: int | None = None
+    ) -> LabelOffer:
         """Find or draw the label set and estimate what its missing votes cost.
 
-        Prices are read from OpenRouter's public model list, and only when a
-        juror with votes to cast is on OpenRouter. No model is called.
+        With `add`, the offer is for the votes of that many more postings; they
+        join the set only when `eval_label` starts the run. Prices are read from
+        OpenRouter's public model list, and only when a juror with votes to cast
+        is on OpenRouter. No model is called.
 
         Args:
             limit: Cover only this many postings, from 1 to 100; all when `None`.
+            add: Add this many postings to the current set, from 1 to 100; none
+                when `None`. It cannot be combined with `limit`.
 
         Returns:
             The offer, whose plan lists the votes still missing.
 
         Raises:
             InvalidValueError: The config file is unusable, no jury is set,
-                `limit` is out of range, or the price list lacks a juror.
-            EvalNeedsError: No rules or no current CV profile is stored.
-            TooFewCasesError: The pools hold too few postings for a new set.
+                `limit` or `add` is out of range, both are given, or the price
+                list lacks a juror.
+            EvalNeedsError: No rules or no current CV profile is stored; or, with
+                `add`, no set exists or its cases still lack votes.
+            TooFewCasesError: The pools hold too few postings for a new set, or
+                none is left to add.
             EvalBudgetSpentError: The recorded eval spending has used up
                 `eval.total_cost_usd`.
             sqlite3.Error: The store cannot be read or written.
@@ -1660,7 +1669,9 @@ class Service:
         from ijob_app.llm_config import read_eval_settings  # noqa: PLC0415
 
         settings = read_eval_settings(self._llm.config_path)
-        plan = prepare_label_run(self._store, settings, limit=limit, now=self._now)
+        plan = prepare_label_run(
+            self._store, settings, limit=limit, add=add, now=self._now
+        )
         cap = EvalSpend(self._store.evals, settings).cap
         calls = planned_calls(plan.items)
         prices = None
@@ -1683,6 +1694,8 @@ class Service:
         on_progress: Callable[[LabelProgress], None] | None = None,
     ) -> "LabelReport":
         """Request the votes of an offer and derive the labels they give.
+
+        The postings an add drew are stored in the set as the run starts.
 
         Args:
             offer: What `eval_prepare` returned.

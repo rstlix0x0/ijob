@@ -9,12 +9,15 @@ from ijob_core.eval_rules import (
     ReviewReason,
     Split,
     SpotCandidate,
+    add_split,
     draw_cases,
+    draw_more,
     judge_label,
     limit_split,
     rejection_rule,
     score_label,
     spot_order,
+    spot_per_task,
 )
 from ijob_core.model import PostingId
 
@@ -284,7 +287,7 @@ def _candidates(judge: int, scorer: int) -> list[SpotCandidate]:
 
 
 def test_spot_order_prefers_five_per_task() -> None:
-    order = spot_order("seed", _candidates(30, 30))
+    order = spot_order("seed", _candidates(30, 30), 5)
 
     assert len(order) == 10
     assert [c.task for c in order].count(EvalTask.JUDGE) == 5
@@ -292,7 +295,7 @@ def test_spot_order_prefers_five_per_task() -> None:
 
 
 def test_spot_order_fills_from_the_other_task_when_one_is_short() -> None:
-    order = spot_order("seed", _candidates(2, 30))
+    order = spot_order("seed", _candidates(2, 30), 5)
 
     assert len(order) == 10
     assert [c.task for c in order].count(EvalTask.JUDGE) == 2
@@ -300,13 +303,14 @@ def test_spot_order_fills_from_the_other_task_when_one_is_short() -> None:
 
 
 def test_spot_order_offers_fewer_than_ten_when_fewer_exist() -> None:
-    assert len(spot_order("seed", _candidates(3, 4))) == 7
+    assert len(spot_order("seed", _candidates(3, 4), 5)) == 7
 
 
 def test_spot_order_counts_labels_already_checked() -> None:
     order = spot_order(
         "seed",
         _candidates(30, 30),
+        5,
         checked=[EvalTask.JUDGE] * 5 + [EvalTask.SCORER] * 2,
     )
 
@@ -315,11 +319,15 @@ def test_spot_order_counts_labels_already_checked() -> None:
 
 
 def test_spot_order_is_empty_once_ten_are_checked() -> None:
-    assert spot_order("seed", _candidates(30, 30), checked=[EvalTask.JUDGE] * 10) == []
+    assert (
+        spot_order("seed", _candidates(30, 30), 5, checked=[EvalTask.JUDGE] * 10) == []
+    )
 
 
 def test_spot_order_depends_on_the_seed() -> None:
-    assert spot_order("a", _candidates(30, 30)) != spot_order("b", _candidates(30, 30))
+    assert spot_order("a", _candidates(30, 30), 5) != spot_order(
+        "b", _candidates(30, 30), 5
+    )
 
 
 def test_spot_order_holds_as_labels_grow() -> None:
@@ -330,8 +338,8 @@ def test_spot_order_holds_as_labels_grow() -> None:
         for task in (EvalTask.JUDGE, EvalTask.SCORER)
     ]
 
-    before = spot_order("seed", small, checked=[])
-    after = spot_order("seed", grown, checked=[])
+    before = spot_order("seed", small, 5, checked=[])
+    after = spot_order("seed", grown, 5, checked=[])
 
     both = [c for c in before if c in after]
     assert both == [c for c in after if c in before]
@@ -340,10 +348,64 @@ def test_spot_order_holds_as_labels_grow() -> None:
 
 def test_spot_order_resumes_after_a_quit() -> None:
     candidates = _candidates(30, 30)
-    first = spot_order("seed", candidates)
+    first = spot_order("seed", candidates, 5)
 
     answered = first[:3]
     rest = [c for c in candidates if c not in answered]
-    resumed = spot_order("seed", rest, checked=[c.task for c in answered])
+    resumed = spot_order("seed", rest, 5, checked=[c.task for c in answered])
 
     assert resumed == first[3:]
+
+
+@pytest.mark.parametrize(
+    ("n", "available", "expected"),
+    [
+        (100, (118, 515, 28404), (80, 10, 10)),
+        (5, (118, 515, 28404), (4, 1, 0)),
+        (2, (118, 515, 28404), (2, 0, 0)),
+        (1, (118, 515, 28404), (1, 0, 0)),
+        (100, (30, 50, 500), (30, 10, 60)),
+        (100, (30, 50, 5), (30, 50, 5)),
+    ],
+)
+def test_add_split_rows(
+    n: int, available: tuple[int, int, int], expected: tuple[int, int, int]
+) -> None:
+    assert add_split(n, Split(*available)) == Split(*expected)
+
+
+@pytest.mark.parametrize("n", [0, 101])
+def test_add_split_range(n: int) -> None:
+    with pytest.raises(InvalidValueError, match="1 to 100"):
+        add_split(n, Split(100, 100, 100))
+
+
+def test_draw_more_is_seeded() -> None:
+    pools = _pools(200, 200, 200)
+
+    first = draw_more("rules", "profile", 100, pools, 50)
+
+    assert draw_more("rules", "profile", 100, pools, 50) == first
+    assert draw_more("rules", "profile", 150, pools, 50) != first
+    assert _counts(first) == (40, 5, 5)
+    assert len({posting_id for posting_id, _ in first}) == 50
+
+
+@pytest.mark.parametrize(
+    ("cases", "expected"), [(100, 5), (119, 5), (120, 6), (200, 10)]
+)
+def test_spot_per_task_counts(cases: int, expected: int) -> None:
+    assert spot_per_task(cases) == expected
+
+
+def test_spot_order_takes_more_for_a_larger_set() -> None:
+    order = spot_order(
+        "seed",
+        _candidates(30, 30),
+        10,
+        checked=[EvalTask.JUDGE] * 5 + [EvalTask.SCORER] * 5,
+    )
+
+    assert len(order) == 10
+    assert [c.task for c in order].count(EvalTask.JUDGE) == 5
+    assert [c.task for c in order].count(EvalTask.SCORER) == 5

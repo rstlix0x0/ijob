@@ -7,6 +7,7 @@ cache.
 
 import hashlib
 import re
+from collections.abc import Sequence
 from typing import Final
 
 from ijob_core.model import Posting
@@ -49,6 +50,19 @@ def truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + _TRUNCATED
+
+
+def numbered_rules(rules: Sequence[str]) -> str:
+    """Write rules as numbered lines.
+
+    Args:
+        rules: The seeker's rules, in the order they are numbered.
+
+    Returns:
+        One `N. rule` line each, numbered from 1 and joined by newlines; empty
+        when there are no rules.
+    """
+    return "\n".join(f"{number}. {rule}" for number, rule in enumerate(rules, 1))
 
 
 def posting_block(posting: Posting) -> str:

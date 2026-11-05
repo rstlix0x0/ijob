@@ -3,7 +3,13 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from ijob_ai.tasks.text import input_sha256, posting_block, sanitize, truncate
+from ijob_ai.tasks.text import (
+    input_sha256,
+    numbered_rules,
+    posting_block,
+    sanitize,
+    truncate,
+)
 from ijob_core.countries import CountryCode
 from ijob_core.model import Posting, PostingId, RemoteScope
 from ijob_core.money import Money, Period
@@ -108,3 +114,11 @@ def test_input_hash_changes_with_metadata() -> None:
     assert input_sha256(posting_block(other_bound)) != base
     assert input_sha256(posting_block(replace(_posting(), company="Beta"))) != base
     assert input_sha256(posting_block(_posting())) == base
+
+
+def test_numbered_rules() -> None:
+    assert numbered_rules(["first", "second"]) == "1. first\n2. second"
+
+
+def test_numbered_rules_of_none_is_empty() -> None:
+    assert numbered_rules([]) == ""

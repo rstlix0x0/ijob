@@ -11,6 +11,7 @@ from ijob_ai.llm.settings import EvalSettings
 from ijob_app.eval_ops import (
     EvalNeedsError,
     LabelChange,
+    LabelPlan,
     LabelReport,
     ReviewItem,
     TaskTally,
@@ -21,7 +22,7 @@ from ijob_app.eval_ops import (
     record_review,
     review_items,
 )
-from ijob_app.eval_spend import EvalSpend
+from ijob_app.eval_spend import EvalBudgetSpentError, EvalSpend
 from ijob_app.home import IjobHome
 from ijob_app.llm_ops import ItemOutcome, ItemStatus, LlmOptions, LlmRuntime
 from ijob_core.errors import InvalidValueError
@@ -348,7 +349,7 @@ def test_run_records_a_jury_row(store: Store, make_runtime: _MakeRuntime) -> Non
     assert run.suite == "jury"
     assert run.status is RunStatus.COMPLETE
     assert run.limited
-    assert run.task_version == "judge-1+scorer-1"
+    assert run.task_version == "judge-2+scorer-1"
     assert run.set_id is not None
     assert run.finished_at is not None
     metrics = json.loads(run.metrics)
@@ -768,15 +769,17 @@ def test_jury_spend_reduces_the_next_cap(
     assert EvalSpend(store.evals, settings).cap == pytest.approx(0.6 - 2 * _ROUTED_COST)
 
 
-def test_later_task_version_leaves_votes_standing(
+def test_votes_keep_their_own_version(
     store: Store, make_runtime: _MakeRuntime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _ready(store)
     runtime = make_runtime(JurorEngines())
     settings = _settings(_A, _B)
-    first = _label(runtime, store, settings, limit=10)
+    with monkeypatch.context() as earlier:
+        earlier.setattr("ijob_ai.tasks.signatures.JUDGE_VERSION", "judge-1")
+        first = _label(runtime, store, settings, limit=10)
     labels = store.evals.labels(first.set_id)
-    monkeypatch.setattr("ijob_ai.tasks.signatures.JUDGE_VERSION", "judge-2")
+    old_votes = store.evals.votes(first.set_id)
 
     second = _label(runtime, store, settings, limit=20)
 
@@ -785,6 +788,7 @@ def test_later_task_version_leaves_votes_standing(
     assert second.requested == 10 * 2 * 2
     assert versions == {"judge-1", "judge-2"}
     assert sum(vote.task_version == "judge-2" for vote in votes) == 20
+    assert set(old_votes) <= set(votes)
     assert set(labels) <= set(store.evals.labels(first.set_id))
     run = store.evals.run(second.run_id)
     assert run is not None
@@ -1124,3 +1128,197 @@ def test_record_review_refuses_an_answer_of_the_wrong_task(store: Store) -> None
         record_review(store, item, now=_now)
 
     assert store.evals.labels(eval_set.id) == []
+
+
+def _voted_pair(store: Store, count: int) -> tuple[EvalSet, list[PostingId]]:
+    """Draw the set of `count` postings for two jurors and vote on all its cases."""
+    _ready(store, count)
+    plan = prepare_label_run(store, _settings(_A, _B), now=_now)
+    ids = [case.posting_id for case in store.evals.cases(plan.eval_set.id)]
+    _agree(store, plan.eval_set, ids)
+    _agree(store, plan.eval_set, ids, judge=False)
+    return plan.eval_set, ids
+
+
+def _add(store: Store, count: int) -> LabelPlan:
+    """Plan an add and store its cases, as a run does when it starts."""
+    plan = _plan_add(store, count)
+    store.evals.put_cases(plan.eval_set.id, plan.pending)
+    return plan
+
+
+def _plan_add(store: Store, count: int) -> LabelPlan:
+    """Plan an add and stop there, as a run that is declined or refused does."""
+    return prepare_label_run(store, _settings(_A, _B), add=count, now=_now)
+
+
+def test_declined_add_leaves_the_set_alone(store: Store) -> None:
+    eval_set, _ = _voted_pair(store, 150)
+
+    plan = _plan_add(store, 15)
+    later = _plan_add(store, 2)
+
+    assert (plan.added, plan.cases, len(plan.items)) == (15, 115, 15 * 2 * 2)
+    assert len(store.evals.cases(eval_set.id)) == 100
+    assert (later.added, later.cases) == (2, 102)
+
+
+def test_budget_refused_add_leaves_the_set_alone(store: Store) -> None:
+    eval_set, _ = _voted_pair(store, 150)
+    _plan_add(store, 15)
+    spent = store.evals.start_run("judge", "m", "judge-1", None, started_at=_AT)
+    store.evals.record_spend(spent.id, spent_usd=10, subscription_usd=0)
+
+    with pytest.raises(EvalBudgetSpentError):
+        EvalSpend(store.evals, _settings(_A, _B))
+
+    later = _plan_add(store, 2)
+    assert len(store.evals.cases(eval_set.id)) == 100
+    assert later.added == 2
+
+
+def test_accepted_add_stores_the_cases_and_asks_for_the_new_votes(
+    store: Store, make_runtime: _MakeRuntime
+) -> None:
+    eval_set, _ = _voted_pair(store, 150)
+    engines = JurorEngines()
+    runtime = make_runtime(engines)
+    settings = _settings(_A, _B)
+    plan = _plan_add(store, 5)
+    spend = EvalSpend(store.evals, settings)
+
+    report = asyncio.run(label_operation(runtime, store, plan, spend, now=_now))
+
+    cases = store.evals.cases(eval_set.id)
+    assert [case.position for case in cases[100:]] == [100, 101, 102, 103, 104]
+    assert report.requested == 5 * 2 * 2
+    assert report.stored == 5 * 2 * 2
+    assert engines.engine("juror-a").calls.count("judge") == 5
+    assert engines.engine("juror-b").calls.count("scorer") == 5
+
+
+def test_add_appends_after_the_last_position(store: Store) -> None:
+    eval_set, _ = _voted_pair(store, 110)
+    before = store.evals.cases(eval_set.id)
+
+    plan = _add(store, 5)
+
+    after = store.evals.cases(eval_set.id)
+    assert plan.eval_set == eval_set
+    assert plan.added == 5
+    assert plan.cases == 105
+    assert after[:100] == before
+    assert [case.position for case in after[100:]] == [100, 101, 102, 103, 104]
+
+
+def test_add_asks_only_for_the_new_votes(store: Store) -> None:
+    eval_set, _ = _voted_pair(store, 110)
+
+    plan = _add(store, 5)
+
+    new = {case.posting_id for case in store.evals.cases(eval_set.id)[100:]}
+    assert len(plan.items) == 5 * 2 * 2
+    assert {item.posting.id for item in plan.items} == new
+
+
+def test_add_excludes_existing_cases(store: Store) -> None:
+    eval_set, ids = _voted_pair(store, 150)
+
+    _add(store, 40)
+
+    new = [case.posting_id for case in store.evals.cases(eval_set.id)[100:]]
+    assert len(new) == 40
+    assert set(new).isdisjoint(ids)
+    assert len(set(new)) == 40
+
+
+def test_add_can_repeat(store: Store) -> None:
+    eval_set, _ = _voted_pair(store, 150)
+    _add(store, 10)
+    first = [case.posting_id for case in store.evals.cases(eval_set.id)[100:]]
+    _agree(store, eval_set, first)
+    _agree(store, eval_set, first, judge=False)
+
+    plan = _add(store, 10)
+
+    everything = [case.posting_id for case in store.evals.cases(eval_set.id)]
+    assert plan.added == 10
+    assert len(everything) == 120
+    assert len(set(everything)) == 120
+
+
+def test_add_is_refused_while_votes_are_missing(store: Store) -> None:
+    eval_set, _ = _voted_pair(store, 150)
+    _add(store, 10)
+
+    with pytest.raises(EvalNeedsError, match=r"run `ijob eval label`"):
+        _add(store, 10)
+
+    assert len(store.evals.cases(eval_set.id)) == 110
+
+
+def test_add_ignores_a_case_whose_posting_changed(store: Store) -> None:
+    eval_set, ids = _voted_pair(store, 110)
+    store.set_description(ids[0], "rewritten after the draw")
+    assert store.evals.cases(eval_set.id)[0].posting_id == ids[0]
+
+    plan = _add(store, 5)
+
+    assert plan.added == 5
+    assert plan.skipped == 1
+    assert len(plan.items) == 5 * 2 * 2
+
+
+def test_add_with_limit_is_refused(store: Store) -> None:
+    _voted_pair(store, 110)
+
+    with pytest.raises(InvalidValueError, match="limit"):
+        prepare_label_run(store, _settings(_A, _B), add=5, limit=5, now=_now)
+
+
+@pytest.mark.parametrize("count", [0, 101])
+def test_add_out_of_range_is_refused(store: Store, count: int) -> None:
+    _voted_pair(store, 110)
+
+    with pytest.raises(InvalidValueError, match="1 to 100"):
+        _add(store, count)
+
+
+def test_add_without_a_set_is_refused(store: Store) -> None:
+    _ready(store, 30)
+
+    with pytest.raises(EvalNeedsError, match=r"run `ijob eval label`"):
+        _add(store, 5)
+
+    assert store.evals.sets() == []
+
+
+def test_add_with_nothing_to_draw_raises(store: Store) -> None:
+    eval_set, _ = _voted_pair(store, 100)
+
+    with pytest.raises(TooFewCasesError):
+        _add(store, 5)
+
+    assert len(store.evals.cases(eval_set.id)) == 100
+
+
+def test_short_draw_says_how_many(store: Store) -> None:
+    eval_set, _ = _voted_pair(store, 130)
+
+    plan = _add(store, 100)
+
+    assert plan.added == 30
+    assert len(store.evals.cases(eval_set.id)) == 130
+
+
+def test_spot_check_grows_with_the_set(store: Store) -> None:
+    eval_set, _ = _voted_pair(store, 120)
+    _add(store, 20)
+    new = [case.posting_id for case in store.evals.cases(eval_set.id)[100:]]
+    _agree(store, eval_set, new)
+    _agree(store, eval_set, new, judge=False)
+
+    items = review_items(store, _settings(_A, _B), now=_now).items
+
+    assert len(items) == 12
+    assert sum(i.task is EvalTask.JUDGE for i in items) == 6
