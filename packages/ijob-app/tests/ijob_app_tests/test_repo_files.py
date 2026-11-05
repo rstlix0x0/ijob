@@ -140,3 +140,21 @@ def test_readme_links_the_tuning_doc() -> None:
 
     assert match is not None
     assert (_ROOT / match.group(1)).is_file()
+
+
+def test_readme_links_the_observability_doc() -> None:
+    match = re.search(r"\]\(([^)#]*observability\.md)(#[^)]*)?\)", _text("README.md"))
+
+    assert match is not None
+    assert (_ROOT / match.group(1)).is_file()
+
+
+@pytest.mark.parametrize("name", ["show", "prune", "export"])
+def test_observability_doc_names_every_traces_command(name: str) -> None:
+    group = typer.main.get_command(app)
+    assert isinstance(group, typer.core.TyperGroup)
+    traces = group.commands["traces"]
+    assert isinstance(traces, typer.core.TyperGroup)
+
+    assert name in traces.commands
+    assert f"ijob traces {name}" in _text("docs/observability.md")

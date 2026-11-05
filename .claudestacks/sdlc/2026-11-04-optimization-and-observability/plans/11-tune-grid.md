@@ -199,3 +199,4 @@ Left open:
 - 2026-11-05: `tune_rows` leaves out a row whose metrics can't be read, such as one left `running` by a killed process.
 - 2026-11-05: test support changed outside the file list: `llm_fakes.write_llm_config(tuner=)`, `test_cli_eval._World(tuner=)`, `test_tune_ops` helpers; `test_cli_terminal.py` gained checks for the new commands.
 - 2026-11-05: MIPROv2 over 50 is left to the engine's own refusal; there is no grid-level test, because a split that size needs about 256 labelled postings.
+- 2026-11-05, found on the first real run: about 1 in 60 to 80 scorer calls on GLM and DeepSeek hung until the 120 s timeout, against a normal 6 to 7 s, and each hang ended the run and the screen. `_Asker` now tries a timed-out call 3 times, in every judge and scorer suite run, held-out tests included. `run_screen` goes on past a provider failure, showing the reason on the pair, against plan 10's rule that it ends the screen. Search and the tuning LM are unchanged.

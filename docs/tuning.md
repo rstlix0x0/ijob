@@ -35,7 +35,9 @@ spends.
 3. **`ijob tune screen`** freezes the split, then runs `judge` and `scorer` on every labelled posting
    for each model in `[tune].candidates`, the `[tune].baseline` and the configured `[models].judge`
    and `[models].scorer`. A model whose latest run is already full is skipped, so a rerun only does
-   what is missing.
+   what is missing. A call that times out is asked up to three times. A run that still loses a call
+   to its provider reads `incomplete`, with the reason, and the screen goes on to the next model. It
+   stops only for a spent ledger, an unavailable provider, an unknown cost or Ctrl-C.
 4. **`ijob tune report`** shows the `Choosing` table. You read it, pick two models and write them
    into `[tune].models`.
 5. **`ijob tune run`** tunes each model in `[tune].models` with each optimizer on each task. Then it
@@ -263,7 +265,8 @@ runs, anything on the same Mac can read, change or delete its data, which holds 
 Stop it after use with `docker compose down`.
 
 `ijob traces export` sends spans, labels, runs and scores. A rerun adds what is missing and does not
-duplicate. The endpoint is `[phoenix].endpoint`, and only a local address is accepted.
+duplicate. The endpoint is `[phoenix].endpoint`, and only a local address is accepted. See
+[observability.md](observability.md) for what is recorded and how to read it.
 
 ## Data
 

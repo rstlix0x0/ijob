@@ -64,7 +64,8 @@ those keep no split part.
   measure the judge, the scorer, the reasons they give, their resistance to injected text and the
   two agents. Committed cases hold no personal data; your labels stay in `~/.ijob`.
 - **Tracing.** Every model call emits OpenTelemetry spans with model, tokens and cost, kept in a local
-  store that `ijob traces` reads. A local Phoenix can show them in a browser.
+  store that `ijob traces` reads. A local Phoenix can show them in a browser. See
+  [`docs/observability.md`](docs/observability.md).
 - **Polite sourcing.** ijob sends its own User-Agent, follows robots.txt with longest-match
   semantics, and never bypasses anti-bot protection.
 
@@ -80,7 +81,7 @@ those keep no split part.
 4. Optimization and observability: DSPy optimizers, GEPA among them, tune the `judge` and `scorer`
    prompts of cheaper models against a frontier baseline, with `ijob tune` and a local Phoenix that
    `ijob traces export` fills with the traces, labels, eval runs and scores. See
-   [`docs/tuning.md`](docs/tuning.md).
+   [`docs/tuning.md`](docs/tuning.md) and [`docs/observability.md`](docs/observability.md).
 
 ## Workspace layout
 
