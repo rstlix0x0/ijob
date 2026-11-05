@@ -1,9 +1,9 @@
 """LLM, tracing and eval settings read from the user's config file.
 
-The `[models]`, `[llm]`, `[providers.claude-sdk]`, `[tracing]` and `[eval]`
-tables become `LlmSettings`, `TracingSettings` and `EvalSettings`. A missing
-file or table gives the defaults; an unknown key or an out-of-range value
-raises `InvalidValueError` naming the key.
+The `[models]`, `[llm]`, `[providers.claude-sdk]`, `[tracing]`, `[phoenix]` and
+`[eval]` tables become `LlmSettings`, `TracingSettings`, `PhoenixSettings` and
+`EvalSettings`. A missing file or table gives the defaults; an unknown key or an
+out-of-range value raises `InvalidValueError` naming the key.
 """
 
 import tomllib
@@ -12,7 +12,13 @@ from typing import Final
 from urllib.parse import urlsplit
 
 from ijob_ai.llm.reference import ModelRef, parse_model_ref
-from ijob_ai.llm.settings import EvalSettings, LlmSettings, Task, TracingSettings
+from ijob_ai.llm.settings import (
+    EvalSettings,
+    LlmSettings,
+    PhoenixSettings,
+    Task,
+    TracingSettings,
+)
 from ijob_core.errors import InvalidValueError
 
 type _Table = dict[str, object]
@@ -20,7 +26,8 @@ type _Table = dict[str, object]
 _LLM_KEYS: Final = frozenset({"max_cost_usd", "concurrency", "timeout_s"})
 _CLAUDE_SDK: Final = "claude-sdk"
 _CLAUDE_SDK_KEYS: Final = frozenset({"cli_path"})
-_TRACING_KEYS: Final = frozenset({"max_size_mb", "langfuse_endpoint"})
+_TRACING_KEYS: Final = frozenset({"max_size_mb"})
+_PHOENIX_KEYS: Final = frozenset({"endpoint"})
 _EVAL_KEYS: Final = frozenset({"jury", "max_cost_usd", "total_cost_usd"})
 _JURY_SIZE: Final = range(2, 6)
 _LOCAL_HOSTS: Final = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -71,7 +78,7 @@ def read_llm_settings(config_path: Path) -> LlmSettings:
 
 
 def read_tracing_settings(config_path: Path) -> TracingSettings:
-    """Read the trace store and Langfuse settings.
+    """Read the trace store settings.
 
     Args:
         config_path: The user's config file; it need not exist.
@@ -81,8 +88,7 @@ def read_tracing_settings(config_path: Path) -> TracingSettings:
 
     Raises:
         InvalidValueError: If the file cannot be read or parsed, the table
-            holds an unknown key, a value is out of range, or the Langfuse
-            endpoint is not a local `http` or `https` URL.
+            holds an unknown key, or a value is out of range.
     """
     tracing = _section(_read(config_path), "tracing")
     _only_keys(tracing, _TRACING_KEYS, "tracing")
@@ -93,8 +99,31 @@ def read_tracing_settings(config_path: Path) -> TracingSettings:
             "tracing.max_size_mb",
             _MAX_SIZE_MB,
             defaults.max_size_mb,
-        ),
-        langfuse_endpoint=_endpoint(tracing.get("langfuse_endpoint")),
+        )
+    )
+
+
+def read_phoenix_settings(config_path: Path) -> PhoenixSettings:
+    """Read where the local Phoenix instance listens.
+
+    Args:
+        config_path: The user's config file; it need not exist.
+
+    Returns:
+        The settings; an absent table or key reads as `http://127.0.0.1:6006`.
+
+    Raises:
+        InvalidValueError: If the file cannot be read or parsed, the table
+            holds an unknown key, or the endpoint is not a local `http` or
+            `https` URL.
+    """
+    phoenix = _section(_read(config_path), "phoenix")
+    _only_keys(phoenix, _PHOENIX_KEYS, "phoenix")
+    defaults = PhoenixSettings()
+    return PhoenixSettings(
+        endpoint=_endpoint(
+            phoenix.get("endpoint"), "phoenix.endpoint", defaults.endpoint
+        )
     )
 
 
@@ -233,11 +262,10 @@ def _cli_path(value: object, key: str) -> Path | None:
     return Path(value).expanduser()
 
 
-def _endpoint(value: object) -> str | None:
-    """Read `langfuse_endpoint`: a local `http` or `https` URL."""
-    key = "tracing.langfuse_endpoint"
+def _endpoint(value: object, key: str, default: str) -> str:
+    """Read an endpoint: a local `http` or `https` URL, without a trailing `/`."""
     if value is None:
-        return None
+        return default
     if not isinstance(value, str):
         raise InvalidValueError(key, f"{value!r} is not a string")
     try:

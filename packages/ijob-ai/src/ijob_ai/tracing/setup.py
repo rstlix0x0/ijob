@@ -2,15 +2,14 @@
 
 `start_tracing` builds a tracer provider for one operation and never installs
 it as the process-wide provider, so later operations and tests can each build
-their own. Every span goes to the local trace store; when a Langfuse endpoint
-and both Langfuse keys are configured, spans are also exported there.
+their own. Every span goes only to the local trace store, so a model call never
+waits on a network service.
 
 `operation_trace` marks the code of one operation. The root span of the trace
 opens on the first model call, so an operation that calls no model writes no
 trace.
 """
 
-import base64
 import logging
 import os
 from collections.abc import Iterator
@@ -20,11 +19,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-import requests
 from ijob_core.traces import TraceStore
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.sampling import ALWAYS_ON
 from opentelemetry.trace import Span, Tracer, set_span_in_context
 
@@ -32,15 +29,9 @@ from ijob_ai.llm.settings import TracingSettings
 from ijob_ai.tracing.sqlite_exporter import SqliteSpanExporter
 
 _DISABLED_VARIABLE: Final = "OTEL_SDK_DISABLED"
-_PUBLIC_KEY_VARIABLE: Final = "LANGFUSE_PUBLIC_KEY"
-_SECRET_KEY_VARIABLE: Final = "LANGFUSE_SECRET_KEY"  # noqa: S105  # a variable name
 
 _DISABLED_WARNING: Final = (
     f"warning: {_DISABLED_VARIABLE} ignored; ijob tracing cannot be turned off"
-)
-_MISSING_KEY_WARNING: Final = (
-    "warning: Langfuse export skipped; "
-    f"set {_PUBLIC_KEY_VARIABLE} and {_SECRET_KEY_VARIABLE}"
 )
 
 _EXPORT_LOGGERS: Final = (
@@ -49,8 +40,6 @@ _EXPORT_LOGGERS: Final = (
     "opentelemetry.sdk.trace.export",
 )
 
-_LANGFUSE_TRACES_PATH: Final = "/api/public/otel/v1/traces"
-_LANGFUSE_TIMEOUT_S: Final = 5
 _FLUSH_TIMEOUT_MS: Final = 5000
 _BYTES_PER_MB: Final = 2**20
 
@@ -121,10 +110,9 @@ class Tracing:
     def finish(self) -> TracingReport:
         """End the operation's tracing and release its resources.
 
-        Ends an open root span, flushes the exporters for up to five seconds,
+        Ends an open root span, flushes the local exporter for up to five seconds,
         shuts the provider down, prunes the store to its size cap and closes
-        it. A failed Langfuse export is swallowed by the exporter and never
-        raises here.
+        it.
 
         Returns:
             How many spans were dropped and how many traces were pruned.
@@ -207,12 +195,7 @@ def operation_trace(tracing: Tracing, name: str) -> Iterator[OperationTrace]:
         _CURRENT.reset(token)
 
 
-def start_tracing(
-    traces_path: Path,
-    settings: TracingSettings,
-    *,
-    session: requests.Session | None = None,
-) -> Tracing:
+def start_tracing(traces_path: Path, settings: TracingSettings) -> Tracing:
     """Build the tracing of one operation.
 
     Removes `OTEL_SDK_DISABLED` from the process environment, since ijob's
@@ -222,9 +205,7 @@ def start_tracing(
 
     Args:
         traces_path: The trace database file.
-        settings: Size cap and optional Langfuse endpoint.
-        session: HTTP session for the Langfuse export; the exporter makes its
-            own when omitted.
+        settings: The size cap of the trace store.
 
     Returns:
         The operation's tracing. Call `Tracing.finish` once when done.
@@ -240,19 +221,6 @@ def start_tracing(
     exporter = SqliteSpanExporter(store)
     provider = TracerProvider(sampler=ALWAYS_ON)
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    if settings.langfuse_endpoint is not None:
-        public_key = os.environ.get(_PUBLIC_KEY_VARIABLE)
-        secret_key = os.environ.get(_SECRET_KEY_VARIABLE)
-        if public_key and secret_key:
-            provider.add_span_processor(
-                BatchSpanProcessor(
-                    _langfuse_exporter(
-                        settings.langfuse_endpoint, public_key, secret_key, session
-                    )
-                )
-            )
-        else:
-            warnings.append(_MISSING_KEY_WARNING)
     return Tracing(
         provider=provider,
         store=store,
@@ -276,19 +244,3 @@ def _silence_export_logs() -> None:
             isinstance(handler, logging.NullHandler) for handler in logger.handlers
         ):
             logger.addHandler(logging.NullHandler())
-
-
-def _langfuse_exporter(
-    endpoint: str, public_key: str, secret_key: str, session: requests.Session | None
-) -> OTLPSpanExporter:
-    """Build the OTLP exporter that sends spans to a Langfuse endpoint."""
-    token = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode()
-    return OTLPSpanExporter(
-        endpoint=endpoint.rstrip("/") + _LANGFUSE_TRACES_PATH,
-        headers={
-            "Authorization": f"Basic {token}",
-            "x-langfuse-ingestion-version": "4",
-        },
-        timeout=_LANGFUSE_TIMEOUT_S,
-        session=session,
-    )

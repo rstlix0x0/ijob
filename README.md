@@ -45,7 +45,7 @@ uv run ijob eval report                      # the stored runs, side by side
   measure the judge, the scorer, the reasons they give, their resistance to injected text and the
   two agents. Committed cases hold no personal data; your labels stay in `~/.ijob`.
 - **Tracing.** Every model call emits OpenTelemetry spans with model, tokens and cost, kept in a local
-  store that `ijob traces` reads, with optional export to a local Langfuse.
+  store that `ijob traces` reads. A local Phoenix can show them in a browser.
 - **Polite sourcing.** ijob sends its own User-Agent, follows robots.txt with longest-match
   semantics, and never bypasses anti-bot protection.
 
@@ -59,7 +59,7 @@ uv run ijob eval report                      # the stored runs, side by side
    agent (`ijob explore`) find sources and follow custom instructions, each with a suite of its
    own.
 4. Optimization and observability: GEPA and other DSPy optimizers tuning cheap models against a
-   frontier baseline, with the runs recorded in Langfuse.
+   frontier baseline, with the runs shown in a local Phoenix.
 
 ## Workspace layout
 
@@ -87,8 +87,13 @@ uv run --locked pytest
 
 CI runs the same commands. Tests never call an LLM or the network.
 
-Tracing is optional. To run a local Langfuse stack, copy `.env.example` to `.env`, then run
-`docker compose up -d`. The web UI is at <http://localhost:3000>. ijob runs without it.
+Tracing is local and Phoenix is optional. To run a local Phoenix, run `docker compose up -d`; the
+UI is at <http://127.0.0.1:6006>. Run `docker compose down` when you are done. `.env.example` lists
+the variables ijob reads; nothing loads that file, so export them in your shell.
+
+Phoenix runs with auth off, because its port is bound to localhost only. While it runs, anything
+on the same Mac can read, change or delete its data, which holds your CV and rules, so stop it after
+use. Cost totals come from ijob, not Phoenix, whose own cost figure does not match ijob's.
 
 ## Sources policy
 

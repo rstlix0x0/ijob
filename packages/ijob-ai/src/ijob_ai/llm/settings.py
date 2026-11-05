@@ -63,17 +63,26 @@ class LlmSettings:
 
 @dataclass(frozen=True, slots=True)
 class TracingSettings:
-    """Where and how much the layer records about its calls.
+    """How much the layer keeps of what it records about its calls.
 
     Attributes:
         max_size_mb: Size at which the local trace store starts dropping the
             oldest traces, in megabytes.
-        langfuse_endpoint: Langfuse endpoint to export spans to, or None to
-            keep traces local.
     """
 
     max_size_mb: int = 256
-    langfuse_endpoint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PhoenixSettings:
+    """Where the local Phoenix instance listens.
+
+    Attributes:
+        endpoint: Base URL of the Phoenix server; always a local `http` or
+            `https` address.
+    """
+
+    endpoint: str = "http://127.0.0.1:6006"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

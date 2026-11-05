@@ -44,11 +44,14 @@
 # [providers.claude-sdk]
 # cli_path = "/usr/local/bin/claude"
 
-# The trace store is traces.db in the ijob home. A Langfuse endpoint must be on
-# this machine (localhost, 127.0.0.1 or ::1).
+# The trace store is traces.db in the ijob home.
 # [tracing]
 # max_size_mb = 256           # 16 to 10240
-# langfuse_endpoint = "http://localhost:3000"
+
+# The local Phoenix instance. Its endpoint must be on this machine (localhost,
+# 127.0.0.1 or ::1).
+# [phoenix]
+# endpoint = "http://127.0.0.1:6006"
 
 # The eval commands. The jury holds 2 to 5 different models and must stay on one
 # line. Only OpenRouter spend counts toward the two caps.

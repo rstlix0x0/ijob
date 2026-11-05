@@ -4,7 +4,13 @@ from pathlib import Path
 import pytest
 from ijob_ai.errors import MissingModelError
 from ijob_ai.llm.reference import ModelRef, Provider
-from ijob_ai.llm.settings import EvalSettings, LlmSettings, Task, TracingSettings
+from ijob_ai.llm.settings import (
+    EvalSettings,
+    LlmSettings,
+    PhoenixSettings,
+    Task,
+    TracingSettings,
+)
 
 _CONFIG = Path("/home/user/.ijob/config.toml")
 _JUDGE = ModelRef(Provider.CLAUDE_SDK, "claude-haiku-5-5")
@@ -33,7 +39,8 @@ def test_settings_defaults() -> None:
     assert settings.models == {}
     tracing = TracingSettings()
     assert tracing.max_size_mb == 256
-    assert tracing.langfuse_endpoint is None
+    assert [f.name for f in dataclasses.fields(tracing)] == ["max_size_mb"]
+    assert PhoenixSettings().endpoint == "http://127.0.0.1:6006"
 
 
 def test_model_for_returns_configured_model() -> None:

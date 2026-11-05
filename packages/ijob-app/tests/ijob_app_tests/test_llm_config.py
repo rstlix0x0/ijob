@@ -4,10 +4,17 @@ from pathlib import Path
 
 import pytest
 from ijob_ai.llm.reference import ModelRef, Provider
-from ijob_ai.llm.settings import EvalSettings, LlmSettings, Task, TracingSettings
+from ijob_ai.llm.settings import (
+    EvalSettings,
+    LlmSettings,
+    PhoenixSettings,
+    Task,
+    TracingSettings,
+)
 from ijob_app.llm_config import (
     read_eval_settings,
     read_llm_settings,
+    read_phoenix_settings,
     read_tracing_settings,
 )
 from ijob_core.errors import InvalidValueError
@@ -30,7 +37,7 @@ def test_defaults_when_tables_absent(tmp_path: Path) -> None:
     assert llm.cli_path is None
     assert dict(llm.models) == {}
     assert tracing == TracingSettings()
-    assert (tracing.max_size_mb, tracing.langfuse_endpoint) == (256, None)
+    assert tracing.max_size_mb == 256
 
 
 def test_defaults_when_file_absent(tmp_path: Path) -> None:
@@ -156,39 +163,76 @@ def test_unreadable_config_rejected(tmp_path: Path) -> None:
     assert raised.value.field == "config"
 
 
-@pytest.mark.parametrize(
-    ("endpoint", "expected"),
-    [
-        ("http://localhost:3000/", "http://localhost:3000"),
-        ("http://127.0.0.1:3000", "http://127.0.0.1:3000"),
-        ("https://[::1]:3000/", "https://[::1]:3000"),
-    ],
-)
-def test_langfuse_endpoint_local_only(
-    tmp_path: Path, endpoint: str, expected: str
-) -> None:
-    path = _config(tmp_path, f'[tracing]\nlangfuse_endpoint = "{endpoint}"\n')
-
-    assert read_tracing_settings(path).langfuse_endpoint == expected
-
-
-@pytest.mark.parametrize(
-    "endpoint",
-    [
-        "https://cloud.langfuse.com",
-        "ftp://localhost",
-        "localhost:3000",
-        "http://localhost:notaport",
-        "",
-    ],
-)
-def test_langfuse_endpoint_non_local_rejected(tmp_path: Path, endpoint: str) -> None:
-    path = _config(tmp_path, f'[tracing]\nlangfuse_endpoint = "{endpoint}"\n')
+def test_old_langfuse_key_is_an_unknown_key(tmp_path: Path) -> None:
+    path = _config(tmp_path, '[tracing]\nlangfuse_endpoint = "http://localhost:3000"\n')
 
     with pytest.raises(InvalidValueError) as raised:
         read_tracing_settings(path)
 
     assert raised.value.field == "tracing.langfuse_endpoint"
+    assert raised.value.reason == "unknown key"
+
+
+def test_phoenix_endpoint_defaults_to_local(tmp_path: Path) -> None:
+    for path in (tmp_path / "missing.toml", _config(tmp_path, "[llm]\n")):
+        settings = read_phoenix_settings(path)
+
+        assert settings == PhoenixSettings()
+        assert settings.endpoint == "http://127.0.0.1:6006"
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    [
+        ("http://localhost:6006/", "http://localhost:6006"),
+        ("http://127.0.0.1:6006", "http://127.0.0.1:6006"),
+        ("https://[::1]:6006/", "https://[::1]:6006"),
+    ],
+)
+def test_phoenix_endpoint_local_only(
+    tmp_path: Path, endpoint: str, expected: str
+) -> None:
+    path = _config(tmp_path, f'[phoenix]\nendpoint = "{endpoint}"\n')
+
+    assert read_phoenix_settings(path).endpoint == expected
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://app.phoenix.arize.com",
+        "ftp://localhost",
+        "localhost:6006",
+        "http://localhost:notaport",
+        "",
+    ],
+)
+def test_phoenix_endpoint_non_local_rejected(tmp_path: Path, endpoint: str) -> None:
+    path = _config(tmp_path, f'[phoenix]\nendpoint = "{endpoint}"\n')
+
+    with pytest.raises(InvalidValueError) as raised:
+        read_phoenix_settings(path)
+
+    assert raised.value.field == "phoenix.endpoint"
+
+
+def test_phoenix_endpoint_must_be_a_string(tmp_path: Path) -> None:
+    path = _config(tmp_path, "[phoenix]\nendpoint = 6006\n")
+
+    with pytest.raises(InvalidValueError) as raised:
+        read_phoenix_settings(path)
+
+    assert raised.value.field == "phoenix.endpoint"
+
+
+def test_phoenix_unknown_key_is_refused(tmp_path: Path) -> None:
+    path = _config(tmp_path, "[phoenix]\nfoo = 1\n")
+
+    with pytest.raises(InvalidValueError) as raised:
+        read_phoenix_settings(path)
+
+    assert raised.value.field == "phoenix.foo"
+    assert raised.value.reason == "unknown key"
 
 
 @pytest.mark.parametrize(
@@ -238,7 +282,8 @@ _NEW_KEYS = (
     "cli_path",
     "[tracing]",
     "max_size_mb",
-    "langfuse_endpoint",
+    "[phoenix]",
+    "endpoint",
     "[eval]",
     "jury",
     "total_cost_usd",
@@ -256,6 +301,7 @@ def test_template_parses_and_yields_defaults(tmp_path: Path) -> None:
     assert tomllib.loads(path.read_text(encoding="utf-8")) == {}
     assert read_llm_settings(path) == LlmSettings(config_path=path)
     assert read_tracing_settings(path) == TracingSettings()
+    assert read_phoenix_settings(path) == PhoenixSettings()
     assert read_eval_settings(path) == EvalSettings()
 
 
@@ -279,14 +325,13 @@ def test_template_new_settings_are_valid_once_uncommented(tmp_path: Path) -> Non
     )
 
     llm = read_llm_settings(enabled)
-    tracing = read_tracing_settings(enabled)
     evals = read_eval_settings(enabled)
 
     assert set(llm.models) == set(Task)
     assert evals.jury is not None
     assert 2 <= len(evals.jury) <= 5
     assert llm.cli_path == Path("/usr/local/bin/claude")
-    assert tracing.langfuse_endpoint == "http://localhost:3000"
+    assert read_phoenix_settings(enabled).endpoint == "http://127.0.0.1:6006"
 
 
 _JURY = (

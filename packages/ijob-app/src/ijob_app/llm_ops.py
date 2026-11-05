@@ -42,7 +42,6 @@ from ijob_app.config import effective_filters
 from ijob_app.home import IjobHome
 
 if TYPE_CHECKING:
-    import requests
     from dspy.clients.engines.base import AsyncEngine, Engine
     from ijob_ai.errors import LlmError
     from ijob_ai.llm.budget import Budget
@@ -143,14 +142,11 @@ class LlmOptions:
         engines: Builds the sync and async engine of a claude-sdk model from its
             reference and the checked `claude` path, or None for the real
             engines, imported on first use.
-        session: HTTP session for the Langfuse export, or None for the
-            exporter's own.
         cli_which: Looks `claude` up on `PATH`, or None for `shutil.which`.
     """
 
     config_path: Path
     engines: EngineFactory | None = None
-    session: "requests.Session | None" = None
     cli_which: Callable[[str], str | None] | None = None
 
 
@@ -234,7 +230,7 @@ class LlmRuntime:
         home: The ijob home; its trace database receives every trace.
         options: What the front end injected.
         settings: The model, limit and provider settings.
-        tracing_settings: The trace-store and Langfuse settings.
+        tracing_settings: The trace-store settings.
     """
 
     def __init__(
@@ -253,7 +249,7 @@ class LlmRuntime:
             home: The ijob home.
             options: What the front end injected.
             settings: The model, limit and provider settings.
-            tracing_settings: The trace-store and Langfuse settings.
+            tracing_settings: The trace-store settings.
         """
         from ijob_ai.llm.registry import Registry  # noqa: PLC0415
 
@@ -461,9 +457,7 @@ async def run_items[Item, Result](  # noqa: PLR0913  # the operation's inputs, o
     from ijob_ai.llm.budget import Budget  # noqa: PLC0415
     from ijob_ai.tracing.setup import operation_trace, start_tracing  # noqa: PLC0415
 
-    tracing = start_tracing(
-        runtime.home.traces, runtime.tracing_settings, session=runtime.options.session
-    )
+    tracing = start_tracing(runtime.home.traces, runtime.tracing_settings)
     budget = Budget(runtime.settings.max_cost_usd if cap is None else cap)
     run = _ItemRun(
         budget=budget,
