@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-04
 depends-on: [08, 09, 10]
 built-on: 671aa742d4fc
@@ -171,3 +171,31 @@ Written 2026-11-05 from reviews of the code those plans built. The engine and ta
 - Errors: `compile_error` keeps only the type for `AdapterParseError` and caps other messages at 200 characters, but another error can still wrap reply text, so clean it before showing or storing it.
 - MIPROv2: a val over 50 is refused before any call and reads `incomplete`, because DSPy turns minibatching on above that. It first applies at about 128 keeps and 128 rejects.
 - Versions: `program_version` hashes demos as text; the engine dumps them with `sort_keys=True`, so compute the version from the outcome's text as given.
+
+## Review findings
+
+One review, on fakes and real SIGINTs: money, leak and refusal rules hold; 17 of 23 mutants survived at first.
+
+Blocking, fixed:
+
+- `tune_grid.py`: one transient provider failure in a held-out test stopped the whole grid. It now stops only on `ProviderUnavailableError`, `CostUnknownError` or a spent ledger.
+- `cli_tune.py`: the table read `not run` for a combination that had run and spent. The one in flight now reads `incomplete`, with its spend where known; two real-SIGINT tests.
+
+Non-blocking, fixed: older untested programs are retried after `--again`; `EvalNeedsError` mid-grid no longer loses the table; the changed-postings count is shown; every named test gap, with each mutant seen dying. `uv run --locked pytest packages/ijob-app/tests/ijob_app_tests/test_tune_grid.py packages/ijob-app/tests/ijob_app_tests/test_cli_tune.py`: 129 passed.
+
+Left open:
+
+- `tune_grid.py:782` question: held-out calls don't charge the run budget, so a claude-sdk held-out test has no cap beyond the number of held-out postings. OpenRouter calls still hit the ledger.
+- `tune_grid.py:473` question: `--model X` with `[tune].models` empty is refused, which stops someone trying one model before setting the list.
+- 11 nits, in `.airsstack/cc/plugins/claudestacks/handoff/20261105-154610-9d4f/11-reviewer-plan-11.md`.
+
+## Deviations
+
+- 2026-11-05: `Optimizer` moved to a new light module, `ijob_ai/tuning/names.py`, so the CLI stays free of DSPy; `optimizers.py` still exports it.
+- 2026-11-05: `--model X` narrows the grid to X; an empty `[tune].models` is refused even with `--model`.
+- 2026-11-05: the `tune` row is written with `limited=False`; `SUITES` in `eval_report` doesn't list `tune`, so no report table picks it up.
+- 2026-11-05: `tune run` always asks unless `--yes`. With nothing to run, it prints the table, says so, exits 0 and doesn't ask.
+- 2026-11-05: a complete tune row whose held-out test didn't finish shows `incomplete` with the program id, and is retried alone.
+- 2026-11-05: `tune_rows` leaves out a row whose metrics can't be read, such as one left `running` by a killed process.
+- 2026-11-05: test support changed outside the file list: `llm_fakes.write_llm_config(tuner=)`, `test_cli_eval._World(tuner=)`, `test_tune_ops` helpers; `test_cli_terminal.py` gained checks for the new commands.
+- 2026-11-05: MIPROv2 over 50 is left to the engine's own refusal; there is no grid-level test, because a split that size needs about 256 labelled postings.

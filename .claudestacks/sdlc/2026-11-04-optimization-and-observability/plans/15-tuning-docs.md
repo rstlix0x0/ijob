@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-04
 depends-on: [12, 13, 14]
 built-on: 671aa742d4fc
@@ -57,3 +57,18 @@ packages/ijob-app/tests/ijob_app_tests/test_repo_files.py — modify: the docs n
 - `uv run --locked pytest` passes.
 - The five commands in `CLAUDE.md` exit 0.
 - After `execute`, the user and agent run the list in spec section 18 on the real `~/.ijob`, before calling the milestone done. Step 7 reads the UI in a browser. If fonts or layout break, `PHOENIX_ALLOW_EXTERNAL_RESOURCES` comes out of `compose.yaml` (spec section 12).
+
+## Review findings
+
+`docs/tuning.md` was checked against the source by the coder that aligned it, and by no reviewer. The README was reviewed with plan 14's command, and its three blocking lines were fixed, as recorded there.
+
+## Deviations
+
+- 2026-11-05: `docs/tuning.md` shows the built column names, which differ from the sample in spec section 10: the built `tune report` has more columns and names the baseline `[tune].baseline`.
+- 2026-11-05: the doc's estimate on the `--add` line is left out, because it is a cost claim.
+- 2026-11-05: the docs were corrected after the review fixes of plans 11 and 13 changed behaviour.
+
+## Gate
+
+Five commands in `CLAUDE.md` on the tree holding plans 11 to 15, 2026-11-05: format (355 files), check and mypy (311 files) clean; `5338 passed in 468.25s`. This covers all five plans; none ran the gate alone. No real model, real data, Docker or live Phoenix was used, so spec section 18 is still to do.
+- 2026-11-05: `test_tuning_doc_names_every_tune_command` reads the commands from the Typer app, not from rendered `--help` text, which depends on terminal width.

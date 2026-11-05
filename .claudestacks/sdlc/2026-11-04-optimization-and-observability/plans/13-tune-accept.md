@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-04
 depends-on: [12]
 built-on: 671aa742d4fc
@@ -125,3 +125,30 @@ packages/ijob-app/tests/ijob_app_tests/test_cli_tune.py  — modify: the command
 
 - `uv run --locked pytest` passes.
 - The five commands in `CLAUDE.md` exit 0.
+
+## Review findings
+
+One review: the gate holds, with no path accepting on an attack, an unanswered pair or an incomplete run, and the no-program search path is unchanged.
+
+Blocking, fixed:
+
+- `llm_ops.py`: with a replaced CV, `score_operation` rebuilt the profile and still ran the program. It now runs the base prompt under the base version: `test_replaced_cv_scores_with_the_base_prompt`.
+- `tui/app.py`: `saved_scores` raised outside the `try`, so a config typo killed the open TUI. It now shows the error and stays open: `test_a_filter_change_with_a_broken_program_says_why_and_stays_open`.
+- `cli.py`: `ijob search` gave a traceback on a malformed accepted row. It now exits 2 naming the id: `test_search_with_a_broken_program_names_it_and_exits_cleanly`.
+
+Non-blocking, fixed: a hostile plan with a program counts as sending personal data; its estimate includes instructions and demos; it runs on the program's own model; `prepare_accept` refuses a program without the sentence before any call; a Service-level out-of-force test, which kills the mutant that survived all 318 search tests; `program_status` shows a sentence-less program as `accepted, not in use`; `tune_records` names the id on a bad row.
+
+Left open:
+
+- `tune list` stops on an unreadable row instead of listing it; `tune clear` gets out.
+- An open TUI keeps a base `row.verdict` after a judge accept, since nothing reads saved verdicts back.
+- 10 nits, in `.airsstack/cc/plugins/claudestacks/handoff/20261105-154610-9d4f/15-reviewer-plan-13.md`.
+
+## Deviations
+
+- 2026-11-05: `llm_ops` takes the resolved program; `Service` calls `program_in_force`.
+- 2026-11-05: the replaced-CV check runs before the rebuild, because the version is chosen before the stream starts. If a rebuilt profile hashes the same as the old one, that one run still uses the base prompt.
+- 2026-11-05: `run_hostile_suite`'s `task` defaults to the program's task and refuses a mismatch; `RunPlan` gained `program`.
+- 2026-11-05: files outside the list: `tune_records.py`, `job_search.py`, one doc line in `eval_estimate.py`, `test_tune_records.py`, `test_job_search.py`, and a new `test_cli_tune_accept.py`, because `test_tune_ops.py` can't import the CLI helpers without a cycle.
+- 2026-11-05: `Service.saved_scores` uses the runtime's settings once a model operation has run, so a listing and the next operation agree. `JobList.replace_saved_scores` keeps an open list right.
+- 2026-11-05: accept asks only for an OpenRouter model, as `eval run` does. `tune clear` opens no config, so a broken config doesn't block it.

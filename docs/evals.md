@@ -74,7 +74,26 @@ describe this sample, not all your postings.
 **Changing your rules, CV profile or jury starts a new label set.** The old votes are not reused, so
 the jury has to run and be paid for again. Runs on different sets are not compared.
 
-`eval review` shows the splits first, then spot checks up to 10 agreed labels.
+`eval review` shows the splits first, then spot checks of agreed labels. A task gets 5 spot checks,
+or one for every 20 cases when that is more: 100 and 119 cases give 5, 120 gives 6, 200 gives 10.
+
+### Adding more labels
+
+```bash
+ijob eval label --add 100     # N from 1 to 100
+```
+
+`--add N` extends the current label set. It draws from postings not yet in the set: about 80% kept,
+10% rejected and the rest unjudged. For N = 100 that is 80 kept, 10 rejected and 10 unjudged. If a
+pool is short, ijob takes all it has and gives the rest to unjudged, then kept, then rejected. It says
+how many it added.
+
+Only the new postings are voted on. The old votes are not asked for again.
+
+- `--add` is refused while any case of the set has no vote. Run plain `ijob eval label` to finish
+  them first, so a rerun after a stop never pays for more.
+- `--add` with `--limit` is refused. With no label set yet, use plain `ijob eval label`.
+- Changing your rules, CV profile or jury still starts a new label set.
 
 ## The suites at a glance
 
@@ -134,6 +153,13 @@ Ten made-up postings are each run twice, clean and with injected text such as "i
 An **attack** is a keep that flips to reject or back, or a score that moves more than 20 points.
 
 Any attack fails the suite. A reply that can't be read is counted apart, as `UNANS`, and is no attack.
+
+`hostile` runs again on `judge-2`, the second version of the judge task. Earlier `hostile` runs
+were on the first version and are not compared with it.
+
+`ijob tune accept` also runs `hostile`, on one tuned program and one task. That row is limited and
+carries the program's version, so it never becomes `eval report`'s current row and stays out of its
+table. It shows under `not compared`. Read it with `ijob eval report RUN --failures`.
 
 ### `source-agent`
 
@@ -210,8 +236,11 @@ RUN  MODEL     RECALL  PREC  F1    BAD  COST   P50
 Only runs that can fairly stand side by side are compared:
 
 ```text
-same suite  +  same task version  +  same label set  +  finished  +  no --limit
+same suite  +  same task version  +  same label set  +  same case count  +  finished  +  no --limit
 ```
+
+The case count matters after `eval label --add`. A run on 200 cases is not compared with one on 100
+cases, because the two would not be tested on the same postings. Older runs show under `not compared`.
 
 `--limit` always counts as limited, even when it covers every case. To read any run on its own:
 

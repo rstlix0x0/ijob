@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-04
 depends-on: [11]
 built-on: 671aa742d4fc
@@ -88,3 +88,29 @@ packages/ijob-app/tests/ijob_app_tests/test_cli_tune.py    — modify: the comma
 
 - `uv run --locked pytest packages/ijob-app` passes.
 - The five commands in `CLAUDE.md` exit 0.
+
+## Review findings
+
+Two reviews: one of `tune_report.py`, one of the command side. At first 30 of 33 mutants survived in the first.
+
+Blocking, fixed:
+
+- Choosing cost counted held-out spend. Decided, see Deviations.
+- A changed posting stayed in untuned rows while the program skipped it, so differences compared different postings. It now counts as missing in every row.
+- A program from an older set opened Held-out on the new set, graded by the new labels. Only programs of the report's set count.
+- Tune spend was never labelled metered. Money and metered value are now shown apart.
+- The Markdown Held-out table had no recall or precision.
+- Tests for run selection, difference signs, missing keys, unusable answers and the metered label, each with a mutant seen dying.
+
+Non-blocking, fixed: a judge with no answers for a labelled class no longer reads as unmeasured; an unusable count in Choosing; a note saying what `±` measures; a metered label on the cost difference; numbers no longer fold at 80 columns. `uv run --locked pytest packages/ijob-app/tests/ijob_app_tests/test_tune_report.py`: 46 passed before the command side, which added more.
+
+Left open: nits R3, R4, R7, R10, R12 to R15, R19, T8, T11 in `.airsstack/cc/plugins/claudestacks/handoff/20261105-154610-9d4f/06-reviewer-plan-12.md`, and F14 to F17 in `17-reviewer-plans-12-14-commands.md` beside it.
+
+## Deviations
+
+- 2026-11-05: Choosing's `$/100` is the whole run's rate, including held-out postings, against plan line 41, because `EvalResult` stores no per-case cost. Cost doesn't depend on labels, so no held-out label informs a choice. A note under the table says so in both forms.
+- 2026-11-05: `±` stays after the main number as the plan orders it, but it is the 95% half-width of keep recall, not of macro F1, and the scorer has none. A note under the table says so.
+- 2026-11-05: a program of the set with no complete held-out run is listed with dashes, once the table appears.
+- 2026-11-05: `tune report` in a pipe prints the Markdown; `--out` also prints to stdout and notes the path on stderr.
+- 2026-11-05: on a narrow terminal, a table that doesn't fit becomes one block per row, so no number folds.
+- 2026-11-05: `tune_report.py` gained public `choosing_cells`, `held_out_cells`, `footer_lines`, so the terminal, pipe and file share one source.

@@ -1,5 +1,5 @@
 ---
-status: approved
+status: done
 created: 2026-11-04
 depends-on: [05, 11]
 built-on: 671aa742d4fc
@@ -142,3 +142,29 @@ packages/ijob-app/tests/ijob_app_tests/test_cli_llm.py     — modify: the comma
 - `uv run --locked pytest` passes.
 - `uv run --locked python -c "import ijob_core.traces, sys; assert 'requests' not in sys.modules"` exits 0.
 - The five commands in `CLAUDE.md` exit 0.
+
+## Review findings
+
+Two reviews: tasks 1 and 2, then the command. Rerun safety held: stopped at each of 23 REST calls, every rerun converged on the clean state. No real Phoenix ran; the first reviewer compared the fake with Phoenix's 21.0.0 source.
+
+Blocking, fixed:
+
+- A run or result with no dataset or example dropped silently. `ExportReport` now counts `runs_skipped` and `results_skipped`, and the command prints them.
+- `traces export --config` was ignored. It is now honoured, so a non-local or broken config exits 2 before anything is sent.
+- With `HTTP_PROXY` set, export traffic went to that proxy. `phoenix_client` sets `session.trust_env = False`.
+- README: `tune clear` needs `TASK`; `tune list` shows no held-out numbers; a rerun does not update examples already there.
+
+Non-blocking, fixed: trace links also match version and model; `_held_out` prefers the program of the run's set; a foreign example no longer crashes an export; a posted run's end is its own latency; every `requests` error and every unreadable reply raises a `PhoenixError`; exporter log lines are quiet during a send; a junk `traces.db` gives `error:`; client and exporter close on every path; a corrupt span id raises a `PhoenixError`; test gaps F10 to F13 and F16 to F21, each with its mutant seen dying.
+
+Left open:
+
+- `traces`, `traces show` and `traces prune` give a traceback on a junk `traces.db`, as they did before.
+- Nits F8, F10, F11, F14, F15, F22 to F25 in `.airsstack/cc/plugins/claudestacks/handoff/20261105-154610-9d4f/05-reviewer-plan-14.md`.
+
+## Deviations
+
+- 2026-11-05: `spans_between` selects spans that start inside the window, both ends inclusive.
+- 2026-11-05: spend keys on a held-out experiment are prefixed `tune_`, so they don't clash with the run's own `spent_usd`.
+- 2026-11-05: added `phoenix_client(endpoint)` and `PhoenixReplyError`, neither named in the plan, so `ijob-app` never imports the OTLP exporter and a bad reply stays a `PhoenixError`.
+- 2026-11-05: `test_export_loads_no_llm_library` refuses `requests.Session.request`, so the real client and export code run with no socket.
+- 2026-11-05: `Service.traces_export` was written by the orchestrator, not a coder, to free `service.py` for the plan 13 work.
