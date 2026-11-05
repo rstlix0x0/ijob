@@ -5,6 +5,7 @@ writes what the call cost into the current call meter. `ClaudeSyncEngine` only
 satisfies `dspy.LM`'s need for a sync engine; ijob calls models asynchronously.
 """
 
+import json
 import tempfile
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
@@ -33,6 +34,8 @@ from ijob_ai.llm.meter import CallMeter, current_meter
 from ijob_ai.llm.reference import ModelRef
 
 _ONE_TEXT_USER_MESSAGE = "claude-sdk engine takes one text user message"
+_EXAMPLES_HEADER = "Worked examples, as JSON turns:"
+_ANSWER_HEADER = "Now answer this one:"
 _ASYNC_ONLY = "claude-sdk runs async only"
 _OUTPUT_LABEL = "claude call"
 
@@ -98,18 +101,27 @@ def build_options(
 def request_prompt(request: Request) -> tuple[str, str]:
     """Split a request into its system text and its prompt text.
 
+    One user message is sent as it is. Few-shot turns, alternating `user` and
+    `assistant` and ending on `user`, become one prompt: every turn but the
+    last as a JSON list of `{"role", "content"}` objects, then the last user
+    turn. JSON escaping keeps the text of a turn from ending that turn.
+
     Args:
         request: The request to map.
 
     Returns:
-        The system text (empty when the request has none) and the text of its
-        single user message.
+        The system text (empty when the request has none) and the prompt text.
 
     Raises:
-        ProviderFailedError: The request does not have exactly one user message
-            made only of text parts, or its system parts are not all text.
+        ProviderFailedError: The messages are not text-only turns alternating
+            `user`, `assistant` and ending on `user`, or the system parts are
+            not all text.
     """
-    if len(request.messages) != 1 or request.messages[0].role != "user":
+    messages = request.messages
+    for index, message in enumerate(messages):
+        if message.role != ("user" if index % 2 == 0 else "assistant"):
+            raise ProviderFailedError(_ONE_TEXT_USER_MESSAGE)
+    if len(messages) % 2 == 0:
         raise ProviderFailedError(_ONE_TEXT_USER_MESSAGE)
     system = request.system
     if system is None:
@@ -118,7 +130,18 @@ def request_prompt(request: Request) -> tuple[str, str]:
         system_text = system
     else:
         system_text = _join_text(system)
-    return system_text, _join_text(request.messages[0].parts)
+    texts = [_join_text(message.parts) for message in messages]
+    if len(texts) == 1:
+        return system_text, texts[0]
+    examples = [
+        {"role": message.role, "content": text}
+        for message, text in zip(messages[:-1], texts[:-1], strict=True)
+    ]
+    prompt = (
+        f"{_EXAMPLES_HEADER}\n{json.dumps(examples, ensure_ascii=False)}\n\n"
+        f"{_ANSWER_HEADER}\n{texts[-1]}"
+    )
+    return system_text, prompt
 
 
 def _join_text(parts: tuple[object, ...]) -> str:
@@ -137,13 +160,27 @@ def _count(usage: dict[str, object] | None, key: str) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def _input_tokens(usage: dict[str, object] | None) -> int | None:
+    """Count the tokens sent: fresh input plus cache writes plus cache reads.
+
+    The CLI reports cached tokens apart from `input_tokens`. A missing cache
+    key counts as 0; a missing `input_tokens` leaves the count unknown.
+    """
+    fresh = _count(usage, "input_tokens")
+    if fresh is None:
+        return None
+    created = _count(usage, "cache_creation_input_tokens") or 0
+    read = _count(usage, "cache_read_input_tokens") or 0
+    return fresh + created + read
+
+
 def _meter_result(
     meter: CallMeter, result: ResultMessage, assistant_model: str | None
 ) -> None:
     """Record a finished call in the meter, whether or not it was an error."""
     meter.completed = True
     meter.cost_usd = result.total_cost_usd
-    meter.input_tokens = _count(result.usage, "input_tokens")
+    meter.input_tokens = _input_tokens(result.usage)
     meter.output_tokens = _count(result.usage, "output_tokens")
     meter.model = assistant_model
 
@@ -186,7 +223,8 @@ class ClaudeAsyncEngine:
         any error about that result is raised.
 
         Args:
-            request: One user message of text parts, with optional system text.
+            request: Text turns alternating `user`, `assistant` and ending on
+                `user`, with optional system text.
 
         Returns:
             The answer, with the cost under `provider_data["usage"]["cost"]`.
@@ -242,7 +280,7 @@ class ClaudeAsyncEngine:
             message=LmMessage.assistant(result.result),
             finish_reason="stop",
             usage=Usage(
-                input_tokens=_count(result.usage, "input_tokens"),
+                input_tokens=_input_tokens(result.usage),
                 output_tokens=_count(result.usage, "output_tokens"),
             ),
             provider_data={"usage": {"cost": result.total_cost_usd}},
