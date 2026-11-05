@@ -9,8 +9,13 @@ from ijob_ai.errors import (
     MissingModelError,
     NoCvError,
     NothingActionableError,
+    PhoenixError,
+    PhoenixHttpError,
+    PhoenixReplyError,
+    PhoenixUnreachableError,
     ProviderFailedError,
     ProviderUnavailableError,
+    SpanBatchRefusedError,
     TaskOutputError,
 )
 from ijob_core.errors import InvalidValueError
@@ -25,6 +30,11 @@ LLM_ERRORS: list[type[LlmError]] = [
     NoCvError,
     CvTextError,
     CapReachedError,
+    PhoenixError,
+    PhoenixUnreachableError,
+    PhoenixHttpError,
+    PhoenixReplyError,
+    SpanBatchRefusedError,
 ]
 
 
@@ -103,3 +113,42 @@ def test_a_cap_reached_subclass_can_pass_its_own_message() -> None:
             super().__init__("stopped early")
 
     assert str(StoppedEarlyError()) == "stopped early"
+
+
+def test_phoenix_errors_are_phoenix_errors() -> None:
+    for error_type in (
+        PhoenixUnreachableError,
+        PhoenixHttpError,
+        PhoenixReplyError,
+        SpanBatchRefusedError,
+    ):
+        assert issubclass(error_type, PhoenixError)
+
+
+def test_phoenix_unreachable_message() -> None:
+    error = PhoenixUnreachableError("http://127.0.0.1:6006")
+    assert str(error) == (
+        "Phoenix is not running at http://127.0.0.1:6006; run docker compose up -d"
+    )
+    assert error.url == "http://127.0.0.1:6006"
+
+
+def test_phoenix_http_error_keeps_status_and_first_200_characters() -> None:
+    error = PhoenixHttpError(500, "x" * 300)
+    assert error.status == 500
+    assert error.body == "x" * 200
+    assert str(error) == f"Phoenix answered 500: {'x' * 200}"
+
+
+def test_span_batch_refused_message() -> None:
+    error = SpanBatchRefusedError("http://127.0.0.1:6006")
+    assert str(error) == (
+        "sending spans to http://127.0.0.1:6006 failed; run docker compose logs phoenix"
+    )
+    assert error.url == "http://127.0.0.1:6006"
+
+
+def test_phoenix_reply_error_names_the_route() -> None:
+    error = PhoenixReplyError("/v1/datasets")
+    assert error.path == "/v1/datasets"
+    assert "/v1/datasets" in str(error)

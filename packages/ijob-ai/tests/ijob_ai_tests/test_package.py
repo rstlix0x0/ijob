@@ -19,6 +19,7 @@ LIGHT_MODULES = [
     "ijob_ai.llm.meter",
     "ijob_ai.llm.budget",
     "ijob_ai.tasks.versions",
+    "ijob_ai.tuning.names",
 ]
 
 HEAVY_TOP_PACKAGES = ("dspy", "claude_agent_sdk", "pypdf", "litellm", "optuna")

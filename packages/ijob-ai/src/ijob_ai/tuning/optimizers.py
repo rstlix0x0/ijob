@@ -7,7 +7,6 @@ tuning is about to run.
 """
 
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Any, Final
 
 import dspy
@@ -15,6 +14,19 @@ from dspy.teleprompt import GEPA, BootstrapFewShotWithRandomSearch, MIPROv2
 
 from ijob_ai.llm.settings import Task
 from ijob_ai.tuning.metrics import demo_threshold, float_metric, gepa_metric
+from ijob_ai.tuning.names import Optimizer
+
+__all__ = [
+    "AUTO_LEVEL",
+    "BOOTSTRAPPED_DEMOS",
+    "CANDIDATE_PROGRAMS",
+    "LABELED_DEMOS",
+    "MAX_ERRORS",
+    "MIPRO_MAX_VAL",
+    "BuiltOptimizer",
+    "Optimizer",
+    "build_optimizer",
+]
 
 BOOTSTRAPPED_DEMOS: Final = 2
 LABELED_DEMOS: Final = 0
@@ -22,14 +34,6 @@ CANDIDATE_PROGRAMS: Final = 6
 MAX_ERRORS: Final = 1_000_000
 AUTO_LEVEL: Final = "light"
 MIPRO_MAX_VAL: Final = 50
-
-
-class Optimizer(StrEnum):
-    """An optimizer a task can be tuned with; the value is the `--optimizer` name."""
-
-    GEPA = "gepa"
-    BOOTSTRAP = "bootstrap"
-    MIPRO = "mipro"
 
 
 @dataclass(frozen=True, slots=True)

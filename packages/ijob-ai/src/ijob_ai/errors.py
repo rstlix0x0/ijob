@@ -149,3 +149,88 @@ class CvTextError(LlmError):
         """
         super().__init__(f"CV text is unusable: {reason}")
         self.reason = reason
+
+
+class PhoenixError(LlmError):
+    """Root of the failures of talking to Phoenix.
+
+    Each kind exits through the same handler as any other `LlmError`.
+    """
+
+
+class PhoenixUnreachableError(PhoenixError):
+    """Nothing answers at the Phoenix endpoint.
+
+    Attributes:
+        url: The endpoint that did not answer.
+    """
+
+    def __init__(self, url: str) -> None:
+        """Build the error from the endpoint.
+
+        Args:
+            url: The endpoint that did not answer.
+        """
+        super().__init__(f"Phoenix is not running at {url}; run docker compose up -d")
+        self.url = url
+
+
+class PhoenixHttpError(PhoenixError):
+    """Phoenix answered a REST call with status 400 or above.
+
+    Attributes:
+        status: The HTTP status.
+        body: The first 200 characters of the reply.
+    """
+
+    def __init__(self, status: int, body: str) -> None:
+        """Build the error from the status and the reply.
+
+        Args:
+            status: The HTTP status.
+            body: The reply text; only its first 200 characters are kept.
+        """
+        self.status = status
+        self.body = body[:200]
+        super().__init__(f"Phoenix answered {status}: {self.body}")
+
+
+class PhoenixReplyError(PhoenixError):
+    """Phoenix answered a REST call with a body ijob cannot read.
+
+    Attributes:
+        path: The route that was called.
+    """
+
+    def __init__(self, path: str) -> None:
+        """Build the error from the route.
+
+        Args:
+            path: The route that was called.
+        """
+        super().__init__(
+            f"Phoenix answered {path} with a reply ijob cannot read; "
+            "check that port 6006 is Phoenix 21"
+        )
+        self.path = path
+
+
+class SpanBatchRefusedError(PhoenixError):
+    """The span exporter reported failure for a batch.
+
+    The exporter returns only success or failure, so the cause is not known.
+
+    Attributes:
+        url: The endpoint the batch was sent to.
+    """
+
+    def __init__(self, url: str) -> None:
+        """Build the error from the endpoint.
+
+        Args:
+            url: The endpoint the batch was sent to.
+        """
+        super().__init__(
+            f"sending spans to {url} failed; run docker compose logs phoenix"
+        )
+        self.url = url
