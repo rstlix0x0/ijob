@@ -150,11 +150,15 @@ _BAD_REQUESTS = [
 ]
 
 
+_REFUSAL = (
+    "claude-sdk engine takes text turns that alternate user and assistant "
+    "and end with a user turn"
+)
+
+
 @pytest.mark.parametrize("request_", _BAD_REQUESTS)
 def test_request_prompt_rejects_other_shapes(request_: Request) -> None:
-    with pytest.raises(
-        ProviderFailedError, match="claude-sdk engine takes one text user message"
-    ):
+    with pytest.raises(ProviderFailedError, match=_REFUSAL):
         request_prompt(request_)
 
 
@@ -192,6 +196,16 @@ def test_alternating_turns_flatten_to_one_prompt() -> None:
         "Now answer this one:\n"
         "last"
     )
+
+
+def test_non_ascii_text_reaches_the_prompt_as_is() -> None:
+    request = _turns(("user", "café 日本"), ("assistant", "naïve"), ("user", "last"))
+
+    _, prompt = request_prompt(request)
+
+    assert '"content": "café 日本"' in prompt
+    assert '"content": "naïve"' in prompt
+    assert "\\u" not in prompt
 
 
 def test_posting_text_stays_inside_one_json_string() -> None:
@@ -234,9 +248,7 @@ def test_posting_text_stays_inside_one_json_string() -> None:
     ],
 )
 def test_bad_turn_orders_are_refused(request_: Request) -> None:
-    with pytest.raises(
-        ProviderFailedError, match="claude-sdk engine takes one text user message"
-    ):
+    with pytest.raises(ProviderFailedError, match=_REFUSAL):
         request_prompt(request_)
 
 
@@ -534,6 +546,52 @@ def test_dspy_lm_accepts_engine_pair() -> None:
 
     assert prediction.keep is True
     assert budget.spent == pytest.approx(0.0004)
+
+
+def test_predict_demos_reach_the_prompt_in_order() -> None:
+    prepare_environment()
+    fake = FakeQuery(
+        _assistant(), _result(text='{"keep": true, "reason": "fits"}', cost=0.0004)
+    )
+    lm = dspy.LM(
+        "claude-sdk/m",
+        engine=ClaudeSyncEngine(),
+        async_engine=_engine(fake),
+        cache=False,
+        num_retries=0,
+    )
+    predict = dspy.Predict(Judge)
+    predict.demos = [
+        dspy.Example(posting="demo one", keep=True, reason="r1"),
+        dspy.Example(posting="demo two", keep=False, reason="r2"),
+    ]
+
+    asyncio.run(
+        run_call(
+            predict,
+            lm,
+            inputs={"posting": "the real one"},
+            provider=Provider.CLAUDE_SDK,
+            budget=Budget(1.0),
+            timeout_s=30,
+            task=Task.JUDGE,
+            task_version="v1",
+            posting_id=None,
+        )
+    )
+
+    header = "Worked examples, as JSON turns:\n"
+    prompt = fake.calls[0][0]
+    assert prompt.startswith(header)
+    examples, answer = prompt.removeprefix(header).split("\n\nNow answer this one:\n")
+    turns = json.loads(examples)
+    assert [turn["role"] for turn in turns] == ["user", "assistant"] * 2
+    assert "demo one" in turns[0]["content"]
+    assert "r1" in turns[1]["content"]
+    assert "demo two" in turns[2]["content"]
+    assert "r2" in turns[3]["content"]
+    assert "the real one" in answer
+    assert "demo" not in answer
 
 
 _SLEEPING_CLI = """#!/bin/sh

@@ -1,4 +1,7 @@
 import asyncio
+import concurrent.futures
+import copy
+import logging
 import threading
 import warnings
 from collections.abc import Sequence
@@ -16,6 +19,7 @@ from ijob_ai.errors import (
 )
 from ijob_ai.llm.budget import Budget
 from ijob_ai.llm.call import ForgivingJSONAdapter, run_call
+from ijob_ai.llm.meter import current_meter
 from ijob_ai.llm.railed import RailedLM, RailGuard
 from ijob_ai.llm.reference import Provider
 from ijob_ai.llm.registry import prepare_environment
@@ -35,12 +39,15 @@ from .fakes import (
     FakeAsyncEngine,
     FakeEngine,
     Judge,
+    answer,
     ok_response,
+    rate_limited,
     serve_openrouter,
 )
 
 OPENROUTER_MODEL = "openrouter/anthropic/claude-sonnet-4.5"
 MESSAGES = [{"role": "user", "content": "AAA"}]
+BOUND_S = 10.0
 
 
 @pytest.fixture(autouse=True)
@@ -101,6 +108,44 @@ class ThreadEngine(FakeAsyncEngine):
     async def complete(self, request: Request) -> Response:
         self.threads.append(threading.get_ident())
         return await super().complete(request)
+
+
+class CompletedThenFails(FakeAsyncEngine):
+    """A fake engine whose call the provider finished, and which then fails."""
+
+    @override
+    async def complete(self, request: Request) -> Response:
+        self.requests.append(request)
+        meter = current_meter()
+        meter.completed = True
+        meter.cost_usd = self._cost
+        msg = "failed after the answer"
+        raise RuntimeError(msg)
+
+
+class CompletedThenWaits(FakeAsyncEngine):
+    """A fake engine that meters the call, then waits until it is cancelled.
+
+    Attributes:
+        metered: Set once the meter is complete.
+        task: The task the call runs on.
+    """
+
+    def __init__(self, *, cost: float | None) -> None:
+        super().__init__(cost=cost)
+        self.metered = asyncio.Event()
+        self.task: asyncio.Task[Any] | None = None
+
+    @override
+    async def complete(self, request: Request) -> Response:
+        self.requests.append(request)
+        meter = current_meter()
+        meter.completed = True
+        meter.cost_usd = self._cost
+        self.task = asyncio.current_task()
+        self.metered.set()
+        await asyncio.sleep(BOUND_S)
+        return answer(VERDICT)
 
 
 def test_messages_shape_reaches_the_model() -> None:
@@ -174,6 +219,56 @@ def test_every_budget_is_charged_after_a_call() -> None:
     assert second.spent == pytest.approx(0.004)
 
 
+def test_a_call_that_completed_and_then_failed_is_charged() -> None:
+    engine = CompletedThenFails(cost=0.25)
+    first, second = Budget(1.0), Budget(2.0)
+    guard = RailGuard()
+
+    async def main() -> None:
+        lm = railed(claude_lm(engine), first, second, guard=guard)
+        await asyncio.to_thread(lambda: lm("text"))
+
+    with pytest.raises(ProviderFailedError, match="failed after the answer"):
+        asyncio.run(main())
+
+    assert first.spent == pytest.approx(0.25)
+    assert second.spent == pytest.approx(0.25)
+    assert guard.failed == 1
+    assert guard.fatal is None
+
+
+@pytest.mark.parametrize(
+    ("cost", "charged", "stopped"), [(0.25, 0.25, False), (None, 0.0, True)]
+)
+def test_a_call_cancelled_after_its_meter_completed_is_settled(
+    cost: float | None,
+    charged: float,
+    stopped: bool,  # noqa: FBT001  # pytest passes parameters by name
+) -> None:
+    engine = CompletedThenWaits(cost=cost)
+    budget = Budget(1.0)
+    guard = RailGuard()
+
+    def call_and_see_the_cancel(lm: RailedLM) -> None:
+        with pytest.raises(concurrent.futures.CancelledError):
+            lm("text")
+
+    async def main() -> None:
+        lm = railed(claude_lm(engine), budget, guard=guard)
+        call = asyncio.create_task(asyncio.to_thread(call_and_see_the_cancel, lm))
+        await asyncio.wait_for(engine.metered.wait(), BOUND_S)
+        assert engine.task is not None
+        engine.task.cancel()
+        await asyncio.wait_for(call, BOUND_S)
+
+    asyncio.run(main())
+
+    assert budget.spent == pytest.approx(charged)
+    assert guard.stopped is stopped
+    assert isinstance(guard.fatal, CostUnknownError) is stopped
+    assert guard.failed == 0
+
+
 def test_a_refused_call_spends_nothing() -> None:
     engine = FakeAsyncEngine(cost=0.5)
     first, second = Budget(1.0), Budget(0.4)
@@ -233,6 +328,25 @@ def test_timeout_counts_as_a_failure() -> None:
     assert guard.fatal is None
 
 
+def test_a_timeout_is_recorded_as_a_timeout(tmp_path: Path) -> None:
+    tracing, exporter = make_tracing(tmp_path)
+    trace = OperationTrace(tracing, "tune")
+
+    async def main() -> None:
+        lm = railed(
+            claude_lm(FakeAsyncEngine(delay_s=1.0)), timeout_s=0.01, trace=trace
+        )
+        await asyncio.to_thread(lambda: lm("text"))
+
+    with pytest.raises(ProviderFailedError, match="timed out") as raised:
+        asyncio.run(main())
+    tracing.finish()
+
+    assert isinstance(raised.value.__cause__, TimeoutError)
+    [span] = [s for s in exporter.get_finished_spans() if s.name.startswith("chat")]
+    assert dict(span.attributes or {})[attributes.OUTCOME] == "timeout"
+
+
 def _call_with(lm: RailedLM, text: str) -> list[Any]:
     return lm(text)
 
@@ -273,6 +387,30 @@ def test_unknown_cost_raises_and_stops() -> None:
     assert isinstance(guard.fatal, CostUnknownError)
     assert guard.stopped
     assert not guard.cap_reached
+    assert guard.failed == 0
+    assert guard.first_error is None
+    assert len(engine.requests) == 1
+    assert budget.spent == 0
+
+
+def test_an_engine_cost_unknown_with_no_meter_is_fatal() -> None:
+    engine = FakeAsyncEngine(raises=CostUnknownError("claude-sdk/claude-haiku-5-5"))
+    budget = Budget(1.0)
+    guard = RailGuard()
+
+    async def main() -> None:
+        lm = railed(claude_lm(engine), budget, guard=guard)
+        with pytest.raises(CostUnknownError):
+            await asyncio.to_thread(lambda: lm("text"))
+        with pytest.raises(CapReachedError):
+            await asyncio.to_thread(lambda: lm("text"))
+
+    asyncio.run(main())
+
+    assert isinstance(guard.fatal, CostUnknownError)
+    assert guard.stopped
+    assert guard.failed == 0
+    assert guard.first_error is None
     assert len(engine.requests) == 1
     assert budget.spent == 0
 
@@ -292,6 +430,8 @@ def test_provider_unavailable_stops() -> None:
 
     assert isinstance(guard.fatal, ProviderUnavailableError)
     assert guard.stopped
+    assert guard.failed == 0
+    assert guard.first_error is None
     assert len(engine.requests) == 1
 
 
@@ -335,6 +475,27 @@ def test_claude_is_metered_by_its_engine() -> None:
 
     assert engine.meters_seen[0].cost_usd == 0.0125
     assert budget.spent == pytest.approx(0.0125)
+
+
+def test_a_rate_limited_call_is_sent_once_whatever_the_lm_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = serve_openrouter(
+        monkeypatch, [rate_limited(), ok_response(VERDICT, cost=0.25)]
+    )
+    guard = RailGuard()
+    retrying = dspy.LM(OPENROUTER_MODEL, cache=False, num_retries=3)
+
+    async def main() -> None:
+        lm = railed(retrying, guard=guard, provider=Provider.OPENROUTER)
+        await asyncio.to_thread(lambda: lm(messages=MESSAGES))
+
+    with pytest.raises(ProviderFailedError):
+        asyncio.run(main())
+
+    assert len(transport.requests) == 1
+    assert guard.calls == 1
+    assert guard.failed == 1
 
 
 def make_tracing(tmp_path: Path) -> tuple[Tracing, InMemorySpanExporter]:
@@ -420,16 +581,83 @@ def test_copy_keeps_the_rails() -> None:
 
     async def main() -> RailedLM:
         lm = railed(claude_lm(engine), budget, guard=guard)
-        copy = lm.copy(temperature=0.7)
-        await asyncio.to_thread(lambda: copy("text"))
-        return copy
+        changed = lm.copy(temperature=0.7)
+        await asyncio.to_thread(lambda: changed("text"))
+        return changed
 
-    copy = asyncio.run(main())
+    duplicate = asyncio.run(main())
 
-    assert isinstance(copy, RailedLM)
+    assert isinstance(duplicate, RailedLM)
     assert budget.spent == pytest.approx(0.01)
     assert guard.calls == 1
     assert engine.requests[0].config.temperature == 0.7
+
+
+def test_a_deep_copy_counts_against_the_same_rails(tmp_path: Path) -> None:
+    engine = FakeAsyncEngine(cost=0.01)
+    budget = Budget(1.0)
+    guard = RailGuard()
+    tracing, exporter = make_tracing(tmp_path)
+    trace = OperationTrace(tracing, "tune")
+
+    async def main() -> RailedLM:
+        lm = railed(claude_lm(engine), budget, guard=guard, trace=trace)
+        duplicate = copy.deepcopy(lm)
+        assert duplicate is not lm
+        await asyncio.to_thread(lambda: duplicate("text"))
+        return duplicate
+
+    duplicate = asyncio.run(main())
+    tracing.finish()
+
+    assert duplicate.guard is guard
+    assert guard.calls == 1
+    assert budget.spent == pytest.approx(0.01)
+    assert [s for s in exporter.get_finished_spans() if s.name.startswith("chat")]
+
+
+def test_a_program_holding_the_rail_deep_copies_quietly(
+    caplog: pytest.LogCaptureFixture, capfd: pytest.CaptureFixture[str]
+) -> None:
+    engine = FakeAsyncEngine(cost=0.01)
+    budget = Budget(1.0)
+    guard = RailGuard()
+
+    async def main() -> None:
+        predict = dspy.Predict(Judge)
+        predict.set_lm(railed(claude_lm(engine), budget, guard=guard))
+        held = predict.deepcopy().get_lm()
+        assert held.guard is guard
+        await asyncio.to_thread(lambda: held("text"))
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(main())
+
+    assert caplog.records == []
+    assert capfd.readouterr().err == ""
+    assert guard.calls == 1
+    assert budget.spent == pytest.approx(0.01)
+
+
+def test_a_call_on_the_loops_own_thread_raises_at_once() -> None:
+    engine = FakeAsyncEngine()
+    errors: list[RuntimeError] = []
+
+    async def main() -> None:
+        lm = railed(claude_lm(engine))
+        try:
+            lm("text")
+        except RuntimeError as error:
+            errors.append(error)
+
+    # A daemon thread, so that a call that hangs fails this test and ends with it.
+    thread = threading.Thread(target=lambda: asyncio.run(main()), daemon=True)
+    thread.start()
+    thread.join(BOUND_S)
+
+    assert not thread.is_alive()
+    assert "own thread" in str(errors[0])
+    assert engine.requests == []
 
 
 def test_on_call_runs_after_each_call() -> None:
@@ -450,6 +678,87 @@ def test_on_call_runs_after_each_call() -> None:
     asyncio.run(main())
 
     assert seen == [(1, 0, loop_thread[0]), (2, 0, loop_thread[0])]
+
+
+def test_on_call_runs_after_each_call_that_failed() -> None:
+    seen: list[tuple[int, int, bool, int]] = []
+    loop_thread: list[int] = []
+
+    def on_call(guard: RailGuard) -> None:
+        seen.append(
+            (guard.calls, guard.failed, guard.fatal is not None, threading.get_ident())
+        )
+
+    async def main() -> None:
+        loop_thread.append(threading.get_ident())
+        guard = RailGuard(on_call=on_call)
+        failing = railed(
+            claude_lm(FakeAsyncEngine(raises=RuntimeError("boom"))), guard=guard
+        )
+        with pytest.raises(ProviderFailedError):
+            await asyncio.to_thread(lambda: failing("text"))
+        fatal = railed(claude_lm(FakeAsyncEngine(cost=None)), guard=guard)
+        with pytest.raises(CostUnknownError):
+            await asyncio.to_thread(lambda: fatal("text"))
+        with pytest.raises(CapReachedError):
+            await asyncio.to_thread(lambda: fatal("text"))
+
+    asyncio.run(main())
+
+    assert seen == [(1, 1, False, loop_thread[0]), (2, 1, True, loop_thread[0])]
+
+
+def broken_pipe(_guard: RailGuard) -> None:
+    raise BrokenPipeError
+
+
+def test_a_raising_on_call_keeps_the_answer(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    engine = FakeAsyncEngine()
+    guard = RailGuard(on_call=broken_pipe)
+    budget = Budget(1.0)
+
+    async def main() -> list[Any]:
+        lm = railed(claude_lm(engine), budget, guard=guard)
+        return await asyncio.to_thread(lambda: lm("text"))
+
+    with caplog.at_level(logging.ERROR, logger="ijob_ai.llm.railed"):
+        outputs = asyncio.run(main())
+
+    assert outputs
+    assert guard.calls == 1
+    assert guard.failed == 0
+    assert budget.spent > 0
+    assert any(
+        record.exc_info is not None and record.exc_info[0] is BrokenPipeError
+        for record in caplog.records
+    )
+
+
+def test_a_raising_on_call_keeps_the_failure_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    engine = FakeAsyncEngine(raises=RuntimeError("boom"))
+    guard = RailGuard(on_call=broken_pipe)
+
+    async def main() -> None:
+        lm = railed(claude_lm(engine), guard=guard)
+        await asyncio.to_thread(lambda: lm("text"))
+
+    with (
+        caplog.at_level(logging.ERROR, logger="ijob_ai.llm.railed"),
+        pytest.raises(ProviderFailedError, match="boom"),
+    ):
+        asyncio.run(main())
+
+    assert guard.calls == 1
+    assert guard.failed == 1
+    assert guard.first_error is not None
+    assert any(
+        record.exc_info is not None and record.exc_info[0] is BrokenPipeError
+        for record in caplog.records
+    )
 
 
 def test_messages_call_gives_no_warning() -> None:

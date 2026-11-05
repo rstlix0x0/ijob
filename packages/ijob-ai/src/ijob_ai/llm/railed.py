@@ -8,6 +8,7 @@ about to be used.
 """
 
 import asyncio
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, override
 
@@ -22,10 +23,12 @@ from ijob_ai.errors import (
 )
 from ijob_ai.llm.budget import Budget
 from ijob_ai.llm.call import call_span, meter_from_history, translate_failure
-from ijob_ai.llm.meter import open_meter
+from ijob_ai.llm.meter import CallMeter, open_meter
 from ijob_ai.llm.reference import Provider, parse_model_ref
 from ijob_ai.llm.settings import Task
 from ijob_ai.tracing.setup import OperationTrace
+
+logger = logging.getLogger(__name__)
 
 
 class RailGuard:
@@ -43,14 +46,16 @@ class RailGuard:
         fatal: The `CostUnknownError` or `ProviderUnavailableError` that ended
             the run, or None.
         on_call: Called with the guard on the loop after each call that was let
-            through, or None.
+            through, whether it succeeded or failed, or None. An error it raises
+            is logged and dropped, so it never changes a call's result or count.
     """
 
     def __init__(self, *, on_call: Callable[["RailGuard"], None] | None = None) -> None:
         """Create a guard with nothing counted and no stop requested.
 
         Args:
-            on_call: Callback to run after each call that was let through.
+            on_call: Callback to run after each call that was let through. It
+                is progress only: an error it raises is logged and dropped.
         """
         self._stopped = False
         self.calls = 0
@@ -64,7 +69,8 @@ class RailGuard:
     def stopped(self) -> bool:
         """Whether later calls are refused.
 
-        It says nothing about why, so a run's status never reads it.
+        It says nothing about why: a fatal call sets it, a direct `stop` sets it,
+        and whoever runs the rails sets it when the run ends.
         """
         return self._stopped
 
@@ -92,7 +98,9 @@ class RailedLM(dspy.BaseLM):  # type: ignore[misc]  # dspy exports it untyped
 
     The call is made from the optimizer's thread and runs as a coroutine on the
     given loop, on a copy of the wrapped LM, so history is never shared. Calls
-    are not retried. The rail reports the wrapped LM's capabilities
+    are not retried, whatever `num_retries` the wrapped LM was built with, since a
+    retry would reach the provider without being counted or charged. The rail
+    reports the wrapped LM's capabilities
     (`supported_params` and the `supports_*` flags), so an adapter builds the
     same request as it does for the wrapped LM.
     """
@@ -145,6 +153,11 @@ class RailedLM(dspy.BaseLM):  # type: ignore[misc]  # dspy exports it untyped
         self._guard = guard
 
     @property
+    def guard(self) -> RailGuard:
+        """The guard this rail counts against."""
+        return self._guard
+
+    @property
     @override
     def supported_params(self) -> set[str]:
         """The request parameters the wrapped LM accepts."""
@@ -178,7 +191,9 @@ class RailedLM(dspy.BaseLM):  # type: ignore[misc]  # dspy exports it untyped
     ) -> list[Any]:
         """Run one call on the loop and wait for its outputs.
 
-        Call it from a thread other than the loop's.
+        Call it from a thread other than the loop's: the loop cannot run the call
+        while its own thread waits for it, so a call made there raises
+        `RuntimeError` at once.
 
         Args:
             prompt: The prompt, when the call is made in that shape.
@@ -191,12 +206,13 @@ class RailedLM(dspy.BaseLM):  # type: ignore[misc]  # dspy exports it untyped
         Raises:
             CapReachedError: The guard is stopped or a budget has no room;
                 nothing was called or charged.
-            CostUnknownError: The call completed and its cost cannot be found.
-                The guard is stopped.
+            CostUnknownError: The call's cost cannot be found. The guard is
+                stopped.
             ProviderUnavailableError: The provider cannot be used. The guard is
                 stopped.
             ProviderFailedError: The provider failed or the call timed out.
         """
+        self._refuse_on_the_loops_thread()
         future = asyncio.run_coroutine_threadsafe(
             self._rail(prompt, messages, kwargs), self._loop
         )
@@ -224,6 +240,24 @@ class RailedLM(dspy.BaseLM):  # type: ignore[misc]  # dspy exports it untyped
             guard=self._guard,
         )
 
+    def __deepcopy__(self, _memo: dict[int, Any]) -> "RailedLM":
+        """Return a rail around a copy of the LM, on the same rails.
+
+        A copy must still count against the same guard and budgets and run on the
+        same loop under the same trace, so all of them are shared, not copied.
+        """
+        return self.copy()
+
+    def _refuse_on_the_loops_thread(self) -> None:
+        """Raise `RuntimeError` when the caller is running on the rail's loop."""
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if running is self._loop:
+            msg = "a railed call cannot be made on its event loop's own thread"
+            raise RuntimeError(msg)
+
     def _refuse_if_blocked(self) -> None:
         """Raise `CapReachedError`, spending nothing, when no call may start."""
         if self._guard.stopped:
@@ -246,7 +280,11 @@ class RailedLM(dspy.BaseLM):  # type: ignore[misc]  # dspy exports it untyped
             return await self._attempt(prompt, messages, kwargs)
         finally:
             if guard.on_call is not None:
-                guard.on_call(guard)
+                try:
+                    guard.on_call(guard)
+                except Exception:
+                    # An isolation point: progress must never change a result.
+                    logger.exception("on_call raised; the call's result is kept")
 
     async def _attempt(
         self,
@@ -255,7 +293,7 @@ class RailedLM(dspy.BaseLM):  # type: ignore[misc]  # dspy exports it untyped
         kwargs: Mapping[str, Any],
     ) -> list[Any]:
         """Call a copy of the LM, then meter, charge and count the call."""
-        attempt = self._lm.copy()
+        attempt = self._lm.copy(num_retries=0)
         failure: Exception | None = None
         outputs: list[Any] = []
         with (
@@ -279,17 +317,15 @@ class RailedLM(dspy.BaseLM):  # type: ignore[misc]  # dspy exports it untyped
                             outputs = await attempt.acall(messages=messages, **kwargs)
                     else:
                         outputs = await attempt.acall(prompt, **kwargs)
+            except asyncio.CancelledError:
+                # The provider bills what the meter already shows, cancelled or not.
+                self._settle(meter, attempt.history)
+                raise
             except Exception as error:  # noqa: BLE001  # every failure is counted and translated
                 failure = error
-            meter_from_history(self._provider, meter, attempt.history)
-            if meter.completed:
-                if meter.cost_usd is None:
-                    unknown = CostUnknownError(str(self._lm.model))
-                    self._guard.fatal = unknown
-                    self._guard.stop()
-                    raise unknown
-                for budget in self._budgets:
-                    budget.charge(meter.cost_usd)
+            unknown = self._settle(meter, attempt.history)
+            if unknown is not None:
+                raise unknown
             if failure is not None:
                 translated = self._count_failure(failure)
                 if translated is failure or translated is failure.__cause__:
@@ -297,14 +333,38 @@ class RailedLM(dspy.BaseLM):  # type: ignore[misc]  # dspy exports it untyped
                 raise translated from failure
         return outputs
 
+    def _settle(
+        self, meter: CallMeter, history: list[Mapping[str, Any]]
+    ) -> CostUnknownError | None:
+        """Charge what the meter shows, stopping the run if a cost cannot be found.
+
+        Args:
+            meter: The call's meter.
+            history: The history of the LM copy the call ran on.
+
+        Returns:
+            The error to raise when the call completed with no known cost, or None.
+        """
+        meter_from_history(self._provider, meter, history)
+        if not meter.completed:
+            return None
+        if meter.cost_usd is None:
+            unknown = CostUnknownError(str(self._lm.model))
+            self._guard.fatal = unknown
+            self._guard.stop()
+            return unknown
+        for budget in self._budgets:
+            budget.charge(meter.cost_usd)
+        return None
+
     def _count_failure(self, failure: Exception) -> LlmError:
-        """Count a failed call, stopping the run when the provider cannot be used."""
+        """Count a failed call, stopping the run on an error that must end it."""
         translated = (
             failure
             if isinstance(failure, LlmError)
             else translate_failure(failure, self._timeout_s, self._task)
         )
-        if isinstance(translated, ProviderUnavailableError):
+        if isinstance(translated, CostUnknownError | ProviderUnavailableError):
             self._guard.fatal = translated
             self._guard.stop()
             return translated

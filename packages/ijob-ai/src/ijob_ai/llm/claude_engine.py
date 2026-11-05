@@ -33,7 +33,10 @@ from ijob_ai.errors import (
 from ijob_ai.llm.meter import CallMeter, current_meter
 from ijob_ai.llm.reference import ModelRef
 
-_ONE_TEXT_USER_MESSAGE = "claude-sdk engine takes one text user message"
+_ALTERNATING_TEXT_TURNS = (
+    "claude-sdk engine takes text turns that alternate user and assistant "
+    "and end with a user turn"
+)
 _EXAMPLES_HEADER = "Worked examples, as JSON turns:"
 _ANSWER_HEADER = "Now answer this one:"
 _ASYNC_ONLY = "claude-sdk runs async only"
@@ -120,9 +123,9 @@ def request_prompt(request: Request) -> tuple[str, str]:
     messages = request.messages
     for index, message in enumerate(messages):
         if message.role != ("user" if index % 2 == 0 else "assistant"):
-            raise ProviderFailedError(_ONE_TEXT_USER_MESSAGE)
+            raise ProviderFailedError(_ALTERNATING_TEXT_TURNS)
     if len(messages) % 2 == 0:
-        raise ProviderFailedError(_ONE_TEXT_USER_MESSAGE)
+        raise ProviderFailedError(_ALTERNATING_TEXT_TURNS)
     system = request.system
     if system is None:
         system_text = ""
@@ -149,7 +152,7 @@ def _join_text(parts: tuple[object, ...]) -> str:
     texts: list[str] = []
     for part in parts:
         if not isinstance(part, TextPart):
-            raise ProviderFailedError(_ONE_TEXT_USER_MESSAGE)
+            raise ProviderFailedError(_ALTERNATING_TEXT_TURNS)
         texts.append(part.text)
     return "".join(texts)
 

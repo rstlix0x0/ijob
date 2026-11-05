@@ -380,6 +380,26 @@ def test_call_span_uses_the_trace_it_is_given(tmp_path: Path) -> None:
     assert span_named(exporter, "ijob tune")
 
 
+def test_call_span_prefers_the_given_trace_to_the_current_one(tmp_path: Path) -> None:
+    current_dir, given_dir = tmp_path / "current", tmp_path / "given"
+    current_dir.mkdir()
+    given_dir.mkdir()
+    current, current_exporter = make_tracing(current_dir)
+    given, given_exporter = make_tracing(given_dir)
+
+    with operation_trace(current, "search"):
+        open_call_span(OperationTrace(given, "tune"))
+    current.finish()
+    given.finish()
+
+    assert current_exporter.get_finished_spans() == ()
+    span = span_named(given_exporter, "chat m")
+    assert span.parent is not None
+    assert (
+        span.parent.span_id == span_named(given_exporter, "ijob tune").context.span_id
+    )
+
+
 def test_call_span_without_a_trace_opens_none() -> None:
     open_call_span(None)
 
