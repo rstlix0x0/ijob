@@ -139,24 +139,33 @@ def _check_content(instructions: str, demos_json: str, *, label: str) -> None:
 
 
 def _program(row: tuple[object, ...]) -> TunedProgram:
-    """Build a program from a row of `_SELECT_PROGRAMS`, or raise naming its id."""
+    """Build a program from a row of `_SELECT_PROGRAMS`, or raise naming its id.
+
+    Raises:
+        InvalidValueError: Naming the id, if a value of the row cannot be read or
+            its content is malformed.
+    """
     accepted = row[12]
     run = row[10]
-    return TunedProgram(
-        id=int(str(row[0])),
-        task=EvalTask(str(row[1])),
-        model=str(row[2]),
-        optimizer=str(row[3]),
-        base_version=str(row[4]),
-        set_id=int(str(row[5])),
-        bound_sha256=str(row[6]),
-        instructions=str(row[7]),
-        demos_json=str(row[8]),
-        version=str(row[9]),
-        tune_run_id=None if run is None else int(str(run)),
-        created_at=_from_text(str(row[11])),
-        accepted_at=None if accepted is None else _from_text(str(accepted)),
-    )
+    try:
+        return TunedProgram(
+            id=int(str(row[0])),
+            task=EvalTask(str(row[1])),
+            model=str(row[2]),
+            optimizer=str(row[3]),
+            base_version=str(row[4]),
+            set_id=int(str(row[5])),
+            bound_sha256=str(row[6]),
+            instructions=str(row[7]),
+            demos_json=str(row[8]),
+            version=str(row[9]),
+            tune_run_id=None if run is None else int(str(run)),
+            created_at=_from_text(str(row[11])),
+            accepted_at=None if accepted is None else _from_text(str(accepted)),
+        )
+    except ValueError as error:
+        msg = f"program {row[0]} has a value that cannot be read"
+        raise InvalidValueError("program", msg) from error
 
 
 class TuneRecords:

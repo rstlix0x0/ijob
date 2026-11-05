@@ -1630,6 +1630,40 @@ def test_saved_scores_keep_the_newest_for_one_profile(tmp_path: Path) -> None:
         assert store.saved_scores("none") == {}
 
 
+def test_saved_scores_with_a_version(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.import_seeds([(_A, "Alpha")])
+        store.record([_draft(_A, "1")], seen_at=_T1)
+        [posting] = store.postings(sources=[_A])
+        base = Score(score=10, reasons=("base",))
+        tuned = Score(score=90, reasons=("tuned",))
+        store.put_score(posting.id, "a", "p", "m", "scorer-1", base, made_at=_T1)
+        store.put_score(
+            posting.id, "b", "p", "m", "scorer-1+abcd1234", tuned, made_at=_T2
+        )
+
+        assert store.saved_scores("p", version="scorer-1+abcd1234") == {
+            posting.id: tuned
+        }
+        assert store.saved_scores("p", version="scorer-1") == {posting.id: base}
+        assert store.saved_scores("p", version="scorer-9") == {}
+
+
+def test_saved_scores_without_a_version_skip_programs(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "ijob.db") as store:
+        store.import_seeds([(_A, "Alpha")])
+        store.record([_draft(_A, "1")], seen_at=_T1)
+        [posting] = store.postings(sources=[_A])
+        base = Score(score=10, reasons=("base",))
+        tuned = Score(score=90, reasons=("tuned",))
+        store.put_score(posting.id, "a", "p", "m", "scorer-1", base, made_at=_T1)
+        store.put_score(
+            posting.id, "b", "p", "m", "scorer-1+abcd1234", tuned, made_at=_T2
+        )
+
+        assert store.saved_scores("p") == {posting.id: base}
+
+
 def test_two_connections_can_read_while_one_writes(tmp_path: Path) -> None:
     path = tmp_path / "ijob.db"
     with Store.open(path) as writer, Store.open(path) as reader:

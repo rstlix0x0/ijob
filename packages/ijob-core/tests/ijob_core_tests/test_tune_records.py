@@ -446,6 +446,30 @@ def test_malformed_program_names_its_id(
         assert store.tunes.accepted(EvalTask.JUDGE) is None
 
 
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [("created_at", "garbage"), ("accepted_at", "garbage")],
+)
+def test_an_unreadable_value_names_the_program_id(
+    tmp_path: Path, column: str, value: str
+) -> None:
+    with _store(tmp_path) as store:
+        program = _save(store, _set(store))
+        store.tunes.accept_program(program.id, accepted_at=_AT)
+        with closing(sqlite3.connect(tmp_path / "ijob.db")) as conn, conn:
+            if column == "created_at":
+                conn.execute("UPDATE programs SET created_at = ?", (value,))
+            else:
+                conn.execute("UPDATE programs SET accepted_at = ?", (value,))
+        pattern = f"program {program.id} "
+
+        with pytest.raises(InvalidValueError, match=pattern):
+            store.tunes.program(program.id)
+        with pytest.raises(InvalidValueError, match=pattern):
+            store.tunes.accepted(EvalTask.JUDGE)
+        assert store.tunes.clear_program(EvalTask.JUDGE)
+
+
 def test_a_malformed_program_is_not_saved(tmp_path: Path) -> None:
     with _store(tmp_path) as store:
         set_id = _set(store)

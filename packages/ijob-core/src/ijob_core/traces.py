@@ -3,8 +3,9 @@
 `TraceStore` owns a database file separate from the postings database. It
 opens the file and brings its schema up to date, records finished spans
 without duplicating one it already holds, lists traces newest first with the
-model calls and cost each made, reads one trace back as a tree of spans, prunes
-old traces to a size cap, and closes the file. It knows nothing of how spans are
+model calls and cost each made, reads one trace back as a tree of spans, reads
+every span in batches or those that began inside a time window, prunes old
+traces to a size cap, and closes the file. It knows nothing of how spans are
 produced: callers hand it plain `SpanRow` values.
 
 The schema version lives in `PRAGMA user_version`; opening a database applies
@@ -16,7 +17,7 @@ traces whole.
 
 import json
 import sqlite3
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import ExitStack, closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -368,6 +369,56 @@ class TraceStore:
         if not rows:
             raise UnknownTraceError(trace_id)
         return TraceTree(trace_id, _nest([_span_row(row) for row in rows]))
+
+    def span_batches(self, size: int) -> Iterator[list[SpanRow]]:
+        """Read every span, oldest start first, in batches of at most `size`.
+
+        Each batch is read when the iterator reaches it, so the store is never
+        held in memory whole. Spans recorded while the iterator runs may or may
+        not appear.
+
+        Args:
+            size: The most spans in one batch.
+
+        Yields:
+            Lists of spans ordered by start, then trace id, then span id.
+
+        Raises:
+            InvalidValueError: If `size` is below 1.
+        """
+        if size < 1:
+            raise InvalidValueError("size", "is below 1")
+        after: tuple[int, str, str] = (-1, "", "")
+        while True:
+            rows = self._conn.execute(
+                f"{_SELECT_SPANS} WHERE (start_ns, trace_id, span_id) > (?, ?, ?) "
+                "ORDER BY start_ns, trace_id, span_id LIMIT ?",
+                (*after, size),
+            ).fetchall()
+            if not rows:
+                return
+            batch = [_span_row(row) for row in rows]
+            yield batch
+            last = batch[-1]
+            after = (last.start_ns, last.trace_id, last.span_id)
+
+    def spans_between(self, start_ns: int, end_ns: int) -> list[SpanRow]:
+        """Read the spans that began inside a time window.
+
+        Args:
+            start_ns: The window's start, in nanoseconds since the Unix epoch.
+            end_ns: The window's end, inclusive.
+
+        Returns:
+            The spans whose start lies in the window, ordered by start, then
+            trace id, then span id.
+        """
+        rows = self._conn.execute(
+            f"{_SELECT_SPANS} WHERE start_ns BETWEEN ? AND ? "
+            "ORDER BY start_ns, trace_id, span_id",
+            (start_ns, end_ns),
+        ).fetchall()
+        return [_span_row(row) for row in rows]
 
     def prune(self, max_bytes: int) -> PruneReport:
         """Delete the oldest traces until the database fits `max_bytes`.

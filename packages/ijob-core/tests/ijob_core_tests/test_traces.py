@@ -358,3 +358,52 @@ def test_prune_removes_rootless_traces(tmp_path: Path) -> None:
     assert report.removed == 1
     assert survivors == {f"t{index:03d}" for index in range(5)}
     assert _scalar(path, "SELECT COUNT(*) FROM spans WHERE trace_id = 'orphan'") == 0
+
+
+def test_span_batches_read_all_rows_in_order(tmp_path: Path) -> None:
+    rows = [
+        _span(f"s{n}", trace_id=f"t{n % 3}", start_ns=_EPOCH_2026 + (7 - n) * _SECOND)
+        for n in range(7)
+    ]
+    with TraceStore.open(tmp_path / "traces.db") as store:
+        store.insert(rows)
+        batches = list(store.span_batches(3))
+    assert [len(batch) for batch in batches] == [3, 3, 1]
+    flat = [row for batch in batches for row in batch]
+    assert sorted(r.span_id for r in flat) == sorted(r.span_id for r in rows)
+    assert [r.start_ns for r in flat] == sorted(r.start_ns for r in rows)
+
+
+def test_span_batches_keep_rows_that_share_a_start_across_a_boundary(
+    tmp_path: Path,
+) -> None:
+    rows = [_span(f"s{n}", trace_id="t1", start_ns=_EPOCH_2026) for n in range(5)]
+    with TraceStore.open(tmp_path / "traces.db") as store:
+        store.insert(rows)
+        batches = list(store.span_batches(2))
+    assert [len(batch) for batch in batches] == [2, 2, 1]
+    flat = [row.span_id for batch in batches for row in batch]
+    assert flat == sorted(r.span_id for r in rows)
+
+
+def test_span_batches_of_an_empty_store_is_empty(tmp_path: Path) -> None:
+    with TraceStore.open(tmp_path / "traces.db") as store:
+        assert list(store.span_batches(5)) == []
+
+
+def test_span_batches_reject_a_size_below_one(tmp_path: Path) -> None:
+    with (
+        TraceStore.open(tmp_path / "traces.db") as store,
+        pytest.raises(InvalidValueError),
+    ):
+        list(store.span_batches(0))
+
+
+def test_spans_between_read_a_window(tmp_path: Path) -> None:
+    rows = [_span(f"s{n}", start_ns=_EPOCH_2026 + n * _SECOND) for n in range(6)]
+    with TraceStore.open(tmp_path / "traces.db") as store:
+        store.insert(rows)
+        found = store.spans_between(
+            _EPOCH_2026 + 2 * _SECOND, _EPOCH_2026 + 4 * _SECOND
+        )
+    assert [row.span_id for row in found] == ["s2", "s3", "s4"]

@@ -878,24 +878,36 @@ class Store:
             shown.setdefault(PostingId(posting_id), []).append(parse_source_ref(source))
         return shown
 
-    def saved_scores(self, profile_sha256: str) -> dict[PostingId, Score]:
+    def saved_scores(
+        self, profile_sha256: str, *, version: str | None = None
+    ) -> dict[PostingId, Score]:
         """Read the newest stored score of each posting against one profile.
 
-        Unlike `score`, this does not check the posting text, the model or the
-        task version, so a list can show what is known without reading any
-        description.
+        Unlike `score`, this does not check the posting text or the model, so a
+        list can show what is known without reading any description.
 
         Args:
             profile_sha256: The SHA-256 of the profile the scores were made from.
+            version: The task version whose scores to read. With `None`, the
+                scores of base versions, which have no `+`, so a tuned program's
+                scores never stand in for them.
 
         Returns:
             The newest score of every posting scored against that profile.
         """
-        rows = self._conn.execute(
-            "SELECT posting_id, score, reasons FROM scores "
-            "WHERE profile_sha256 = ? ORDER BY made_at",
-            (profile_sha256,),
-        ).fetchall()
+        if version is None:
+            rows = self._conn.execute(
+                "SELECT posting_id, score, reasons FROM scores "
+                "WHERE profile_sha256 = ? AND instr(task_version, '+') = 0 "
+                "ORDER BY made_at",
+                (profile_sha256,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT posting_id, score, reasons FROM scores "
+                "WHERE profile_sha256 = ? AND task_version = ? ORDER BY made_at",
+                (profile_sha256, version),
+            ).fetchall()
         return {
             PostingId(row[0]): Score(score=row[1], reasons=tuple(json.loads(row[2])))
             for row in rows
