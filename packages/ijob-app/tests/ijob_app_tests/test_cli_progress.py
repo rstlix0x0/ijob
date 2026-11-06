@@ -1,6 +1,7 @@
 import io
 from typing import override
 
+import pytest
 from ijob_app.cli_progress import ProgressLine, fetch_progress_text
 from ijob_app.service import FetchProgress
 
@@ -61,6 +62,62 @@ def test_closing_a_line_that_showed_nothing_writes_nothing() -> None:
     ProgressLine(stream).close()
 
     assert stream.getvalue() == ""
+
+
+def test_show_live_cuts_a_long_line_to_the_terminal_width_keeping_its_end() -> None:
+    stream = _Terminal()
+    text = "scorer gepa some/model: 112 calls, $0.10 spent"
+
+    ProgressLine(stream, columns=lambda: 20).show_live(text)
+
+    assert stream.getvalue() == "\r\N{HORIZONTAL ELLIPSIS}" + text[-18:] + "\x1b[K"
+    assert len(stream.getvalue().removeprefix("\r").removesuffix("\x1b[K")) == 19
+
+
+def test_show_live_keeps_a_line_that_fits() -> None:
+    stream = _Terminal()
+
+    ProgressLine(stream, columns=lambda: 20).show_live("x" * 19)
+
+    assert stream.getvalue() == "\r" + "x" * 19 + "\x1b[K"
+
+
+def test_show_live_writes_no_text_on_a_terminal_too_narrow_for_it() -> None:
+    stream = _Terminal()
+
+    ProgressLine(stream, columns=lambda: 1).show_live("reading")
+
+    assert stream.getvalue() == "\r\x1b[K"
+
+
+def test_show_live_reads_the_width_again_for_each_update() -> None:
+    stream = _Terminal()
+    widths = iter([10, 30])
+    line = ProgressLine(stream, columns=lambda: next(widths))
+
+    line.show_live("a" * 20)
+    line.show_live("b" * 20)
+
+    assert stream.getvalue().endswith("\r" + "b" * 20 + "\x1b[K")
+
+
+def test_show_does_not_cut_lines_when_not_a_terminal() -> None:
+    stream = io.StringIO()
+
+    ProgressLine(stream, columns=lambda: 5).show("a long update")
+
+    assert stream.getvalue() == "a long update\n"
+
+
+def test_width_falls_back_to_the_environment_without_a_terminal_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COLUMNS", "10")
+    stream = _Terminal()
+
+    ProgressLine(stream).show_live("a" * 20)
+
+    assert stream.getvalue() == "\r\N{HORIZONTAL ELLIPSIS}" + "a" * 8 + "\x1b[K"
 
 
 def test_fetch_text_says_how_far_it_got() -> None:
