@@ -7,6 +7,57 @@ adds worked examples. ijob then tests the result on postings the optimizer never
 This page has no results. It says what each command does and how to read what it prints. Any number
 here is a setting or a count that ijob uses as a rule, not something measured.
 
+## Why `judge` and `scorer`
+
+These are the two model tasks a search runs on each posting:
+
+```mermaid
+flowchart LR
+    P["postings that pass the filters"] --> J["judge: keep or reject by your rules<br/>search --judge"]
+    P --> S["scorer: a fit from 0 to 100 with your CV profile<br/>search --score"]
+    J --> W["what you see"]
+    S --> O["the order you see it in"]
+```
+
+Each verdict and score is saved, so a later search reuses it instead of calling again. Still, every
+new posting costs one call per task, so these two make most of the model calls ijob does.
+
+Their mistakes change what you see:
+
+| Mistake | What happens |
+|---|---|
+| `judge` rejects a good job | It drops off your list; only `--dropped` shows it |
+| `judge` keeps a bad job | Noise in your list |
+| `scorer` is far off | A good job sinks down the ranking |
+
+**Why measure them.** Without labels you can't tell a good model from a bad one. The `judge` and
+`scorer` suites compare each answer with your labels and give numbers: macro F1 and recall for the
+judge, NDCG and mean error for the scorer. See [evals.md](evals.md).
+
+**Why tune them.** Because the calls repeat on every new posting, the model you choose sets what
+search costs. A frontier model can cost many times more per call than a small one; `tune report`
+shows each model's rate per 100 postings. Tuning asks whether a small model with a prompt tuned on
+your labels can match the frontier baseline. If it can, search costs less with no loss.
+
+**Why only these two.** An optimizer needs many examples, each with an answer that can be checked.
+
+| Task | Runs | Answer can be checked against a label |
+|---|---|---|
+| `judge`, `scorer` | On each new posting | Yes: keep or reject, a score |
+| CV profile, rules parsing | When you change your CV or rules | Hard: there is no single right answer |
+| Source and explore agents | When you ask | Their own suites check them, but there are too few runs to tune on |
+
+The whole path, from labels to a cheaper search:
+
+```mermaid
+flowchart LR
+    L["eval label and eval review<br/>your labels"] --> SC["tune screen<br/>measure every model"]
+    SC --> R["tune run<br/>tune the chosen models on train and val"]
+    R --> H["held-out test<br/>postings tuning never saw"]
+    H --> A["tune accept<br/>hostile test"]
+    A --> U["search uses the small model<br/>and its tuned prompt"]
+```
+
 ## The ten steps
 
 ```text
