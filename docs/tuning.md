@@ -72,6 +72,65 @@ set with its own split.
 
 Only train and val are used to choose a model or to tune. Held-out postings are used once, to test.
 
+## How `tune run` works
+
+The grid is every model in `[tune].models`, times the three optimizers, times the two tasks. Each
+combination is its own run and makes at most one program. Two models make 12 combinations:
+
+```text
+model A ─┬─ judge  ─┬─ gepa       → program
+         │          ├─ bootstrap  → program
+         │          └─ mipro      → program
+         └─ scorer ─┬─ gepa       → program
+                    ├─ bootstrap  → program
+                    └─ mipro      → program
+model B ─┴─ the same 6
+```
+
+One run of `tune run` goes like this:
+
+```text
+1. plan        no call, no spend
+               skip each combination a complete run already covers
+               refuse what can't run: no full screen run, no frozen split, no [models].tuner
+               show the estimate and ask
+2. per combination, one at a time
+   a. examples   train and val postings only; the label is keep or reject, or the score
+   b. baseline   the untuned model's val score, read from its screen run; no call
+   c. tune       the optimizer calls the model, and the tuner for GEPA and MIPROv2,
+                 every call under the run cap and the ledger
+   d. save       a changed prompt is saved as a program, untrusted-data notice put back;
+                 a prompt left as it was ends as `no change` and saves nothing
+   e. test       the program runs the normal suite on the held-out postings
+3. table       every combination, then exit 0, 1 or 2
+```
+
+A saved program does not have to beat the baseline. `tune report` shows both numbers and you
+decide.
+
+### What a program holds
+
+```text
+program (a row in ~/.ijob/ijob.db)
+├─ instructions   the task instruction, rewritten by GEPA or MIPROv2
+├─ demos          worked examples, chosen by bootstrap or MIPROv2
+├─ model          the model it was tuned for
+└─ bound to       your rules for judge, your CV profile for scorer, and the base prompt version
+```
+
+A program is only a candidate until `tune accept` passes it. To use one, set the task's model in
+`[models]` to the program's model, since `tune accept` refuses any other, then accept it:
+
+```text
+tune run → program, status tested
+set [models].judge or [models].scorer to the program's model
+tune accept ID → hostile test passes → status accepted → search uses it
+```
+
+To read a program's prompt, run `ijob traces export` and open a span of its held-out test in
+Phoenix. Its `ijob.prompt` holds the instructions and demos as sent, and its `ijob.task_version` ends
+in `+` and the program's hash. See [observability.md](observability.md).
+
 ## The three optimizers
 
 | Optimizer | `--optimizer` | What it does |
