@@ -24,7 +24,7 @@ from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Key, Resize
 from textual.message import Message
-from textual.widgets import DataTable, Input, Static
+from textual.widgets import DataTable, Input, Markdown, Static
 
 from ijob_app.config import FilterFlags
 from ijob_app.job_search import JobList, JobRow, ScoreState
@@ -41,8 +41,11 @@ from ijob_app.view import (
     TEXT,
     age_text,
     clean,
-    posting_body,
+    clean_markdown,
+    posting_head,
+    posting_link,
     score_text,
+    unavailable_text,
     where_text,
 )
 
@@ -225,6 +228,7 @@ class JobsPane(Vertical):
         self._selected: PostingId | None = None
         self._details: dict[PostingId, PostingDetail] = {}
         self._title_width = 0
+        self._drawn: tuple[Text, str | None, Text] | None = None
 
     @override
     def compose(self) -> ComposeResult:
@@ -242,7 +246,9 @@ class JobsPane(Vertical):
                 yield DataTable(id="jobs-table", cursor_type="row", show_cursor=True)
             with VerticalScroll(id="details-box", classes="box") as details_box:
                 details_box.border_title = "Details"
-                yield Static(id="job-details", markup=False)
+                yield Static(id="job-head", markup=False)
+                yield Markdown(id="job-text", open_links=False)
+                yield Static(id="job-link", markup=False)
         yield Static(id="jobs-status", markup=False)
 
     def on_mount(self) -> None:
@@ -419,11 +425,14 @@ class JobsPane(Vertical):
                 self._fetch_description(posting_id)
 
     def _draw_details(self) -> None:
-        """Draw the selected job."""
-        widget = self.query_one("#job-details", Static)
+        """Draw the selected job, as text the mouse can select and copy.
+
+        Each part is redrawn only when it changes, so a selection survives the
+        redraws that fetching and scoring cause.
+        """
         selected = self._selected
         if selected is None or selected not in self._details:
-            widget.update(Text("Nothing selected", style=MUTED))
+            self._show_details(Text("Nothing selected", style=MUTED), None, Text())
             return
         row = self._host.jobs.rows.get(selected)
         detail = self._details[selected]
@@ -432,15 +441,32 @@ class JobsPane(Vertical):
             note = "Scoring. Everything else still works."
         elif row is not None and row.state is ScoreState.MISSED:
             note = f"No score: {row.missed}"
-        widget.update(
-            posting_body(
-                detail,
-                self._host.now(),
-                score=None if row is None else row.score,
-                verdict=None if row is None else row.verdict,
-                note=note,
-            )
+        head = posting_head(
+            detail,
+            self._host.now(),
+            score=None if row is None else row.score,
+            verdict=None if row is None else row.verdict,
+            note=note,
         )
+        description = None
+        if detail.description is None:
+            head = Text("\n").join([head, unavailable_text(detail)])
+        else:
+            description = clean_markdown(detail.description)
+        self._show_details(head, description, posting_link(detail))
+
+    def _show_details(self, head: Text, description: str | None, link: Text) -> None:
+        """Put a job's parts on screen, touching only the ones that changed."""
+        drawn = self._drawn
+        if drawn is None or drawn[0] != head:
+            self.query_one("#job-head", Static).update(head)
+        if drawn is None or drawn[1] != description:
+            text = self.query_one("#job-text", Markdown)
+            text.display = description is not None
+            text.update(description or "")
+        if drawn is None or drawn[2] != link:
+            self.query_one("#job-link", Static).update(link)
+        self._drawn = (head, description, link)
 
     @work(exclusive=True, group="description")
     async def _fetch_description(self, posting_id: PostingId) -> None:

@@ -623,6 +623,37 @@ def posting_body(
     Returns:
         The lines, without a box.
     """
+    lines: list[RenderableType] = [
+        posting_head(detail, now, score=score, verdict=verdict, note=note)
+    ]
+    if detail.description is not None:
+        lines.append(Markdown(clean_markdown(detail.description), hyperlinks=False))
+    else:
+        lines.append(unavailable_text(detail))
+    lines += [Text(), posting_link(detail)]
+    return Group(*lines)
+
+
+def posting_head(
+    detail: PostingDetail,
+    now: datetime,
+    *,
+    score: Score | None,
+    verdict: Verdict | None = None,
+    note: str = "",
+) -> Text:
+    """Draw the top of one job: its facts, its score and reasons, its verdict.
+
+    Args:
+        detail: The posting with its sources, label and description.
+        now: The current time, for the job's age.
+        score: Its score, if it has one.
+        verdict: What a model made of it against the user's rules, if anything.
+        note: A line about its score when there is none yet.
+
+    Returns:
+        The lines down to the heading over the posting's text.
+    """
     posting = detail.posting
     salary = ", ".join(money_text(money) for money in posting.salaries)
     facts = "  ·  ".join(
@@ -633,7 +664,7 @@ def posting_body(
             f"posted {age_text(posting, now)} ago",
         ]
     )
-    lines: list[RenderableType] = [
+    lines = [
         Text(clean(posting.title), style=f"bold {TEXT}"),
         Text(facts, style=MUTED),
     ]
@@ -657,13 +688,18 @@ def posting_body(
             ),
         ]
     lines += [Text(), Text("POSTING", style=f"bold {MUTED}")]
-    if detail.description is not None:
-        lines.append(_body_text(detail.description))
-    else:
-        reason = detail.unavailable_reason or "no description published"
-        lines.append(Text(f"Description unavailable: {clean(reason)}", style=MUTED))
-    lines += [Text(), Text(clean(posting.url), style=SKY, overflow="fold")]
-    return Group(*lines)
+    return Text("\n").join(lines)
+
+
+def unavailable_text(detail: PostingDetail) -> Text:
+    """Say why a job shows no description."""
+    reason = detail.unavailable_reason or "no description published"
+    return Text(f"Description unavailable: {clean(reason)}", style=MUTED)
+
+
+def posting_link(detail: PostingDetail) -> Text:
+    """Draw a job's link, folded rather than cut when it is long."""
+    return Text(clean(detail.posting.url), style=SKY, overflow="fold")
 
 
 def _full_reason(text: str) -> Text:
@@ -682,18 +718,17 @@ def _wide_score(score: Score) -> Text:
     return line
 
 
-def _body_text(text: str) -> Markdown:
-    """Draw a description, which is Markdown, with none of its control characters.
+def clean_markdown(text: str) -> str:
+    """Strip a description, which is Markdown, of its control characters.
 
-    Its links do not become terminal hyperlinks, since the text comes from a
-    third party.
+    Callers draw it with links that do not become terminal hyperlinks, since the
+    text comes from a third party.
     """
-    kept = "".join(
+    return "".join(
         char
         for char in text
         if char == "\n" or unicodedata.category(char) not in _CONTROL_CATEGORIES
     )
-    return Markdown(kept, hyperlinks=False)
 
 
 def sources_table(

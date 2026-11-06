@@ -88,5 +88,8 @@ Button {{
 Button:hover {{ background: {BORDER}; }}
 Button:focus {{ background: {AMBER}; color: {GROUND}; text-style: bold; }}
 
+#job-text {{ padding: 0; margin: 0; background: {GROUND}; color: {TEXT}; }}
+#job-link {{ margin-top: 1; }}
+
 ToastRack {{ margin-bottom: 2; }}
 """

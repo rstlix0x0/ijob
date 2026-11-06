@@ -307,6 +307,39 @@ def test_selecting_a_job_shows_its_details(home: IjobHome) -> None:
     _run(home, steps)
 
 
+def test_dragging_over_the_details_copies_just_that_text(
+    home: IjobHome, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    copied: list[str] = []
+
+    def keep(_app: IjobApp, text: str) -> None:
+        copied.append(text)
+
+    monkeypatch.setattr(IjobApp, "copy_to_clipboard", keep)
+
+    async def steps(app: IjobApp, pilot: Pilot[None], _quiet: _Quiet) -> None:
+        await pilot.press("slash", *"nurse", "enter")
+        await _settle(app, pilot)
+        selected = app.query_one(JobsPane)._selected
+        assert selected is not None
+        url = app.jobs.rows[selected].posting.url
+        link = app.query_one("#job-link", Static)
+        text = app.query_one("#job-text")
+
+        await pilot.mouse_down(link, offset=(0, 0))
+        await pilot.hover(link, offset=(len(url), 0))
+        await pilot.mouse_up(link, offset=(len(url), 0))
+        app.query_one(JobsPane).refresh_details()
+        await pilot.pause()
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert copied == [url]
+        assert text.display
+
+    _run(home, steps)
+
+
 def test_g_scores_the_list_and_sorts_it_best_first(home: IjobHome) -> None:
     async def steps(app: IjobApp, pilot: Pilot[None], quiet: _Quiet) -> None:
         await pilot.press("g")
